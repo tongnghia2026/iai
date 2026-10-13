@@ -1,0 +1,764 @@
+//! Manual perf probe for the Develop live-preview hot path (scene sessions).
+//!
+//! Times each CPU stage `build_develop_gpu_preview` can run in a frame, on a
+//! real RAW file, at two viewport scenarios (fit view / 100% zoom crop) — so
+//! perf work targets the stage that actually dominates instead of a guess.
+//!
+//! Not part of CI (`#[ignore]`, needs a local RAW + release codegen). Run:
+//!
+//! ```text
+//! cargo test --release perf_develop -- --ignored --nocapture
+//! set IAI_PERF_RAW=D:\path\to\file.cr2   (optional override)
+//! ```
+
+use iai::core::develop::{self, fast_preview_downsample, DevelopSettings, TONE_DOWNSAMPLE};
+use iai::core::develop_scene::{self, SceneSource};
+use iai::core::layer::{Layer, LayerStack};
+use iai::formats::{raw::RawImporter, Importer};
+use iai::gpu::compositor::{
+    ColorProxies, CompositorState, DevelopDetailGpu, DevelopGpuPreview, RegionLumaProxy,
+};
+use std::sync::Arc;
+use std::time::Instant;
+
+const EXPENSIVE_SAMPLES: usize = 15;
+const FRAME_SAMPLES: usize = 30;
+
+/// One warmup plus `iters` measured runs; report best, mean, and p95.
+fn time<T>(label: &str, iters: usize, mut f: impl FnMut() -> T) -> T {
+    let mut out = f(); // warmup (page-in, rayon pool spin-up)
+    let mut best = f64::INFINITY;
+    let mut total = 0.0;
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        out = f();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        best = best.min(ms);
+        total += ms;
+        samples.push(ms);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95_index = ((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
+    eprintln!(
+        "{label:<44} best {best:8.2} ms   mean {:8.2} ms   p95 {:8.2} ms",
+        total / iters as f64,
+        samples[p95_index],
+    );
+    out
+}
+
+fn perf_raw_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("IAI_PERF_RAW") {
+        return Some(p.into());
+    }
+    let default = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("anh-mau/IMG_5344.CR2");
+    default.exists().then_some(default)
+}
+
+/// Settings shaped like the user's complaint: several groups engaged at once
+/// (WB + Exposure + tone-eq zones + colour mixer), so every per-frame stage
+/// of the preview is live.
+fn multi_group_settings() -> DevelopSettings {
+    let mut s = DevelopSettings {
+        temperature: 12.0,
+        exposure: -20.0,
+        contrast: 25.0,
+        highlights: -40.0,
+        shadows: 55.0,
+        ..DevelopSettings::default()
+    };
+    s.mixer_saturation[1] = 30.0;
+    s.mixer_hue[4] = -20.0;
+    s
+}
+
+/// Hardware-local Phase-6 frame probe. A 640×360 scene is magnified 3× into a
+/// 1920×1080 target, so every measured frame executes the full Develop scene
+/// shader over 2.07 M fragments without requiring a large RAW fixture merely
+/// to generate the same fit-view fragment load.
+#[test]
+#[ignore = "manual GPU p95 probe; hardware dependent"]
+fn perf_headless_develop_slider_frames() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("perf_headless_develop_slider_frames: no GPU adapter - skipping");
+        return;
+    };
+    let (source_w, source_h) = (640, 360);
+    let (viewport_w, viewport_h) = (1920, 1080);
+    let mut scene = SceneSource::new(source_w, source_h);
+    for y in 0..source_h {
+        for x in 0..source_w {
+            let fx = x as f32 / (source_w - 1) as f32;
+            let fy = y as f32 / (source_h - 1) as f32;
+            let input = [fx * 1.35, fy * 0.95, (1.0 - fx) * (0.45 + fy)];
+            scene.set_rgb(x, y, scene.color_pipeline.working.from_linear_srgb(input));
+        }
+    }
+    let neutral = develop_scene::render_default_look(&scene);
+    let neutral8 = neutral.iter().map(|v| (v >> 8) as u8).collect();
+    let mut stack = LayerStack::new(source_w, source_h);
+    stack.layers[0] = Layer::from_rgba(0, "Background", neutral8, source_w, source_h);
+    let scene = Arc::new(scene);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    let mut compositor = CompositorState::new(&device, viewport_w, viewport_h, max_texture);
+
+    let mut samples = Vec::with_capacity(FRAME_SAMPLES);
+    for frame in 0..=FRAME_SAMPLES {
+        let mut settings = multi_group_settings();
+        settings.saturation = 18.0 + (frame % 11) as f32;
+        settings.mixer_saturation[0] = 12.0 + (frame % 7) as f32;
+        compositor.develop_preview = Some(DevelopGpuPreview {
+            layer_id: 0,
+            settings,
+            region_luma: None,
+            color: None,
+            scene: Some(scene.clone()),
+            detail: None,
+        });
+        let started = Instant::now();
+        compositor.composite_layers(&device, &queue, &stack, 0.0, 0.0, 3.0, None, false, false);
+        device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        if frame > 0 {
+            samples.push(started.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1)];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    eprintln!(
+        "headless Develop 1920x1080: best {:.2} ms mean {mean:.2} ms p95 {p95:.2} ms",
+        samples[0]
+    );
+    assert!(p95 < 50.0, "Develop slider-to-frame p95 {p95:.2} ms");
+}
+
+/// End-to-end cost of the native-resolution Detail path added for zoomed-in
+/// WYSIWYG preview. Includes host upload, tiled compute and readback because all
+/// three currently sit on the interactive frame boundary.
+#[test]
+#[ignore = "manual native GPU Detail p95 probe; hardware dependent"]
+fn perf_headless_gpu_detail_native_frames() {
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("perf_headless_gpu_detail_native_frames: no GPU adapter - skipping");
+        return;
+    };
+    let (w, h) = (1920u32, 1080u32);
+    let mut rgb = vec![0.0f32; (3 * w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let fx = x as f32 / (w - 1) as f32;
+            let fy = y as f32 / (h - 1) as f32;
+            let texture = 0.018 * (x as f32 * 0.31).sin() + 0.012 * (y as f32 * 0.27).cos();
+            rgb[3 * i] = (0.12 + 0.72 * fx + texture).max(0.0);
+            rgb[3 * i + 1] = (0.10 + 0.61 * fy - texture * 0.4).max(0.0);
+            rgb[3 * i + 2] = (0.08 + 0.48 * (1.0 - fx) + texture * 0.7).max(0.0);
+        }
+    }
+    let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(
+        &iai::core::develop::DevelopSettings {
+            sharpening: 60.0,
+            noise_reduction: 25.0,
+            color_noise_reduction: 35.0,
+            ..Default::default()
+        },
+    );
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let run = || {
+        iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+            &runtime,
+            &device,
+            &queue,
+            &rgb,
+            w,
+            h,
+            &params,
+            true,
+            [0.272_229, 0.674_082, 0.053_689],
+        )
+    };
+    std::hint::black_box(run());
+    let mut samples = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let started = Instant::now();
+        std::hint::black_box(run());
+        samples.push(started.elapsed().as_secs_f64() * 1e3);
+    }
+    samples.sort_by(f64::total_cmp);
+    let p95 = samples[((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1)];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    eprintln!(
+        "native GPU Detail 1920x1080: best {:.2} ms mean {mean:.2} ms p95 {p95:.2} ms",
+        samples[0]
+    );
+    assert!(p95 < 100.0, "native GPU Detail p95 {p95:.2} ms");
+}
+
+fn probe_viewport(
+    scene: &SceneSource,
+    settings: &DevelopSettings,
+    label: &str,
+    ox: u32,
+    oy: u32,
+    rw: u32,
+    rh: u32,
+) {
+    let s = fast_preview_downsample(rw, rh);
+    eprintln!("\n-- {label}: region {rw}x{rh} @({ox},{oy}), downsample {s} --");
+    let tone = develop_scene::build_scene_tone(settings);
+    let (base, pw, ph) = time(
+        "  build_scene_color_base_box  (viewport chg)",
+        EXPENSIVE_SAMPLES,
+        || develop_scene::build_scene_color_base_box(scene, ox, oy, rw, rh, s),
+    );
+    eprintln!("     proxy {pw}x{ph} = {} texels", pw * ph);
+    let region = time(
+        "  tone_lowpass_scene_region   (per frame)",
+        FRAME_SAMPLES,
+        || develop_scene::tone_lowpass_scene_region(&base, pw, ph, &tone, s),
+    );
+    time(
+        "  apply_color_to_region       (per frame)",
+        FRAME_SAMPLES,
+        || develop::apply_color_to_region(&region, settings, pw, ph),
+    );
+}
+
+/// Times every stage `begin_develop_preview` runs on the MAIN thread when a
+/// Develop session opens (D0/A3): tiles clone, scene linearization (identity
+/// sessions), histogram proxy build, first histogram re-bin.
+#[test]
+#[ignore = "manual perf probe; needs a local RAW and --release"]
+fn perf_begin_develop() {
+    let Some(path) = perf_raw_path() else {
+        eprintln!("perf_begin_develop: no RAW found (set IAI_PERF_RAW) - skipping");
+        return;
+    };
+    eprintln!("RAW: {}", path.display());
+
+    let t = Instant::now();
+    let canvas = RawImporter.import(&path).expect("RAW decode failed");
+    eprintln!(
+        "decode+default-look {:>7.0} ms   ({}x{})",
+        t.elapsed().as_secs_f64() * 1e3,
+        canvas.width,
+        canvas.height
+    );
+    let scene = canvas.develop_source.clone().expect("no scene master");
+    let tiles = &canvas.layer_stack.layers[0].tiles;
+    eprintln!("tiles: {} entries", tiles.tiles.len());
+
+    eprintln!("\n-- RAW session (scene = Arc clone) --");
+    time("  TileMap.clone (shallow Arc)", 5, || tiles.clone());
+    let hist_proxy = time("  build_scene_histogram_proxy", 3, || {
+        develop_scene::build_scene_histogram_proxy(&scene)
+    });
+    time("  histogram_rgbl_scene (first re-bin)", 5, || {
+        develop_scene::histogram_rgbl_scene(
+            &hist_proxy,
+            &DevelopSettings::default(),
+            develop_scene::BaseLook::Raw,
+        )
+    });
+
+    eprintln!("\n-- Identity session (JPEG/PNG Develop on same-size tiles) --");
+    let id_scene = time("  SceneSource::from_display_tiles", 3, || {
+        SceneSource::from_display_tiles(tiles)
+    });
+    time("  build_scene_histogram_proxy (identity)", 3, || {
+        develop_scene::build_scene_histogram_proxy(&id_scene)
+    });
+
+    eprintln!("\n-- Legacy session (display-domain fallback) --");
+    time("  build_histogram_proxy (legacy)", 3, || {
+        develop::build_histogram_proxy(tiles)
+    });
+}
+
+#[test]
+#[ignore = "manual perf probe; needs a local RAW and --release"]
+fn perf_develop_stages() {
+    let Some(path) = perf_raw_path() else {
+        eprintln!("perf_develop_stages: no RAW found (set IAI_PERF_RAW) - skipping");
+        return;
+    };
+    eprintln!("RAW: {}", path.display());
+
+    let t = Instant::now();
+    let canvas = RawImporter.import(&path).expect("RAW decode failed");
+    eprintln!(
+        "decode+default-look {:>7.0} ms   ({}x{})",
+        t.elapsed().as_secs_f64() * 1e3,
+        canvas.width,
+        canvas.height
+    );
+    let scene = canvas.develop_source.clone().expect("no scene master");
+    let settings = multi_group_settings();
+
+    eprintln!("\n-- per-session (once per Develop open) --");
+    let hist_proxy = time("  build_scene_histogram_proxy", EXPENSIVE_SAMPLES, || {
+        develop_scene::build_scene_histogram_proxy(&scene)
+    });
+    let (rbase, rpw, rph) = time("  build_scene_region_base", EXPENSIVE_SAMPLES, || {
+        develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE)
+    });
+    eprintln!("     E-plane {rpw}x{rph} = {} texels", rpw * rph);
+
+    eprintln!("\n-- per-frame (every slider tick) --");
+    let tone = time("  build_scene_tone            (x2: hist+prev)", 100, || {
+        develop_scene::build_scene_tone(&settings)
+    });
+    time(
+        "  histogram_rgbl_scene        (per tick)",
+        FRAME_SAMPLES,
+        || {
+            develop_scene::histogram_rgbl_scene(
+                &hist_proxy,
+                &settings,
+                develop_scene::BaseLook::Raw,
+            )
+        },
+    );
+    time(
+        "  finish_region_e             (EV/WB drag)",
+        FRAME_SAMPLES,
+        || develop_scene::finish_region_e(&rbase, rpw, rph, &tone, TONE_DOWNSAMPLE),
+    );
+
+    // Fit view: the viewport shows the whole image -> the colour proxy box IS
+    // the full source. 100% zoom: a screen-sized crop in the middle.
+    probe_viewport(
+        &scene,
+        &settings,
+        "fit view",
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+    );
+    let (vw, vh) = (2400.min(canvas.width), 1300.min(canvas.height));
+    probe_viewport(
+        &scene,
+        &settings,
+        "100% zoom",
+        (canvas.width - vw) / 2,
+        (canvas.height - vh) / 2,
+        vw,
+        vh,
+    );
+}
+
+/// Settings for the multi-group fast-preview probe: `detail`, `light` and
+/// `mixer` switch the Detail / Light / Colour Mixer groups on.
+fn fast_combo(detail: bool, light: bool, mixer: bool) -> DevelopSettings {
+    let mut s = DevelopSettings::default();
+    if detail {
+        s.sharpening = 40.0;
+        s.noise_reduction = 20.0;
+    }
+    if light {
+        s.exposure = 15.0;
+        s.contrast = 15.0;
+        s.highlights = -30.0;
+        s.shadows = 40.0;
+    }
+    if mixer {
+        s.mixer_hue[1] = -30.0;
+        s.mixer_luminance[1] = 40.0;
+    }
+    s
+}
+
+/// Per-frame cost of the fast (Detail/Effects/Local) live preview on a
+/// display-referred photo when several Develop groups are engaged at once —
+/// the owner's "drag Light + Detail + Mixer together and it lags" report.
+/// Mirrors `build_develop_gpu_preview`'s native-Detail branch at a 100% zoom
+/// viewport (downsample 1).
+///
+/// IAI_PERF_IMAGE=<photo> cargo test --release --test perf_develop \
+///   perf_fast_preview_multi_group -- --ignored --nocapture
+#[test]
+#[ignore = "manual perf probe; needs a local photo and a GPU"]
+fn perf_fast_preview_multi_group() {
+    let Ok(path) = std::env::var("IAI_PERF_IMAGE") else {
+        eprintln!("IAI_PERF_IMAGE not set; skipping");
+        return;
+    };
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let img = image::open(&path).expect("open photo").to_rgba8();
+    let (w, h) = img.dimensions();
+    let tiles = iai::core::tile::TileMap::from_rgba(&img.into_raw(), w, h);
+    let scene = SceneSource::from_display_tiles(&tiles);
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let pad = 72;
+    let (vw, vh) = (1600.min(w), 1000.min(h));
+    let ox = ((w - vw) / 2).saturating_sub(pad);
+    let oy = ((h - vh) / 2).saturating_sub(pad);
+    let rw = (vw + 2 * pad).min(w - ox);
+    let rh = (vh + 2 * pad).min(h - oy);
+    eprintln!("photo {w}x{h}; viewport region {rw}x{rh} @({ox},{oy}), downsample 1");
+    let (base, pw, ph) = develop_scene::build_scene_fast_base(&scene, ox, oy, rw, rh, 1, true);
+    let (rbase, rpw, rph) = develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+
+    let combos = [
+        ("detail+light+mixer", true, true, true),
+        ("detail", true, false, false),
+        ("detail+light", true, true, false),
+        ("detail+mixer", true, false, true),
+    ];
+    let rounds: usize = std::env::var("IAI_PERF_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    for &(label, detail, light, mixer) in combos.iter().cycle().take(combos.len() * rounds) {
+        let settings = fast_combo(detail, light, mixer);
+        eprintln!("\n-- {label} --");
+        let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
+        let regional = settings
+            .has_local_tone()
+            .then(|| develop_scene::finish_region_e(&rbase, rpw, rph, &tone, TONE_DOWNSAMPLE));
+        let regional_ref = regional
+            .as_ref()
+            .map(|p| (p.as_slice(), rpw, rph, TONE_DOWNSAMPLE as u32));
+        time("  scene tone only (scene_to_display)", 10, || {
+            develop_scene::scene_fast_region_display(&base, &tone)
+        });
+        let no_detail = DevelopSettings {
+            sharpening: 0.0,
+            noise_reduction: 0.0,
+            color_noise_reduction: 0.0,
+            ..settings.clone()
+        };
+        let (_, cpu_chain) = time("  RAW-model chain without Detail", 10, || {
+            develop_scene::scene_fast_region_develop(
+                &base,
+                &tone,
+                &no_detail,
+                regional_ref,
+                pw,
+                ph,
+                ox,
+                oy,
+                w,
+                h,
+                1,
+            )
+        });
+        time("  JPEG chain without Detail (display)", 10, || {
+            develop_scene::identity_fast_region_develop(
+                &base,
+                &tone,
+                &no_detail,
+                regional_ref,
+                pw,
+                ph,
+                ox,
+                oy,
+                w,
+                h,
+                1,
+            )
+        });
+        let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(&settings);
+        let flat: Vec<f32> = cpu_chain.iter().flatten().copied().collect();
+        time("  GPU Detail (upload+compute+readback)", 10, || {
+            iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+                &runtime,
+                &device,
+                &queue,
+                &flat,
+                pw as u32,
+                ph as u32,
+                &params,
+                true,
+                [0.272_229, 0.674_082, 0.053_689],
+            )
+        });
+    }
+}
+
+/// Per-frame cost while dragging ONE slider with Detail + Light + Mixer all
+/// engaged — the staged Identity fast preview reuses the stages the dragged
+/// slider does not feed. Includes native GPU Detail (upload/compute/readback).
+///
+/// IAI_PERF_IMAGE=<photo> cargo test --release --test perf_develop \
+///   perf_fast_preview_drag -- --ignored --nocapture
+#[test]
+#[ignore = "manual perf probe; needs a local photo and a GPU"]
+fn perf_fast_preview_drag() {
+    let Ok(path) = std::env::var("IAI_PERF_IMAGE") else {
+        eprintln!("IAI_PERF_IMAGE not set; skipping");
+        return;
+    };
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let img = image::open(&path).expect("open photo").to_rgba8();
+    let (w, h) = img.dimensions();
+    let tiles = iai::core::tile::TileMap::from_rgba(&img.into_raw(), w, h);
+    let mut scene = SceneSource::from_display_tiles(&tiles);
+    let raw = std::env::var("IAI_PERF_LOOK").is_ok_and(|v| v == "raw");
+    if raw {
+        scene.look = develop_scene::BaseLook::Raw;
+    }
+    let runtime = iai::gpu::detail_gpu::DetailGpuRuntime::new(&device);
+    let pad = 72;
+    let (vw, vh) = (1600.min(w), 1000.min(h));
+    let ox = ((w - vw) / 2).saturating_sub(pad);
+    let oy = ((h - vh) / 2).saturating_sub(pad);
+    let rw = (vw + 2 * pad).min(w - ox);
+    let rh = (vh + 2 * pad).min(h - oy);
+    let (base, pw, ph) = develop_scene::build_scene_fast_base(&scene, ox, oy, rw, rh, 1, true);
+    let base = Arc::new(base);
+    let (rbase, rpw, rph) = develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+    eprintln!("photo {w}x{h}; viewport region {rw}x{rh}, downsample 1");
+
+    // The app memoises the regional exposure plane on (temperature, tint,
+    // exposure), none of which these drags touch.
+    let regional = develop_scene::finish_region_e(
+        &rbase,
+        rpw,
+        rph,
+        &develop_scene::build_scene_tone_for_scene(&fast_combo(true, true, true), &scene),
+        TONE_DOWNSAMPLE,
+    );
+    for group in ["detail", "mixer", "light"] {
+        let mut stages = develop_scene::IdentityFastStages::default();
+        let mut raw_stages = develop_scene::RawFastStages::default();
+        let mut samples = Vec::new();
+        for frame in 0..12 {
+            let mut settings = fast_combo(true, true, true);
+            let step = frame as f32;
+            match group {
+                "detail" => settings.sharpening = 30.0 + step,
+                "mixer" => settings.mixer_luminance[1] = 30.0 + step,
+                _ => settings.shadows = 30.0 + step,
+            }
+            let started = Instant::now();
+            let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
+            let params = iai::gpu::detail_gpu::DetailWorkingParams::from_settings(&settings);
+            let regional_ref = Some((regional.as_slice(), rpw, rph, TONE_DOWNSAMPLE as u32));
+            let gpu_detail = |pixels: &mut Vec<[f32; 3]>, linear: bool, luma: [f32; 3]| {
+                let flat: Vec<f32> = pixels.iter().flatten().copied().collect();
+                let out = iai::gpu::detail_gpu::run_detail_tiled_with_runtime(
+                    &runtime, &device, &queue, &flat, pw as u32, ph as u32, &params, linear, luma,
+                );
+                for (p, c) in pixels.iter_mut().zip(out.chunks_exact(3)) {
+                    *p = [c[0], c[1], c[2]];
+                }
+            };
+            let (_region, adjusted) = if raw {
+                develop_scene::scene_fast_region_develop_staged(
+                    &mut raw_stages,
+                    &base,
+                    &tone,
+                    &settings,
+                    regional_ref,
+                    pw,
+                    ph,
+                    ox,
+                    oy,
+                    w,
+                    h,
+                    1,
+                    |pixels, space| gpu_detail(pixels, true, space.render_luminance_coefficients()),
+                )
+            } else {
+                develop_scene::identity_fast_region_develop_staged(
+                    &mut stages,
+                    &base,
+                    &tone,
+                    &settings,
+                    regional_ref,
+                    pw,
+                    ph,
+                    ox,
+                    oy,
+                    w,
+                    h,
+                    1,
+                    |pixels| gpu_detail(pixels, false, [0.2126, 0.7152, 0.0722]),
+                )
+            };
+            std::hint::black_box(adjusted);
+            if frame >= 2 {
+                samples.push(started.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        eprintln!(
+            "{} drag {group:<7} with Detail+Light+Mixer on: best {:.1} ms  mean {mean:.1} ms  worst {:.1} ms",
+            if raw { "RAW " } else { "JPEG" },
+            samples[0],
+            samples[samples.len() - 1]
+        );
+    }
+}
+
+/// Per-frame cost of the GPU-resident Detail preview (mode 5) while dragging
+/// ONE slider with Detail + Light + Mixer on: the host proxies the drag still
+/// needs (colour low-pass / guided controls) plus the compositor frame —
+/// scene pre-pass, GPU Detail and the full-canvas composite — waited to GPU
+/// completion. Compare `perf_fast_preview_drag` (the CPU chain it replaces).
+///
+/// IAI_PERF_IMAGE=<photo> cargo test --release --test perf_develop \
+///   perf_gpu_detail_drag -- --ignored --nocapture
+#[test]
+#[ignore = "manual perf probe; needs a local photo and a GPU"]
+fn perf_gpu_detail_drag() {
+    let Ok(path) = std::env::var("IAI_PERF_IMAGE") else {
+        eprintln!("IAI_PERF_IMAGE not set; skipping");
+        return;
+    };
+    let Some((device, queue)) = iai::gpu::vector::renderer::headless_device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let img = image::open(&path).expect("open photo").to_rgba8();
+    let (w, h) = img.dimensions();
+    let px = img.into_raw();
+    let tiles = iai::core::tile::TileMap::from_rgba(&px, w, h);
+    let mut scene = SceneSource::from_display_tiles(&tiles);
+    let raw = std::env::var("IAI_PERF_LOOK").is_ok_and(|v| v == "raw");
+    if raw {
+        scene.look = develop_scene::BaseLook::Raw;
+    }
+    let scene = Arc::new(scene);
+    let pad = 72;
+    let (vw, vh) = (1600.min(w), 1000.min(h));
+    let ox = ((w - vw) / 2).saturating_sub(pad);
+    let oy = ((h - vh) / 2).saturating_sub(pad);
+    let rw = (vw + 2 * pad).min(w - ox);
+    let rh = (vh + 2 * pad).min(h - oy);
+    eprintln!("photo {w}x{h}; Detail plane {rw}x{rh}, downsample 1");
+
+    let mut stack = LayerStack::new(w, h);
+    stack.layers[0] = Layer::from_rgba(0, "Background", px, w, h);
+    let max_texture = device.limits().max_texture_dimension_2d;
+    // A viewport-sized composite at 100 %, as the app runs a photo this large
+    // (Mode B); `view` is the canvas point at the viewport's top-left.
+    let mut compositor = CompositorState::new(&device, vw, vh, max_texture);
+    let view = (((w - vw) / 2) as f32, ((h - vh) / 2) as f32);
+
+    let s = fast_preview_downsample(rw, rh);
+    let (color_base, cpw, cph) =
+        develop_scene::build_scene_color_base_box(&scene, ox, oy, rw, rh, s);
+    let (rbase, rpw, rph) = develop_scene::build_scene_region_base(&scene, TONE_DOWNSAMPLE);
+    let regional = Arc::new(develop_scene::finish_region_e(
+        &rbase,
+        rpw,
+        rph,
+        &develop_scene::build_scene_tone_for_scene(&fast_combo(true, true, true), &scene),
+        TONE_DOWNSAMPLE,
+    ));
+
+    // "Detail 0" is the shader-only path the owner already finds smooth.
+    for (label, with_detail) in [("GPU Detail", true), ("Detail 0  ", false)] {
+        for group in ["detail", "mixer", "light", "clarity"] {
+            if !with_detail && (group == "detail" || group == "clarity") {
+                continue;
+            }
+            let mut host = Vec::new();
+            let mut total = Vec::new();
+            for frame in 0..14 {
+                let mut settings = fast_combo(with_detail, true, true);
+                let step = frame as f32;
+                match group {
+                    "detail" => settings.sharpening = 30.0 + step,
+                    "mixer" => settings.mixer_luminance[1] = 30.0 + step,
+                    "clarity" => settings.clarity = 20.0 + step,
+                    _ => settings.shadows = 30.0 + step,
+                }
+                let started = Instant::now();
+                // Host side of the frame: the colour proxies the app builds
+                // for the shader path — RAW guided planes, or Identity proxies
+                // without a plane (a plane builds its own colour field).
+                let tone = develop_scene::build_scene_tone_for_scene(&settings, &scene);
+                let proxies = (raw || !with_detail).then(|| {
+                    let region =
+                        develop_scene::tone_lowpass_scene_region(&color_base, cpw, cph, &tone, s);
+                    if raw {
+                        let samples = develop_scene::tone_scene_color_samples(&color_base, &tone);
+                        let controls =
+                            develop::guided_mixer_controls(&samples, &settings, cpw, cph)
+                                .expect("guided mixer controls");
+                        (region, controls, true)
+                    } else {
+                        let adjusted = develop::apply_color_to_region(&region, &settings, cpw, cph);
+                        (region, adjusted, false)
+                    }
+                });
+                let detail = with_detail.then(|| DevelopDetailGpu {
+                    origin_x: ox,
+                    origin_y: oy,
+                    end_x: ox + rw,
+                    end_y: oy + rh,
+                    downsample: 1,
+                    linear: raw,
+                    luma_coeff: if raw {
+                        tone.working_space.render_luminance_coefficients()
+                    } else {
+                        [0.2126, 0.7152, 0.0722]
+                    },
+                    run_detail: settings.has_detail(),
+                });
+                compositor.develop_preview = Some(DevelopGpuPreview {
+                    layer_id: 0,
+                    settings: settings.clone(),
+                    region_luma: Some(RegionLumaProxy {
+                        data: regional.clone(),
+                        w: rpw,
+                        h: rph,
+                        downsample: TONE_DOWNSAMPLE as u32,
+                    }),
+                    color: proxies.map(|(region, adjusted, guided)| ColorProxies {
+                        region: Arc::new(region),
+                        adjusted: Arc::new(adjusted),
+                        w: cpw,
+                        h: cph,
+                        origin_x: ox,
+                        origin_y: oy,
+                        downsample: s as u32,
+                        fast_preview: false,
+                        guided_controls: guided,
+                        exact_detail: false,
+                    }),
+                    scene: Some(scene.clone()),
+                    detail,
+                });
+                let host_done = Instant::now();
+                compositor.composite_layers(
+                    &device, &queue, &stack, view.0, view.1, 1.0, None, false, false,
+                );
+                device.poll(wgpu::PollType::wait_indefinitely()).ok();
+                if frame >= 2 {
+                    host.push((host_done - started).as_secs_f64() * 1e3);
+                    total.push(started.elapsed().as_secs_f64() * 1e3);
+                }
+            }
+            host.sort_by(f64::total_cmp);
+            total.sort_by(f64::total_cmp);
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            eprintln!(
+                "{} {label} drag {group:<7}: frame best {:.1} ms  mean {:.1} ms  worst {:.1} ms  (CPU proxies mean {:.1} ms)",
+                if raw { "RAW " } else { "JPEG" },
+                total[0],
+                mean(&total),
+                total[total.len() - 1],
+                mean(&host),
+            );
+        }
+    }
+}

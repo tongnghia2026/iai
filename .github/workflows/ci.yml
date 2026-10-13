@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    # `main` plus the branch the day-to-day work lands on; without it most
+    # commits were never checked.
+    branches: [main, feat/vector-core-foundation]
+    # A push that only touches the planning documents has nothing to build.
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  pull_request:
+
+# A newer push to the same branch makes the run in progress pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The gate. IAI ships on Windows, so this is the job that must stay green.
+  # `cargo test` also covers shader validation: the WGSL is parsed and validated
+  # by naga in-process (see gpu/compositor.rs, gpu/mod.rs), and the CPU/GPU
+  # parity tests pin the constants the shaders and the Rust engine share.
+  test:
+    name: Build & test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      # The published builds always have the Canvas Editor
+      # (`document_webview.rs`); without the feature here it was never compiled.
+      - name: Build (as shipped, with the Canvas Editor)
+        run: cargo build --locked --features canvas-editor-webview
+      # The unit tests are the suite kept green day to day.
+      - name: Test (as shipped; includes WGSL validation)
+        run: cargo test --locked --lib --features canvas-editor-webview
+      # The integration tests in `tests/`: colour-pipeline and CPU/GPU parity
+      # gates, the rest hand-run probes (ignored). The GPU ones skip themselves
+      # here (`CI` is set).
+      - name: Test (integration tests in tests/)
+        timeout-minutes: 20
+        run: cargo test --locked --features canvas-editor-webview --test '*'
+      # The feature is optional, so the build without it has to keep compiling.
+      - name: Check (without the Canvas Editor)
+        run: cargo check --locked
+
+  # Portability gate (blocking). Linux and macOS must keep compiling. Now that
+  # `cargo check` passes on both, this enforces the source stays cross-platform
+  # instead of only reporting how far off it is. Still a compile check, not a
+  # full build+test or a release target — upgrading to those is a later step,
+  # each flipped on once it is verified green on the platform.
+  portability:
+    name: Compile check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        # Matches the README's Debian/Ubuntu list (minus the removed webview
+        # deps): a C toolchain + pkg-config for lcms2-sys, and the X11/Wayland
+        # dev libs winit/rfd/arboard link against once this flips to a full build.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgtk-3-dev liblcms2-dev
+      - name: Check
+        run: cargo check --locked --all-targets
+
+  # Staging job for the next portability step: a full build + test on Linux and
+  # macOS (not just `cargo check`). Informational for now so a link error or a
+  # display-dependent test can't red the gate. Once this is confirmed green on a
+  # real run for both OSes, retire the `portability` compile-check above and make
+  # this the blocking portability gate.
+  portability-full:
+    name: Build & test (${{ matrix.os }}, informational)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgtk-3-dev liblcms2-dev
+      - name: Build
+        run: cargo build --locked
+      # Linux CI is headless; wrap tests in a virtual X server so anything that
+      # touches a display (clipboard, window creation) can still run. Harmless on
+      # macOS, which has a display server available to the runner.
+      - name: Test (Linux, headless)
+        if: matrix.os == 'ubuntu-latest'
+        # This is a large test graph. One linker at a time avoids rust-lld being
+        # killed by resource pressure on shared GitHub-hosted Linux runners.
+        run: xvfb-run -a cargo test --locked --jobs 1
+      - name: Test (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --locked
+
+  # Blocking since 2026-10-08, when the backlog (412 warnings) reached zero.
+  # The lints switched off on purpose are listed, with reasons, under
+  # `[lints.clippy]` in Cargo.toml.
+  clippy:
+    name: Clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned to the release the code was last cleaned against: every new
+      # clippy adds lints, and a push that touches none of them must not go
+      # red. Raise the number on purpose, clean up, then commit both together.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (as shipped, with the Canvas Editor)
+        run: cargo clippy --locked --features canvas-editor-webview -- -D warnings
+      - name: Clippy (without the Canvas Editor)
+        run: cargo clippy --locked -- -D warnings

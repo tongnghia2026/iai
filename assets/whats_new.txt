@@ -1,0 +1,16 @@
+# Bản mới có gì, viết cho người dùng (không thuật ngữ). Mỗi khối là một bản,
+# mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
+# đầu tiên ở lần mở đầu tiên sau khi cập nhật.
+
+13/10/2026
+- Nút «AI» trên thanh menu nay mở một cửa sổ hai thẻ, gom mọi tính năng AI về một chỗ: «AI online» (chỉnh ảnh bằng Gemini / ChatGPT) và «AI offline» (làm ảnh thẻ, thay áo, chỉnh chân dung, xếp ảnh in). «Auto retouch» trước nằm ở menu Image nay là thẻ «AI offline».
+- Bỏ «AI Auto Retouch»: phần chỉnh chân dung ở thẻ «AI offline» đã làm tốt hơn việc đó.
+- Mọi thứ trong cửa sổ «AI» là «Gói Pro»: ai cũng được dùng thử 7 ngày, sau đó cần mã mở khóa (300.000 đ, mua một lần cho một máy).
+- Phần chính của iAi vẫn miễn phí như trước.
+- Mua gói Pro ngay trong app: menu Help ▸ «Gói Pro» có mã chuyển khoản, mã máy của bạn và chỗ nhập mã mở khóa.
+
+12/10/2026
+- App tự báo khi có bản mới; bấm «Cập nhật» là tự tải về rồi mở lại bằng bản mới.
+- Xếp ảnh in: ảnh nền trắng chỉ còn dấu cắt nhỏ ở bốn góc, cắt ra không còn viền đỏ.
+- Thêm mục «Ủng hộ tác giả»: nghe nhạc, đăng ký kênh, hoặc chọn mức ủng hộ rồi quét mã chuyển khoản; có cả PayPal.
+- Menu Help có thêm «Góp ý, báo lỗi» để viết cho tác giả ngay trong app, và «Danh sách nhà tài trợ».

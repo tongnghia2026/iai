@@ -1,0 +1,133 @@
+[package]
+name = "iai"
+version = "0.1.0"
+edition = "2021"
+description = "A high-performance, GPU-accelerated image editor written in Rust."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+readme = "README.md"
+
+# The library holds the whole application; the binary is a thin entry point.
+# Tests compile against the library, not the binary's module tree.
+[lib]
+name = "iai"
+path = "src/lib.rs"
+
+[features]
+default = []
+# The Pro pack: the "AI" window (ID photos, garments, portrait retouch, print
+# sheets, Gemini / ChatGPT) and the key that opens it. A build without it
+# (`--no-default-features`) is the free core, whole.
+pro = ["dep:ed25519-compact", "dep:socket2", "dep:tungstenite"]
+jzazbz-prototype = []
+canvas-editor-webview = ["dep:wry"]
+
+[[bin]]
+name = "iai"
+path = "src/main.rs"
+
+[dependencies]
+winit = { version = "0.30", features = ["rwh_06"] }
+wgpu = "29"
+pollster = "0.3"
+bytemuck = { version = "1.0", features = ["derive"] }
+rayon = "1"
+image = "0.25"
+rfd = "0.15"
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = "0.34"
+arboard = "3.6.1"
+png = "0.17"
+tiff = "0.11"
+lcms2 = "6"
+lcms2-sys = "4"
+foreign-types-shared = "0.3"
+zip = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+rawloader = "0.37"
+# Fallback RAW decoder: CR3 support and a much larger camera database than
+# rawloader. Both declare LGPL-2.1; binary distribution obligations and the
+# complete license text are documented in THIRD_PARTY.md and licenses/.
+rawler = "0.7"
+ort = { version = "2.0.0-rc.12", features = ["directml"] }
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
+ab_glyph = "0.2"
+egui-phosphor = "0.12.0"
+base64 = "0.22"
+# The bridge to the browser extension (src/app/ext_bridge.rs), of the Pro part.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
+socket2 = { version = "0.6", optional = true }
+hayro = "0.7.1"
+lopdf = { version = "0.43", default-features = false }
+i_overlay = "7.0.2"
+lyon_path = "1"
+lyon_tessellation = "1"
+unicode-normalization = "0.1"
+hmac-sha256 = "1.1.14"
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+# Mail-merge data sources: CSV and Excel (.xlsx/.xls). calamine is pure-Rust and
+# reuses quick-xml/zip/chrono already in the tree; `dates` formats Excel serial
+# dates via chrono for Vietnamese dd/mm/yyyy contract fields.
+csv = "1"
+calamine = { version = "0.26", features = ["dates"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# Turns the symbol names the flight recorder's watcher reads out of the PDB
+# back into Rust paths. Already in the tree through std's backtrace support.
+rustc-demangle = "0.1"
+# Draws the bank-transfer QR code of "Ủng hộ tác giả" (src/core/vietqr.rs).
+# MIT, no dependencies of its own.
+qrcodegen = "1.8"
+# Checks the author's signature under a Pro key, and signs keys on his own
+# machine (src/pro/key.rs). MIT; `random` makes his signing key.
+ed25519-compact = { version = "2", default-features = false, features = ["std", "random"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# The Win32_System_Diagnostics_* / Threading / Memory / ProcessStatus / Kernel /
+# SystemInformation features serve the flight recorder's watcher process
+# (src/diag/watch.rs): it walks the app's stacks from outside through dbghelp.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+wry = { version = "=0.56.1", optional = true }
+
+# Embeds the app icon into iai.exe (see build.rs) so Explorer and the Windows
+# taskbar show the iAi logo instead of the generic executable icon.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in", "glsl-out", "hlsl-out"] }
+
+# Clippy is a blocking check in CI. These five lints are switched off for the
+# whole crate, each for a reason that holds everywhere it fires:
+[lints.clippy]
+# Published colour-science constants are kept digit for digit.
+excessive_precision = "allow"
+# `.max(lo).min(hi)` sends NaN to `lo` and accepts lo > hi; `clamp` returns NaN
+# for the first and panics on the second.
+manual_clamp = "allow"
+# Index loops over pixel and tile buffers are the idiom of this code.
+needless_range_loop = "allow"
+# Long signatures and nested channel types are split up with the functions
+# that own them (plan QC-11), not one lint at a time.
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+# This crate has a large GUI/image-processing dependency graph. Test debug info
+# makes the Unix linker use substantially more memory and disk while adding
+# little value to ordinary test failures (file/line panic locations remain).
+[profile.test]
+debug = 0
+
+# Optimized release builds — an image editor is CPU/GPU bound, so the extra
+# build time is worth it for noticeably faster compositing, filters and I/O.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Line tables for this crate only, so the flight recorder can name the source
+# line a stalled thread was on. They live in iai.pdb; the exe is unchanged.
+[profile.release.package.iai]
+debug = "line-tables-only"

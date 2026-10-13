@@ -1,0 +1,3173 @@
+
+struct CompositorUniforms {
+    opacity:        f32,
+    blend_mode:     u32,
+    offset_x:       f32,
+    offset_y:       f32,
+    zoom:           f32,
+    view_offset_x:  f32,
+    view_offset_y:  f32,
+    viewport_w:     f32,
+    viewport_h:     f32,
+    layer_tiles_w:  u32,
+    layer_tiles_h:  u32,
+    layer_w:        f32,
+    layer_h:        f32,
+    // Free-transform preview (xform_active=1 for the layer being transformed)
+    xform_active:   u32,
+    xform_inv_a:    f32,  // inverse matrix: [inv_a  inv_b]
+    xform_inv_b:    f32,  //                 [inv_c  inv_d]
+    xform_inv_c:    f32,
+    xform_inv_d:    f32,
+    xform_pivot_x:  f32,  // fixed pivot (original layer center in canvas space)
+    xform_pivot_y:  f32,
+    xform_tx:       f32,  // additional translation (from center-handle drag)
+    xform_ty:       f32,
+    xform_orig_ox:  f32,  // original layer.offset for local-coord lookup
+    xform_orig_oy:  f32,
+    xform_orig_w:   f32,  // original layer dimensions (bounds check)
+    xform_orig_h:   f32,
+    mask_enabled:   u32,
+    mask_inverted:  u32,
+    adj_kind:       u32,
+    adj_pad_a:      u32,
+    clip_shift_packed: u32,  // live PowerClip pin: two i16 (dx<<16)|dy = offset − mask bake offset
+    adj_pad_c:      u32,
+    adj_p:          array<vec4<f32>, 3>,
+    lut:            array<vec4<f32>, 192>,
+};
+
+@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
+// Nearest, level 0 only. Read through it with `textureSampleLevel(…, 0.0)`,
+// never `textureSample`: that one takes screen derivatives, and DX12's shader
+// compiler (FXC) must unroll every loop holding one. It cannot unroll these
+// (error X3511), the pipeline is refused, and no layer is drawn.
+@group(0) @binding(1) var samp: sampler;
+// Scene-referred Develop master (RAW sessions, u.adj_pad_c == 1u): the full
+// layer as UNCLAMPED linear f16 RGBA. A 1×1 dummy is bound outside a session.
+@group(0) @binding(2) var dev_scene_tex: texture_2d<f32>;
+// The same atlas with its mip chain, viewed as plain bytes (sRGB-encoded
+// values, no decode) for the zoomed-out area filter.
+@group(0) @binding(3) var atlas_raw: texture_2d<f32>;
+// Trilinear, explicit-LOD sampler for `atlas_raw` and the Develop scene master.
+@group(0) @binding(4) var atlas_lin: sampler;
+
+// Set by `CompositorState::new` on a device that cannot view the sRGB atlas as
+// plain bytes (OpenGL): the atlas is then stored as bytes, `atlas_tex` is the
+// same view as `atlas_raw`, and its reads are decoded here instead.
+const ATLAS_TEX_IS_BYTES: bool = false;
+
+// An `atlas_tex` read as the linear colour the sRGB view gives.
+fn atlas_linear(c: vec4<f32>) -> vec4<f32> {
+    if (ATLAS_TEX_IS_BYTES) {
+        return vec4<f32>(dev_srgb_to_linear(c.rgb), c.a);
+    }
+    return c;
+}
+
+@group(1) @binding(0) var dst_tex: texture_2d<f32>;
+
+@group(2) @binding(0) var<uniform> u: CompositorUniforms;
+@group(2) @binding(1) var<storage, read> tile_map: array<i32>;
+@group(2) @binding(2) var<storage, read> mask_tile_map: array<i32>;
+// Develop local-tone preview (adj_kind==20, adj_p[1].x==1): a downsampled
+// regional base-luma proxy (Shadows/Highlights local adaptation) plus the
+// Highlights/Shadows/Whites/Blacks luma-offset LUT. Read only when the local
+// path is active; otherwise they hold harmless leftover data.
+@group(2) @binding(3) var<storage, read> dev_region_luma: array<f32>;
+@group(2) @binding(4) var<storage, read> dev_local_lut: array<f32>;
+// Develop colour preview (adj_kind==20, adj_p[2].x==1): the tone-mapped layer's
+// edge-aware regional low-pass and that region after the Vibrance/Saturation/Mixer
+// transform, each `pw*ph*3` packed f32 (RGB). The shader recombines them with the
+// pixel's own detail (dev_finish_colored), matching the CPU `finish_colored_pixel`.
+@group(2) @binding(5) var<storage, read> dev_region_rgb: array<f32>;
+@group(2) @binding(6) var<storage, read> dev_adjusted_rgb: array<f32>;
+// Develop Effects: raw [texture, clarity, dehaze, vignette] slider values.
+// Applied last in develop_apply; Clarity/Dehaze are spatial and take their
+// regional base from the colour region proxy (see dev_effects_stage).
+@group(2) @binding(7) var<storage, read> dev_effects: array<f32>;
+// Develop curve tables: [active_flag, R 256, G 256, B 256], scene display-luma
+// 256, mixer gate/H/S/L (4×360), ART-Blacks EV gain 256, then gamut cusp data.
+@group(2) @binding(8) var<storage, read> dev_rgb_curve: array<f32>;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32((vi << 1u) & 2u);
+    let y = f32(vi & 2u);
+    out.uv = vec2<f32>(x, y);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, y * -2.0 + 1.0, 0.0, 1.0);
+    return out;
+}
+
+// PDF/W3C non-separable blend helpers. These deliberately use the legacy
+// blend-space luminosity rather than HSL or display-referred Rec.709 luma.
+fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3(0.30, 0.59, 0.11)); }
+fn sat(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let d = l - lum(c);
+    var r = c + d;
+    let mn = min(min(r.r, r.g), r.b);
+    let mx = max(max(r.r, r.g), r.b);
+    if (mn < 0.0) {
+        let ll = lum(r);
+        r = ll + ((r - ll) * ll / (ll - mn));
+    }
+    if (mx > 1.0) {
+        let ll = lum(r);
+        r = ll + ((r - ll) * (1.0 - ll) / (mx - ll));
+    }
+    return r;
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let range = sat(c);
+    if (range <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+
+    var r = vec3<f32>(0.0);
+    if (c.r <= c.g) {
+        if (c.g <= c.b) {
+            r.g = (c.g - c.r) * s / range;
+            r.b = s;
+        } else if (c.r <= c.b) {
+            r.b = (c.b - c.r) * s / range;
+            r.g = s;
+        } else {
+            r.r = (c.r - c.b) * s / range;
+            r.g = s;
+        }
+    } else if (c.r <= c.b) {
+        r.r = (c.r - c.g) * s / range;
+        r.b = s;
+    } else if (c.g <= c.b) {
+        r.b = (c.b - c.g) * s / range;
+        r.r = s;
+    } else {
+        r.g = (c.g - c.b) * s / range;
+        r.r = s;
+    }
+    return r;
+}
+
+fn color_dodge(s: f32, d: f32) -> f32 {
+    if (d <= 0.0) { return 0.0; }
+    if (s >= 1.0) { return 1.0; }
+    return min(1.0, d / (1.0 - s));
+}
+
+fn color_burn(s: f32, d: f32) -> f32 {
+    if (d >= 1.0) { return 1.0; }
+    if (s <= 0.0) { return 0.0; }
+    return 1.0 - min(1.0, (1.0 - d) / s);
+}
+
+fn dissolve_hash(x: u32, y: u32) -> f32 {
+    var h = x * 0x9e3779b9u + y * 0x517cc1b7u;
+    h = h ^ (h >> 16u);
+    h = h * 0x45d9f3b7u;
+    h = h ^ (h >> 16u);
+    return f32(h) / 4294967296.0;
+}
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(max(c.r, c.g), c.b);
+    let mn = min(min(c.r, c.g), c.b);
+    let l  = (mx + mn) * 0.5;
+    let d  = mx - mn;
+    if (d < 0.0001) { return vec3(0.0, 0.0, l); }
+    let s  = select(d / (2.0 - mx - mn), d / (mx + mn), l < 0.5);
+    var h: f32;
+    if (mx == c.r)      { h = (c.g - c.b) / d + select(6.0, 0.0, c.g >= c.b); }
+    else if (mx == c.g) { h = (c.b - c.r) / d + 2.0; }
+    else               { h = (c.r - c.g) / d + 4.0; }
+    return vec3(h / 6.0, s, l);
+}
+
+fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
+    var t = t_in;
+    if (t < 0.0) { t += 1.0; }
+    if (t > 1.0) { t -= 1.0; }
+    if (t < 1.0/6.0) { return p + (q - p) * 6.0 * t; }
+    if (t < 0.5)     { return q; }
+    if (t < 2.0/3.0) { return p + (q - p) * (2.0/3.0 - t) * 6.0; }
+    return p;
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    let h = hsl.x; let s = hsl.y; let l = hsl.z;
+    if (s == 0.0) { return vec3(l); }
+    let q = select(l + s - l * s, l * (1.0 + s), l < 0.5);
+    let p = 2.0 * l - q;
+    return vec3(hue_to_rgb(p, q, h + 1.0/3.0),
+                hue_to_rgb(p, q, h),
+                hue_to_rgb(p, q, h - 1.0/3.0));
+}
+
+fn blend_comp(mode: u32, s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    switch mode {
+        case 0u:  { return s; }
+        case 1u:  { return s * d; }
+        case 2u:  { return s + d - s * d; }
+        case 3u:  {
+            let is_l = step(vec3(0.5), d);
+            return mix(2.0*s*d, 1.0 - 2.0*(1.0-s)*(1.0-d), is_l);
+        }
+        case 4u:  { return min(s, d); }
+        case 5u:  { return max(s, d); }
+        case 6u:  {
+            return vec3<f32>(
+                color_dodge(s.r, d.r),
+                color_dodge(s.g, d.g),
+                color_dodge(s.b, d.b)
+            );
+        }
+        case 7u:  {
+            return vec3<f32>(
+                color_burn(s.r, d.r),
+                color_burn(s.g, d.g),
+                color_burn(s.b, d.b)
+            );
+        }
+        case 8u:  {
+            let is_l = step(vec3(0.5), s);
+            return mix(2.0*s*d, 1.0 - 2.0*(1.0-s)*(1.0-d), is_l);
+        }
+        case 9u:  {
+            let g = mix(sqrt(d), ((16.0*d - 12.0)*d + 4.0)*d, step(d, vec3(0.25)));
+            return mix(d - (1.0 - 2.0*s)*d*(1.0-d), d + (2.0*s-1.0)*(g-d), step(vec3(0.5), s));
+        }
+        case 10u: { return abs(s - d); }
+        case 11u: { return s + d - 2.0*s*d; }
+        case 12u: {
+            return set_lum(set_sat(s, sat(d)), lum(d));
+        }
+        case 13u: {
+            return set_lum(set_sat(d, sat(s)), lum(d));
+        }
+        case 14u: {
+            return set_lum(s, lum(d));
+        }
+        case 15u: {
+            return set_lum(d, lum(s));
+        }
+        case 16u: { return clamp(d + 2.0*s - 1.0, vec3(0.0), vec3(1.0)); }
+        default:  { return s; }
+    }
+}
+
+fn dev_param(i: u32) -> f32 {
+    let v = u.lut[i / 4u];
+    switch (i % 4u) {
+        case 0u: { return v.x; }
+        case 1u: { return v.y; }
+        case 2u: { return v.z; }
+        default: { return v.w; }
+    }
+}
+
+// Per-stage gating: skip a whole adjustment block when its sliders sit at zero,
+// matching the CPU DevelopPlan so the GPU preview equals the committed result.
+fn dev_active(v: f32) -> bool {
+    return abs(v) > 0.001;
+}
+
+fn dev_has_mixer() -> bool {
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        if (dev_active(dev_param(20u + i)) || dev_active(dev_param(28u + i)) || dev_active(dev_param(36u + i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn dev_eased(value: f32) -> f32 {
+    // Linear slider response (mirrors CPU control_to_unit); dropped the old
+    // pow(1.18) ease that made small drags feel dead.
+    return clamp(value / 200.0, -1.0, 1.0);
+}
+
+fn dev_smootherstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / max(edge1 - edge0, 0.00001), 0.0, 1.0);
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn dev_bell(x: f32, center: f32, width: f32) -> f32 {
+    return dev_smootherstep(0.0, 1.0, 1.0 - abs(x - center) / max(width, 0.00001));
+}
+
+fn dev_range_mask(x: f32, low: f32, low_full: f32, high_full: f32, high: f32) -> f32 {
+    return dev_smootherstep(low, low_full, x) * (1.0 - dev_smootherstep(high_full, high, x));
+}
+
+fn dev_linear_to_srgb_channel(v_in: f32) -> f32 {
+    let v = clamp(v_in, 0.0, 1.0);
+    if (v <= 0.0031308) {
+        return v * 12.92;
+    }
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+fn dev_srgb_to_linear_channel(v_in: f32) -> f32 {
+    let v = clamp(v_in, 0.0, 1.0);
+    if (v <= 0.04045) {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+fn dev_linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dev_linear_to_srgb_channel(c.r),
+        dev_linear_to_srgb_channel(c.g),
+        dev_linear_to_srgb_channel(c.b)
+    );
+}
+
+fn dev_srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dev_srgb_to_linear_channel(c.r),
+        dev_srgb_to_linear_channel(c.g),
+        dev_srgb_to_linear_channel(c.b)
+    );
+}
+
+fn dev_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Rec.709 luminance on LINEAR values, used by the white-balance/exposure stage.
+fn dev_luma_lin(c: vec3<f32>) -> f32 {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+fn dev_fit_linear_rgb_to_luma(c_in: vec3<f32>, target_luma_in: f32) -> vec3<f32> {
+    let target_luma = clamp(target_luma_in, 0.0, 1.0);
+    var c = c_in;
+    let mn = min(min(c.r, c.g), c.b);
+    if (mn < 0.0) {
+        let anchor = max(target_luma, 0.0001);
+        let scale = clamp(anchor / max(anchor - mn, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    let mx = max(max(c.r, c.g), c.b);
+    if (mx > 1.0) {
+        let scale = clamp((1.0 - target_luma) / max(mx - target_luma, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    return clamp(c, vec3(0.0), vec3(1.0));
+}
+
+fn dev_highlight_rolloff(x: f32) -> f32 {
+    let knee = 0.75;
+    if (x <= knee) {
+        return x;
+    }
+    let t = (x - knee) / (1.0 - knee);
+    return knee + (1.0 - knee) * t / (1.0 + t);
+}
+
+// Normalised tanh contrast sigmoid, mirrors CPU contrast_curve (CONTRAST_K = 2.4):
+// strictly monotone through the endpoints, never crushes a tonal band to a single
+// value. Positive steepens midtones; negative uses the exact inverse (atanh) so it
+// flattens them instead of steepening (the sigmoid is symmetric in sign otherwise).
+fn dev_contrast_curve(x_in: f32, amount: f32) -> f32 {
+    let x = clamp(x_in, 0.0, 1.0);
+    let a = clamp(amount, -1.0, 1.0);
+    if (abs(a) < 1e-4) {
+        return x;
+    }
+    let k = abs(a) * 3.0;
+    let d = tanh(k * 0.5);
+    if (a > 0.0) {
+        return clamp(0.5 + tanh(k * (x - 0.5)) / (2.0 * d), 0.0, 1.0);
+    }
+    return clamp(0.5 + atanh((2.0 * x - 1.0) * d) / k, 0.0, 1.0);
+}
+
+// White balance in linear light: luma-preserving channel gains on the
+// Temperature (blue↔yellow) and Tint (green↔magenta) axes. Mirrors CPU
+// apply_white_balance.
+fn dev_white_balance(c_in: vec3<f32>) -> vec3<f32> {
+    let temp = dev_eased(dev_param(6u));
+    let tint = dev_eased(dev_param(7u));
+    let gr = (1.0 + 0.30 * temp) * (1.0 + 0.10 * tint);
+    let gg = 1.0 - 0.20 * tint;
+    let gb = (1.0 - 0.30 * temp) * (1.0 + 0.10 * tint);
+    let l0 = dev_luma_lin(c_in);
+    var c = vec3<f32>(max(c_in.r * gr, 0.0), max(c_in.g * gg, 0.0), max(c_in.b * gb, 0.0));
+    let l1 = dev_luma_lin(c);
+    if (l1 > 1e-6) {
+        c = c * (l0 / l1);
+    }
+    return c;
+}
+
+// Exposure as a true linear-light multiply (×2^EV). Mirrors CPU
+// apply_exposure_linear: ±50 slider → ±5 EV, soft highlight shoulder.
+fn dev_exposure_linear(c: vec3<f32>, value: f32) -> vec3<f32> {
+    let ev = clamp(value, -50.0, 50.0) / 50.0 * 5.0;
+    if (abs(ev) <= 0.0001) {
+        return c;
+    }
+    let factor = pow(2.0, ev);
+    var lin = c * factor;
+    let l0 = max(dev_luma_lin(lin), 0.0);
+    let target_l = dev_highlight_rolloff(l0);
+    if (l0 > 1e-6) {
+        lin = lin * (target_l / l0);
+    }
+    return dev_fit_linear_rgb_to_luma(lin, target_l);
+}
+
+fn dev_chroma(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn dev_shift(v: f32, delta: f32) -> f32 {
+    let d = clamp(delta, -1.0, 1.0);
+    if (d >= 0.0) {
+        return mix(v, 1.0, d);
+    }
+    return mix(v, 0.0, -d);
+}
+
+// Mirror of CPU apply_tone_delta: clamp to +/-0.85 then lift with a matched 0.45
+// falloff on both sides. Earlier the positive branch used 0.62 and skipped the
+// clamp, so Contrast/Clarity/Dehaze/Texture/Vignette previewed brighter than the
+// committed pixels.
+fn dev_tone_delta(c: vec3<f32>, delta_in: f32) -> vec3<f32> {
+    let delta = clamp(delta_in, -0.85, 0.85);
+    let l = clamp(dev_luma(c), 0.0, 1.0);
+    if (delta >= 0.0) {
+        let amount = delta * pow(1.0 - l, 0.45);
+        return vec3(dev_shift(c.r, amount), dev_shift(c.g, amount), dev_shift(c.b, amount));
+    }
+    let amount = -delta * pow(l, 0.45);
+    return vec3(dev_shift(c.r, -amount), dev_shift(c.g, -amount), dev_shift(c.b, -amount));
+}
+
+fn dev_black_floor_gate(luma: f32) -> f32 {
+    return dev_smootherstep(0.004, 0.055, luma);
+}
+
+fn dev_black_mask(luma: f32, chroma: f32) -> f32 {
+    let tonal = 1.0 - dev_smootherstep(0.18, 0.42, luma);
+    let color_protect =
+        1.0 - dev_smootherstep(0.16, 0.38, chroma) * dev_smootherstep(0.12, 0.36, luma) * 0.45;
+    return tonal * color_protect;
+}
+
+fn dev_shadow_mask(luma: f32, chroma: f32) -> f32 {
+    let tonal = dev_range_mask(luma, 0.012, 0.09, 0.40, 0.68);
+    let colored_shadow = dev_bell(luma, 0.28, 0.26) * dev_smootherstep(0.035, 0.16, chroma) * 0.28;
+    let toe_detail = dev_range_mask(luma, 0.006, 0.035, 0.18, 0.34) * 0.52;
+    return max(max(tonal, colored_shadow), toe_detail);
+}
+
+fn dev_exposure_shadow_mask(luma: f32) -> f32 {
+    return dev_range_mask(luma, 0.004, 0.035, 0.32, 0.76);
+}
+
+fn dev_exposure_highlight_guard(luma: f32) -> f32 {
+    return 1.0 - dev_smootherstep(0.68, 1.0, luma) * 0.55;
+}
+
+fn dev_tone_response(amount: f32) -> f32 {
+    return sign(amount) * min(pow(abs(amount), 0.55), 1.0);
+}
+
+fn dev_darks_mask(luma: f32) -> f32 {
+    return dev_bell(luma, 0.36, 0.30) * dev_smootherstep(0.075, 0.18, luma);
+}
+
+fn dev_curve_shadows_mask(luma: f32) -> f32 {
+    return dev_range_mask(luma, 0.025, 0.12, 0.30, 0.54);
+}
+
+fn dev_highlight_mask(luma: f32) -> f32 {
+    return dev_smootherstep(0.44, 0.82, luma);
+}
+
+fn dev_white_mask(luma: f32) -> f32 {
+    return dev_smootherstep(0.70, 0.98, luma);
+}
+
+fn dev_apply_luma_delta(c: vec3<f32>, delta: f32) -> vec3<f32> {
+    return clamp(c + vec3(delta), vec3(0.0), vec3(1.0));
+}
+
+fn dev_set_rgb_preserving_luma(candidate: vec3<f32>, target_luma_in: f32) -> vec3<f32> {
+    let target_luma = clamp(target_luma_in, 0.0, 1.0);
+    var c = candidate;
+    let mn = min(min(c.r, c.g), c.b);
+    if (mn < 0.0) {
+        let anchor = max(target_luma, 0.035);
+        let scale = clamp(anchor / max(anchor - mn, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    let mx = max(max(c.r, c.g), c.b);
+    if (mx > 1.0) {
+        let scale = clamp((1.0 - target_luma) / max(mx - target_luma, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    return clamp(c, vec3(0.0), vec3(1.0));
+}
+
+fn dev_luma_target_chroma_preserve_weight(luma: f32, chroma: f32, target_luma: f32) -> f32 {
+    let signal = dev_smootherstep(0.018, 0.075, luma);
+    let color = dev_smootherstep(0.030, 0.105, chroma);
+    let highlight_room = 1.0 - dev_smootherstep(0.88, 0.98, target_luma);
+    return signal * color * highlight_room * 0.88;
+}
+
+fn dev_apply_luma_target(c: vec3<f32>, target_luma: f32) -> vec3<f32> {
+    // Chroma-aware luminance retarget (mirrors CPU apply_luma_target). Exposure
+    // and white balance use a true multiply in the linear stage instead.
+    let l = clamp(dev_luma(c), 0.0, 1.0);
+    let dst_luma = clamp(target_luma, 0.0, 1.0);
+    let lift = dst_luma - l;
+    let chroma = dev_chroma(c);
+    let chroma_gate = dev_smootherstep(0.04, 0.22, chroma);
+    let tone_gate = dev_smootherstep(0.025, 0.16, l) * (1.0 - dev_smootherstep(0.86, 0.98, dst_luma));
+    var chroma_factor = 1.0;
+    if (lift > 0.0) {
+        chroma_factor = 1.0 + lift * 1.20 * chroma_gate * tone_gate;
+    }
+    let additive = vec3(dst_luma) + (c - vec3(l)) * chroma_factor;
+    let scaled = c * (dst_luma / max(l, 0.00001));
+    let preserve = dev_luma_target_chroma_preserve_weight(l, chroma, dst_luma);
+    return dev_set_rgb_preserving_luma(additive + (scaled - additive) * preserve, dst_luma);
+}
+
+// Largest extra chroma scale that keeps every channel in [0,1] (gamut hull along
+// the constant-luma direction). Mirrors CPU core::color::chroma_headroom.
+fn dev_chroma_headroom(d: vec3<f32>, l: f32) -> f32 {
+    var room = 1e9;
+    if (d.r > 1e-6) { room = min(room, (1.0 - l) / d.r - 1.0); } else if (d.r < -1e-6) { room = min(room, l / -d.r - 1.0); }
+    if (d.g > 1e-6) { room = min(room, (1.0 - l) / d.g - 1.0); } else if (d.g < -1e-6) { room = min(room, l / -d.g - 1.0); }
+    if (d.b > 1e-6) { room = min(room, (1.0 - l) / d.b - 1.0); } else if (d.b < -1e-6) { room = min(room, l / -d.b - 1.0); }
+    return max(room, 0.0);
+}
+
+// Gamut-aware soft-knee saturation (mirrors CPU core::color::saturate_around_luma):
+// tanh-compress a positive boost into the pixel's headroom so it asymptotes to the
+// gamut hull instead of hard-clipping (which caused blocky over-saturation/hue
+// shift when a band was pushed to the max). dev_set_rgb_preserving_luma is a no-op
+// safety clamp here since the candidate is already in gamut.
+fn dev_scale_chroma_around_luma(c: vec3<f32>, factor_in: f32) -> vec3<f32> {
+    let l = clamp(dev_luma(c), 0.0, 1.0);
+    let protect = dev_smootherstep(0.035, 0.14, l) * (1.0 - dev_smootherstep(0.90, 0.99, l));
+    let req = (clamp(factor_in, 0.0, 2.35) - 1.0) * protect;
+    let d = c - vec3(l);
+    var f = 1.0 + req;
+    if (req > 0.0) {
+        let room = dev_chroma_headroom(d, l);
+        f = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
+    }
+    return dev_set_rgb_preserving_luma(vec3(l) + d * f, l);
+}
+
+fn dev_apply_blacks(c: vec3<f32>, amount: f32, luma: f32, chroma: f32) -> vec3<f32> {
+    let mask = dev_black_mask(luma, chroma);
+    if (amount >= 0.0) {
+        let floor_gate = dev_black_floor_gate(luma);
+        let upper_gate = 1.0 - dev_smootherstep(0.30, 0.56, luma);
+        let lift = amount * 0.16 * mask * floor_gate * upper_gate;
+        return dev_apply_luma_target(c, min(luma + lift, max(luma, 0.32)));
+    }
+    let darken = (-amount) * 0.86 * mask;
+    return dev_apply_luma_target(c, luma * (1.0 - darken));
+}
+
+fn dev_apply_shadows(c: vec3<f32>, amount: f32, luma: f32, chroma: f32) -> vec3<f32> {
+    let tone = dev_tone_response(amount);
+    let mask = dev_shadow_mask(luma, chroma);
+    if (tone >= 0.0) {
+        let floor_gate = dev_black_floor_gate(luma);
+        let lift = tone * 0.62 * mask * floor_gate * pow(1.0 - luma, 0.48);
+        let cap = luma + 0.42 * pow(1.0 - luma, 0.70);
+        return dev_apply_luma_target(c, min(luma + lift, cap));
+    }
+    let darken = (-tone) * 0.66 * mask * pow(luma, 0.52);
+    return dev_apply_luma_target(c, luma - darken);
+}
+
+fn dev_apply_exposure(c: vec3<f32>, value: f32) -> vec3<f32> {
+    let amount = clamp(clamp(value, -50.0, 50.0) / 50.0, -1.0, 1.0);
+    if (abs(amount) <= 0.001) {
+        return c;
+    }
+    let luma = clamp(dev_luma(c), 0.0, 1.0);
+    if (amount > 0.0) {
+        let factor = pow(2.0, amount * 0.92);
+        let base = luma * (factor - 1.0) * dev_exposure_highlight_guard(luma);
+        let toe = amount * 0.105 * dev_exposure_shadow_mask(luma);
+        return dev_apply_luma_target(c, min(luma + base + toe, 0.92 + amount * 0.035));
+    }
+    let factor = pow(2.0, amount * 1.10);
+    let darken = (luma * factor - luma) * (0.72 + 0.28 * dev_smootherstep(0.18, 0.88, luma));
+    return dev_apply_luma_target(c, luma + darken);
+}
+
+fn dev_apply_highlights(c: vec3<f32>, amount: f32, luma: f32) -> vec3<f32> {
+    let tone = dev_tone_response(amount);
+    let mask = dev_highlight_mask(luma);
+    if (tone >= 0.0) {
+        let lift = tone * 0.82 * mask * pow(1.0 - luma, 0.50);
+        let channel_cap = luma + (1.0 - max(max(c.r, c.g), c.b)) * 0.82;
+        return dev_apply_luma_target(c, min(min(luma + lift, channel_cap), 0.94 + tone * 0.025));
+    }
+    let recover = (-tone) * 0.82 * mask * pow(luma, 0.58);
+    return dev_apply_luma_target(c, max(luma - recover, 0.12));
+}
+
+fn dev_apply_whites(c: vec3<f32>, amount: f32, luma: f32) -> vec3<f32> {
+    let mask = dev_white_mask(luma);
+    if (amount >= 0.0) {
+        let lift = amount * 0.34 * mask * pow(1.0 - luma, 0.52);
+        return dev_apply_luma_target(c, luma + lift);
+    }
+    let recover = (-amount) * 0.38 * mask * pow(luma, 0.62);
+    return dev_apply_luma_target(c, luma - recover);
+}
+
+// UCS-22 hue (radians in (-π, π]) of an sRGB colour. Mirrors the CPU
+// core::ucs::ucs_hue_rad (whose chromaticity warp runs in f64 — the difference
+// is orders of magnitude below the 1° gate-LUT resolution).
+fn dev_ucs_hue(c: vec3<f32>) -> f32 {
+    let lin = vec3<f32>(
+        dev_srgb_to_linear_channel(c.r),
+        dev_srgb_to_linear_channel(c.g),
+        dev_srgb_to_linear_channel(c.b),
+    );
+    let big_x = dot(vec3<f32>(0.4124564, 0.3575761, 0.1804375), lin);
+    let big_y = dot(vec3<f32>(0.2126729, 0.7151522, 0.0721750), lin);
+    let big_z = dot(vec3<f32>(0.0193339, 0.1191920, 0.9503041), lin);
+    let sum = max(big_x + big_y + big_z, 1e-10);
+    let x = big_x / sum;
+    let y = big_y / sum;
+    var d = 0.318707282433486 * x + 2.16743692732158 * y + 0.291320554395942;
+    if (abs(d) < 1e-10) { d = select(1e-10, -1e-10, d < 0.0); }
+    let u = (-0.783941002840055 * x + 0.277512987809202 * y + 0.153836578598858) / d;
+    let v = (0.745273540913283 * x - 0.205375866083878 * y - 0.165478376301988) / d;
+    let us = 1.39656225667 * u / (abs(u) + 1.49217352929);
+    let vs = 1.4513954287 * v / (abs(v) + 1.52488637914);
+    let up = -1.124983854323892 * us - 0.980483721769325 * vs;
+    let vp = 1.86323315098672 * us + 1.971853092390862 * vs;
+    return atan2(vp, up);
+}
+
+// HSV saturation (delta/max) — the luma-normalised colour confidence the mixer
+// weights by (high for navy/burgundy, ≈0 for greys). Mirrors CPU `hsv_saturation`.
+fn dev_hsv_sat(c: vec3<f32>) -> f32 {
+    let mx = max(c.r, max(c.g, c.b));
+    let delta = mx - min(c.r, min(c.g, c.b));
+    if (mx > 1e-4 && delta > 1e-6) {
+        return delta / mx;
+    }
+    return 0.0;
+}
+
+// Logistic saturation weight; mirrors CPU `mixer_satweight` (MIXER_SAT_STEEP 24
+// — gentle on purpose, see the CPU const: steeper flips 0↔1 across JPEG chroma
+// blocks in dark regions and cuts hard square seams at hair/shadow boundaries).
+fn dev_satweight(x: f32) -> f32 {
+    return 1.0 / (1.0 + exp(-24.0 * x));
+}
+
+// Full colour-confidence weight: logistic HSV-saturation weight × the
+// absolute-delta gate (rejects dark near-neutrals whose tiny delta inflates
+// HSV saturation). Mirrors CPU `mixer_weight` (MIXER_DELTA 0.012..0.075).
+fn dev_mixer_weight(c: vec3<f32>, shift: f32) -> f32 {
+    let delta = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+    return dev_satweight(dev_hsv_sat(c) - shift)
+        * dev_smootherstep(0.012, 0.075, delta);
+}
+
+// ── Colour-Mixer selection model (GPU mirror) ───────────────────────────────
+// The mixer adjustment itself runs on the CPU and is uploaded as the low-res
+// `adjusted` proxy (dev_adjusted_rgb), so the curve model is GPU-parity-exact
+// by construction — there is no separate GPU mixer to drift. The ONLY selection
+// code that runs live on the GPU is the full-res spatial re-gate
+// (dev_mixer_edit_affinity), which decides how much of the proxy delta reaches
+// each pixel. Its gate table is BUILT on the CPU (the same Lagrange basis the
+// mixer curves interpolate on — core/develop.rs `build_mixer_curves_opt`) and
+// uploaded at dev_rgb_curve[1025..1385]; the shader only samples it at the
+// pixel's UCS hue and applies the logistic saturation weight.
+
+// Sample the unified tone curve (adj_lut / u.lut) at luminance l in [0,1].
+// Linearly interpolates between the two nearest texels, mirroring the CPU
+// `lut_lerp` used by the 16-bit commit (`ToneData::apply_interp`). A 16-bit
+// document (e.g. a RAW) holds smooth gradients; a nearest-texel lookup posterizes
+// them into 256 steps in the preview that then vanish on the interpolated commit
+// (the "ánh sáng nhảy" preview↔commit jump) — interpolating here keeps them equal.
+fn dev_lut(l: f32) -> f32 {
+    let p = clamp(l, 0.0, 1.0) * 255.0;
+    let i = u32(floor(p));
+    let f = p - floor(p);
+    let a = dev_param(min(i, 255u));
+    let b = dev_param(min(i + 1u, 255u));
+    return a + (b - a) * f;
+}
+
+// Sample the Highlights/Shadows/Whites/Blacks luma-OFFSET LUT at luminance l.
+// Read at the REGIONAL luma (see dev_region_luma_at) so a dark/bright region is
+// moved uniformly — the local-adaptation path. Interpolated to mirror the 16-bit
+// commit (`apply_local_interp` → `lut_lerp`), avoiding a 256-step preview↔commit jump.
+fn dev_local_lut_at(l: f32) -> f32 {
+    let p = clamp(l, 0.0, 1.0) * 255.0;
+    let i = u32(floor(p));
+    let f = p - floor(p);
+    let a = dev_local_lut[min(i, 255u)];
+    let b = dev_local_lut[min(i + 1u, 255u)];
+    return a + (b - a) * f;
+}
+
+// Bilinear sample of the downsampled regional base-luma proxy at layer-local
+// pixel (lx, ly). adj_p[1] = (is_local, downsample s, proxy_w, proxy_h). The
+// pixel→proxy mapping and edge clamp match the CPU `sample_plane_bilinear`, so the
+// GPU preview reads the same field the bake builds.
+fn dev_region_luma_at(lx: f32, ly: f32) -> f32 {
+    // Region-luma proxy dims are DERIVED from the layer size + downsample (it is
+    // always full-layer) rather than read from adj_p[1].z/.w — those two slots
+    // carry the colour proxy's origin when Colour AND local tone run together.
+    let s = max(u.adj_p[1].y, 1.0);
+    let su = u32(s);
+    let pw = (u32(u.layer_w) + su - 1u) / su;
+    let ph = (u32(u.layer_h) + su - 1u) / su;
+    if (pw == 0u || ph == 0u) { return 0.0; }
+    // (lx, ly) is the pixel centre (x + 0.5): plane texel t is centred at
+    // (t + 0.5)·s, as the CPU samples it.
+    let fx = clamp(lx / s - 0.5, 0.0, f32(pw - 1u));
+    let fy = clamp(ly / s - 0.5, 0.0, f32(ph - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, pw - 1u);
+    let y1 = min(y0 + 1u, ph - 1u);
+    let wx = fx - f32(x0);
+    let wy = fy - f32(y0);
+    let v00 = dev_region_luma[y0 * pw + x0];
+    let v10 = dev_region_luma[y0 * pw + x1];
+    let v01 = dev_region_luma[y1 * pw + x0];
+    let v11 = dev_region_luma[y1 * pw + x1];
+    let top = v00 + (v10 - v00) * wx;
+    let bot = v01 + (v11 - v01) * wx;
+    return top + (bot - top) * wy;
+}
+
+// ── Scene-referred Develop chain (RAW sessions, u.adj_pad_c == 1u) ──────────
+// Mirrors core/develop_scene.rs exactly:
+//   u.lut            = sigmoid over EV∈[-14,+6], display-linear output;
+//   dev_local_lut    = tone-equalizer EV offsets over the same axis;
+//   dev_region_luma  = regional exposure E plane (EV values, not [0,1]);
+//   dev_effects[16..25] = CAT16·2^EV matrix (row-major),
+//              [25] = hue-preserve blend, [26] = display-curve flag,
+//              [36..54] = working<->linear-sRGB matrices,
+//              [54..57] = working-space luminance coefficients;
+//   dev_rgb_curve[769..1025] = display-domain luma curve.
+
+// Sigmoid via the log2-indexed LUT. CPU twin: SceneToneData::tone_map.
+fn dev_scene_lut(v: f32) -> f32 {
+    if (v <= 0.0) {
+        return 0.0;
+    }
+    let ev = log2(max(v, 6.1035156e-5)); // 2^-14
+    return dev_lut(clamp((ev + 14.0) / 20.0, 0.0, 1.0));
+}
+
+// Tone-equalizer EV offset at absolute exposure e. CPU twin: tone_eq_at.
+fn dev_tone_eq_at(e: f32) -> f32 {
+    return dev_local_lut_at(clamp((e + 14.0) / 20.0, 0.0, 1.0));
+}
+
+fn dev_in_srgb_gamut(c: vec3<f32>) -> bool {
+    return all(c >= vec3(-1e-6)) && all(c <= vec3(1.000001));
+}
+
+// Bilinear sample of the CPU-generated OKLCh cusp table. dev_effects carries
+// the buffer offset and dimensions, so the shader has no independent schema
+// constants to drift from core::gamut_map.
+fn dev_cusp_chroma(lightness: f32, hue: f32) -> f32 {
+    let base = u32(dev_effects[58]);
+    let hue_samples = u32(dev_effects[59]);
+    let lightness_samples = u32(dev_effects[60]);
+    var normalized_hue = hue / 6.28318530718;
+    if (normalized_hue < 0.0) { normalized_hue = normalized_hue + 1.0; }
+    let hp = normalized_hue * f32(hue_samples);
+    let h0 = u32(floor(hp)) % hue_samples;
+    let h1 = (h0 + 1u) % hue_samples;
+    let hw = hp - floor(hp);
+    let lp = clamp(lightness, 0.0, 1.0) * f32(lightness_samples - 1u);
+    let l0 = u32(floor(lp));
+    let l1 = min(l0 + 1u, lightness_samples - 1u);
+    let lw = lp - floor(lp);
+    let c00 = dev_rgb_curve[base + l0 * hue_samples + h0];
+    let c01 = dev_rgb_curve[base + l0 * hue_samples + h1];
+    let c10 = dev_rgb_curve[base + l1 * hue_samples + h0];
+    let c11 = dev_rgb_curve[base + l1 * hue_samples + h1];
+    return mix(mix(c00, c01, hw), mix(c10, c11, hw), lw);
+}
+
+// Display-linear, hue-preserving sRGB gamut mapping in OKLCh. In-gamut input
+// is bit-identical; out-of-gamut input keeps perceptual L/h and reads the same
+// cusp table as the CPU. The short search only guards interpolation overshoot.
+// CPU twin: gamut_map::map_to_output_gamut.
+fn dev_gamut_clip_chroma(c: vec3<f32>) -> vec3<f32> {
+    if (all(c >= vec3(0.0)) && all(c <= vec3(1.0))) { return c; }
+    let lab0 = dev_linear_srgb_to_oklab(c);
+    let chroma0 = length(lab0.yz);
+    let lightness = clamp(lab0.x, 0.0, 1.0);
+    if (chroma0 <= 1e-7) {
+        return clamp(dev_oklab_to_linear_srgb(vec3(lightness, 0.0, 0.0)), vec3(0.0), vec3(1.0));
+    }
+    let direction = lab0.yz / chroma0;
+    let mapped_chroma = min(chroma0, dev_cusp_chroma(lightness, atan2(lab0.z, lab0.y)));
+    var candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mapped_chroma));
+    if (dev_in_srgb_gamut(candidate)) {
+        return clamp(candidate, vec3(0.0), vec3(1.0));
+    }
+    var high = mapped_chroma;
+    var low = high * 0.95;
+    candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * low));
+    if (!dev_in_srgb_gamut(candidate)) { low = 0.0; }
+    let fallback_steps = u32(dev_effects[61]);
+    for (var i = 0u; i < fallback_steps; i = i + 1u) {
+        let mid = 0.5 * (low + high);
+        candidate = dev_oklab_to_linear_srgb(vec3(lightness, direction * mid));
+        if (dev_in_srgb_gamut(candidate)) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    return clamp(dev_oklab_to_linear_srgb(vec3(lightness, direction * low)), vec3(0.0), vec3(1.0));
+}
+
+fn dev_mixer_desat_weight(c: vec3<f32>) -> f32 {
+    let mx = max(max(c.r, c.g), c.b);
+    let delta = mx - min(min(c.r, c.g), c.b);
+    let sat = select(0.0, delta / max(mx, 1e-8), mx > 1e-4 && delta > 1e-6);
+    return 1.0 / (1.0 + exp(-24.0 * (sat - 0.01))) * dev_smootherstep(0.002, 0.025, delta);
+}
+
+// CPU twins: filmlike_clip / compress_highlight_chroma.
+fn dev_filmlike_clip(c: vec3<f32>) -> vec3<f32> {
+    let lo0 = min(min(c.r, c.g), c.b);
+    let hi = max(max(c.r, c.g), c.b);
+    if (hi <= 1.0) { return c; }
+    if (lo0 >= 1.0 || hi - lo0 <= 1e-8) { return vec3<f32>(1.0); }
+    let lo = max(lo0, 0.0);
+    let scale = (1.0 - lo) / max(hi - lo, 1e-8);
+    return vec3<f32>(lo) + (c - vec3<f32>(lo)) * scale;
+}
+
+// Safdar Jzazbz (2017), normalized so display-linear 1.0 is 100 cd/m².
+// CPU twin: core::perceptual_color::jzazbz.
+fn dev_jz_pq(v: f32) -> f32 {
+    let vn = pow(abs(v) / 10000.0, 0.15930176);
+    return sign(v) * pow((0.8359375 + 18.851563 * vn) / (1.0 + 18.6875 * vn), 134.03438);
+}
+
+fn dev_jz_inverse_pq(v: f32) -> f32 {
+    let vp = pow(abs(v), 1.0 / 134.03438);
+    let base = max((vp - 0.8359375) / (18.851563 - 18.6875 * vp), 0.0);
+    return sign(v) * 10000.0 * pow(base, 1.0 / 0.15930176);
+}
+
+fn dev_linear_srgb_to_jzazbz(rgb: vec3<f32>) -> vec3<f32> {
+    let x = 100.0 * dot(vec3<f32>(0.4124564, 0.3575761, 0.1804375), rgb);
+    let y = 100.0 * dot(vec3<f32>(0.2126729, 0.7151522, 0.0721750), rgb);
+    let z = 100.0 * dot(vec3<f32>(0.0193339, 0.1191920, 0.9503041), rgb);
+    let xp = 1.15 * x - 0.15 * z;
+    let yp = 0.66 * y + 0.34 * x;
+    let lp = dev_jz_pq(0.4147897 * xp + 0.579999 * yp + 0.014648 * z);
+    let mp = dev_jz_pq(-0.20151 * xp + 1.120649 * yp + 0.0531008 * z);
+    let sp = dev_jz_pq(-0.0166008 * xp + 0.2648 * yp + 0.6684799 * z);
+    let iz = 0.5 * (lp + mp);
+    let jz = 0.44 * iz / (1.0 - 0.56 * iz) - 1.6295499e-11;
+    let az = 3.524 * lp - 4.066708 * mp + 0.542708 * sp;
+    let bz = 0.199076 * lp + 1.096799 * mp - 1.295875 * sp;
+    return vec3<f32>(jz, az, bz);
+}
+
+fn dev_jzazbz_to_linear_srgb(jab: vec3<f32>) -> vec3<f32> {
+    let q = jab.x + 1.6295499e-11;
+    let iz = q / (0.44 + 0.56 * q);
+    let lp = iz + 0.13860504 * jab.y + 0.058047317 * jab.z;
+    let mp = iz - 0.13860504 * jab.y - 0.058047317 * jab.z;
+    let sp = iz - 0.09601924 * jab.y - 0.8118919 * jab.z;
+    let l = dev_jz_inverse_pq(lp);
+    let m = dev_jz_inverse_pq(mp);
+    let s = dev_jz_inverse_pq(sp);
+    let xp = 1.9242264 * l - 1.0047923 * m + 0.037651405 * s;
+    let yp = 0.35031676 * l + 0.7264812 * m - 0.065384425 * s;
+    let z = -0.09098281 * l - 0.3127283 * m + 1.5227666 * s;
+    let x = (xp + 0.15 * z) / 1.15;
+    let y = (yp - 0.34 * x) / 0.66;
+    let xyz = vec3<f32>(x, y, z) / 100.0;
+    return vec3<f32>(
+        dot(vec3<f32>(3.2404542, -1.5371385, -0.4985314), xyz),
+        dot(vec3<f32>(-0.9692660, 1.8760108, 0.0415560), xyz),
+        dot(vec3<f32>(0.0556434, -0.2040259, 1.0572252), xyz),
+    );
+}
+
+fn dev_compress_highlight_chroma(c: vec3<f32>, mapped_n: f32, scene_n: f32, mode: f32, perceptual_recipe: bool) -> vec3<f32> {
+    if (mode > 1.5) { return c; }
+    let ratio = mapped_n / max(scene_n, 1e-8);
+    if (ratio >= 1.0) { return c; }
+    let compression = select(dev_smootherstep(0.02, 0.80, 1.0 - ratio),
+                             dev_smootherstep(0.015, 0.92, 1.0 - ratio), perceptual_recipe);
+    let highlight = select(dev_smootherstep(0.55, 1.0, mapped_n),
+                           dev_smootherstep(0.48, 1.0, mapped_n), perceptual_recipe);
+    let excursion = max(max(max(-c.r, c.r - 1.0), max(-c.g, c.g - 1.0)), max(-c.b, c.b - 1.0));
+    let strength = select(0.12 + 0.38 * dev_smootherstep(0.0, 0.25, max(excursion, 0.0)), 0.65, mode > 0.5);
+    let amount = compression * highlight * strength * select(1.0, 0.82, perceptual_recipe);
+    if (perceptual_recipe) {
+        let jab = dev_linear_srgb_to_jzazbz(dev_working_to_linear_srgb(c));
+        let scaled = vec3<f32>(jab.x, jab.y * (1.0 - amount), jab.z * (1.0 - amount));
+        return dev_linear_srgb_to_working(dev_jzazbz_to_linear_srgb(scaled));
+    }
+    return mix(c, vec3<f32>(mapped_n), amount);
+}
+
+// CPU twin: restore_shadow_chroma.
+fn dev_restore_shadow_chroma(c: vec3<f32>) -> vec3<f32> {
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
+    let d = c - vec3<f32>(y);
+    let chroma = max(max(d.r, d.g), d.b) - min(min(d.r, d.g), d.b);
+    let tonal = dev_smootherstep(0.08, 0.18, y) * (1.0 - dev_smootherstep(0.38, 0.55, y));
+    let colored = dev_smootherstep(0.015, 0.10, chroma);
+    let scale = 1.0 + 0.05 * tonal * colored;
+    return vec3<f32>(y) + d * scale;
+}
+
+fn dev_mixer_curve_at(base: u32, h: f32) -> f32 {
+    let t = fract((h + 3.14159265) / 6.28318531) * 360.0;
+    let i = min(u32(t), 359u);
+    let f = t - f32(i);
+    return mix(dev_rgb_curve[base + i], dev_rgb_curve[base + ((i + 1u) % 360u)], f);
+}
+
+fn dev_signed_cbrt(x: f32) -> f32 {
+    return sign(x) * pow(abs(x), 0.3333333333);
+}
+
+// Shared OKLab core. CPU twins live in core::perceptual_color. Keep signed
+// cube roots and do not clamp: scene-linear negative/HDR values are valid.
+fn dev_linear_srgb_to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let ll = dev_signed_cbrt(dot(vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929), c));
+    let mm = dev_signed_cbrt(dot(vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566), c));
+    let ss = dev_signed_cbrt(dot(vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005), c));
+    return vec3<f32>(
+        0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss,
+        1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss,
+        0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss,
+    );
+}
+
+fn dev_oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
+    let l2_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    let m2_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    let s2_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    let l2 = l2_ * l2_ * l2_;
+    let m2 = m2_ * m2_ * m2_;
+    let s2 = s2_ * s2_ * s2_;
+    return vec3<f32>(
+        4.0767416621 * l2 - 3.3077115913 * m2 + 0.2309699292 * s2,
+        -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2,
+        -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2,
+    );
+}
+
+fn dev_working_to_linear_srgb(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[36], dev_effects[37], dev_effects[38]);
+    let m1 = vec3<f32>(dev_effects[39], dev_effects[40], dev_effects[41]);
+    let m2 = vec3<f32>(dev_effects[42], dev_effects[43], dev_effects[44]);
+    return vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+}
+
+fn dev_linear_srgb_to_working(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[45], dev_effects[46], dev_effects[47]);
+    let m1 = vec3<f32>(dev_effects[48], dev_effects[49], dev_effects[50]);
+    let m2 = vec3<f32>(dev_effects[51], dev_effects[52], dev_effects[53]);
+    return vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+}
+
+fn dev_working_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(dev_effects[54], dev_effects[55], dev_effects[56]));
+}
+
+fn dev_working_to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[64], dev_effects[65], dev_effects[66]);
+    let m1 = vec3<f32>(dev_effects[67], dev_effects[68], dev_effects[69]);
+    let m2 = vec3<f32>(dev_effects[70], dev_effects[71], dev_effects[72]);
+    let linear_lms = vec3<f32>(dot(m0, c), dot(m1, c), dot(m2, c));
+    let ll = sign(linear_lms.x) * pow(abs(linear_lms.x), 1.0 / 3.0);
+    let mm = sign(linear_lms.y) * pow(abs(linear_lms.y), 1.0 / 3.0);
+    let ss = sign(linear_lms.z) * pow(abs(linear_lms.z), 1.0 / 3.0);
+    return vec3<f32>(
+        0.2104542553 * ll + 0.7936177850 * mm - 0.0040720468 * ss,
+        1.9779984951 * ll - 2.4285922050 * mm + 0.4505937099 * ss,
+        0.0259040371 * ll + 0.7827717662 * mm - 0.8086757660 * ss,
+    );
+}
+
+fn dev_oklab_to_working(lab: vec3<f32>) -> vec3<f32> {
+    let ll = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+    let mm = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+    let ss = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+    let lms = vec3<f32>(ll * ll * ll, mm * mm * mm, ss * ss * ss);
+    let m0 = vec3<f32>(dev_effects[73], dev_effects[74], dev_effects[75]);
+    let m1 = vec3<f32>(dev_effects[76], dev_effects[77], dev_effects[78]);
+    let m2 = vec3<f32>(dev_effects[79], dev_effects[80], dev_effects[81]);
+    return vec3<f32>(dot(m0, lms), dot(m1, lms), dot(m2, lms));
+}
+
+fn dev_apply_working_luma_target(c: vec3<f32>, target_luma: f32) -> vec3<f32> {
+    let luma = clamp(dev_working_luma(c), 0.0, 1.0);
+    let target_l = clamp(target_luma, 0.0, 1.0);
+    let lift = target_l - luma;
+    let chroma = dev_chroma(c);
+    let chroma_gate = dev_smootherstep(0.04, 0.22, chroma);
+    let tone_gate = dev_smootherstep(0.025, 0.16, luma)
+        * (1.0 - dev_smootherstep(0.86, 0.98, target_l));
+    var chroma_factor = 1.0;
+    if (lift > 0.0) {
+        chroma_factor = 1.0 + lift * 1.20 * chroma_gate * tone_gate;
+    }
+    let additive = vec3<f32>(target_l) + (c - vec3<f32>(luma)) * chroma_factor;
+    let scaled = c * (target_l / max(luma, 0.00001));
+    let preserve = dev_luma_target_chroma_preserve_weight(luma, chroma, target_l);
+    var outc = mix(additive, scaled, preserve);
+    outc = outc + vec3<f32>(target_l - dev_working_luma(outc));
+    return outc;
+}
+
+// Oklab hue rotation on unclamped linear RGB. CPU twin: rotate_oklab_hue_linear.
+fn dev_rotate_oklab_hue_working(c: vec3<f32>, deg: f32) -> vec3<f32> {
+    let lab = dev_working_to_oklab(c);
+    let rad = deg * 0.01745329252;
+    let na = lab.y * cos(rad) - lab.z * sin(rad);
+    let nb = lab.y * sin(rad) + lab.z * cos(rad);
+    return dev_oklab_to_working(vec3<f32>(lab.x, na, nb));
+}
+
+// Gamut-aware chroma scale for the RAW scene colour stage. A POSITIVE push
+// scales chroma along a constant OKLCh hue+lightness line (a,b scaled together),
+// so the scene's single OKLCh output-boundary gamut clamp (dev_gamut_clip_chroma
+// in dev_scene_display) fits it to the MAX in-gamut chroma at the same
+// hue/lightness — the colour saturates up to the hull instead of overshooting in
+// linear RGB and folding back to a duller, hue-rotated colour (the pre-Q5
+// defect). Desaturation keeps the exact linear radial scale (already in gamut).
+// CPU twin: scale_linear_chroma_around_luma with boundary_managed = true.
+// The perceptual positive push belongs to the Develop3 recipe; retained legacy
+// engines keep their historical radial response.
+fn dev_scale_linear_chroma(c: vec3<f32>, factor: f32) -> vec3<f32> {
+    return dev_scale_linear_chroma_ex(c, factor, dev_effects[82] > 0.5);
+}
+
+// `perceptual`: the Develop3 recipe's OKLCh positive push.
+fn dev_scale_linear_chroma_ex(c: vec3<f32>, factor: f32, perceptual: bool) -> vec3<f32> {
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
+    let protect = dev_smootherstep(0.0027, 0.0174, y)
+        * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
+    let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
+    if (req > 0.0 && perceptual) {
+        var lab = dev_working_to_oklab(c);
+        let s = 1.0 + req;
+        lab = vec3<f32>(lab.x, lab.y * s, lab.z * s);
+        return dev_oklab_to_working(lab);
+    }
+    let d = c - vec3<f32>(y);
+    return vec3<f32>(y) + d * (1.0 + req);
+}
+
+// Hard-clamped (raster) twin of dev_scale_linear_chroma: a positive push is
+// tanh-compressed into the pixel's sRGB-hull headroom instead of leaving the
+// gamut to an output boundary. CPU twin: scale_linear_chroma_around_luma with
+// boundary_managed = false.
+fn dev_scale_linear_chroma_hull(c: vec3<f32>, factor: f32) -> vec3<f32> {
+    let y = clamp(dev_working_luma(c), 0.0, 1.0);
+    let protect = dev_smootherstep(0.0027, 0.0174, y)
+        * (1.0 - dev_smootherstep(0.7874, 0.9774, y));
+    let req = (clamp(factor, 0.0, 3.20) - 1.0) * protect;
+    let d = c - vec3<f32>(y);
+    var scale = 1.0 + req;
+    if (req > 0.0) {
+        let room = dev_chroma_headroom(d, y);
+        scale = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
+    }
+    return vec3<f32>(y) + d * scale;
+}
+
+// Full RAW colour stage on the unclamped linear working pixel. V2 classifies
+// and edits the same working-space OKLab value; Legacy keeps display-referred
+// UCS/HSV band semantics.
+fn dev_scene_color(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32>, use_guided: bool) -> vec3<f32> {
+    return dev_color_linear(input, classification, guided, use_guided, true);
+}
+
+// Per-pixel display-domain colour transform of an Identity pixel (display
+// RGB in, display RGB out). CPU twin: `apply_color` (linear sRGB, clamped).
+fn dev_display_direct_color(toned: vec3<f32>) -> vec3<f32> {
+    let t = clamp(toned, vec3(0.0), vec3(1.0));
+    let c = dev_color_linear(dev_srgb_to_linear(t), t, vec3<f32>(0.0), false, false);
+    return clamp(dev_linear_to_srgb(c), vec3(0.0), vec3(1.0));
+}
+
+// `boundary_managed`: the result passes the scene output boundary (RAW), so a
+// positive saturation push may leave the hull; otherwise it is hull-clamped.
+fn dev_color_linear(input: vec3<f32>, classification: vec3<f32>, guided: vec3<f32>, use_guided: bool, boundary_managed: bool) -> vec3<f32> {
+    var c = input;
+    let display = classification;
+    let working_lab = dev_working_to_oklab(c);
+    let working_chroma = length(working_lab.yz);
+    let working_hue = select(0.0, atan2(working_lab.z, working_lab.y), working_chroma > 0.0000001);
+    let h = select(dev_ucs_hue(display), working_hue, dev_effects[7] > 0.5);
+    let luma = clamp(dev_luma(display), 0.0, 1.0);
+    let legacy_w = dev_mixer_weight(display, 0.06);
+    let v2_w = dev_smootherstep(0.008, 0.055, working_chroma);
+    let w = select(legacy_w, v2_w, dev_effects[7] > 0.5);
+    var hue_ctl = clamp(dev_mixer_curve_at(1385u, h) * w, -200.0, 200.0);
+    var sat_ctl = dev_mixer_curve_at(1745u, h);
+    let legacy_desat_w = dev_mixer_desat_weight(display);
+    let v2_desat_w = dev_smootherstep(0.002, 0.025, working_chroma);
+    let desat_w = select(legacy_desat_w, v2_desat_w, dev_effects[7] > 0.5);
+    let sat_w = select(w, desat_w, sat_ctl < 0.0);
+    sat_ctl = clamp(sat_ctl * sat_w, -200.0, 200.0);
+    let legacy_lum_guard = dev_smootherstep(0.02, 0.14, luma)
+        * (1.0 - dev_smootherstep(0.82, 0.98, luma));
+    let v2_lum_guard = dev_smootherstep(0.015, 0.09, working_lab.x)
+        * (1.0 - dev_smootherstep(0.90, 1.02, working_lab.x));
+    var lum_ctl = clamp(dev_mixer_curve_at(2105u, h)
+        * select(dev_mixer_weight(display, 0.10) * legacy_lum_guard,
+                 v2_w * v2_lum_guard, dev_effects[7] > 0.5), -200.0, 200.0);
+    if (use_guided) {
+        hue_ctl = guided.x;
+        sat_ctl = guided.y;
+        lum_ctl = guided.z;
+    }
+
+    if (dev_effects[7] > 0.5) {
+        var lab = working_lab;
+        let rad = dev_eased(hue_ctl) * 45.0 * 0.01745329252;
+        let chroma = length(lab.yz);
+        var hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001) + rad;
+        let sat_delta = dev_eased(sat_ctl);
+        let shaped_response = select(1.0,
+            1.35 - 0.73 * dev_smootherstep(0.05, 0.30, chroma),
+            dev_effects[82] > 0.5 && sat_delta > 0.0);
+        let chroma_scale = max(0.0, select(1.0 + 0.95 * sat_delta,
+                                           1.0 + 1.15 * sat_delta * shaped_response,
+                                           sat_delta >= 0.0));
+        let light_delta = dev_eased(lum_ctl);
+        let room = select(max(lab.x, 0.0), max(1.0 - lab.x, 0.0), light_delta >= 0.0);
+        lab.x = lab.x + light_delta * 0.32 * room;
+        lab.y = chroma * chroma_scale * cos(hue);
+        lab.z = chroma * chroma_scale * sin(hue);
+        c = dev_oklab_to_working(lab);
+        hue_ctl = 0.0;
+        sat_ctl = 0.0;
+        lum_ctl = 0.0;
+    }
+
+    if (abs(hue_ctl) > 0.001) {
+        c = dev_rotate_oklab_hue_working(c, dev_eased(hue_ctl) * 45.0);
+    }
+    let global_sat = dev_eased(dev_effects[34]);
+    let mixer_sat = dev_eased(sat_ctl);
+    let vibrance = dev_eased(dev_effects[35]);
+    let vib_delta = vibrance * (1.0 - dev_smootherstep(0.10, 0.35, dev_chroma(c))) * 0.88;
+    let delta = clamp(global_sat + mixer_sat + vib_delta, -1.0, 1.0);
+    var factor = 1.0 + delta;
+    if (delta > 0.0) {
+        let positive_total = max(global_sat, 0.0) + max(mixer_sat, 0.0) + max(vib_delta, 0.0);
+        var mixer_share = 0.0;
+        if (positive_total > 1e-6) {
+            mixer_share = clamp(max(mixer_sat, 0.0) / positive_total, 0.0, 1.0);
+        }
+        factor = 1.0 + delta * (1.50 + mixer_share * 0.70);
+    }
+    if (abs(factor - 1.0) > 0.001) {
+        if (boundary_managed) {
+            c = dev_scale_linear_chroma(c, factor);
+        } else {
+            c = dev_scale_linear_chroma_hull(c, factor);
+        }
+    }
+
+    let lum_delta = dev_eased(lum_ctl);
+    if (abs(lum_delta) > 0.001) {
+        let y = clamp(dev_working_luma(c), 0.0, 1.0);
+        let tonal_room = select(pow(y, 0.42), pow(1.0 - y, 0.42), lum_delta >= 0.0);
+        let gain = max(1.0 + lum_delta * 0.62 * tonal_room, 0.0);
+        let mx = max(c.r, max(c.g, c.b));
+        if (mx >= 1e-6 && abs(gain - 1.0) >= 1e-4) {
+            let want = mx * gain;
+            var new_mx = want;
+            if (gain > 1.0 && want > 0.90) {
+                let t = (want - 0.90) / 0.10;
+                new_mx = max(0.90 + 0.10 * t / (1.0 + t), mx);
+            }
+            c = c * (new_mx / mx);
+        }
+    }
+    return c;
+}
+
+// Interpolated display-domain luma curve (curve_* sliders + point curve).
+fn dev_display_lum_at(v: f32) -> f32 {
+    let x = clamp(v, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let t = x - f32(i0);
+    return mix(dev_rgb_curve[769u + i0], dev_rgb_curve[769u + i1], t);
+}
+
+// The full scene chain: linear scene RGB → display-referred gamma sRGB.
+// CPU twin: SceneToneData::scene_to_display (region_e from the proxy).
+fn dev_scene_display(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let px = local * size - 0.5;
+    return dev_scene_output(dev_apply_locals_working(dev_scene_working(scene_rgb, local), px, size));
+}
+
+// Scene chain up to (and including) RAW colour, in the working space — the
+// boundary where the commit runs RAW Detail. CPU twin: scene_to_working +
+// the per-pixel colour stage.
+fn dev_scene_working(scene_rgb: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_effects[16], dev_effects[17], dev_effects[18]);
+    let m1 = vec3<f32>(dev_effects[19], dev_effects[20], dev_effects[21]);
+    let m2 = vec3<f32>(dev_effects[22], dev_effects[23], dev_effects[24]);
+    var v = vec3<f32>(dot(m0, scene_rgb), dot(m1, scene_rgb), dot(m2, scene_rgb));
+    if (u.adj_p[1].x > 0.5) {
+        // All five Light bands (incl. Blacks) are summed into this one scene-linear
+        // regional multiply. CPU twin: SceneToneData::scene_to_working.
+        let e = dev_region_luma_at(local.x * u.layer_w, local.y * u.layer_h);
+        v = v * exp2(dev_tone_eq_at(e));
+    }
+    // Scene-linear split grade. CPU twin: apply_scene_grade.
+    let grade_shadow = vec3<f32>(dev_effects[27], dev_effects[28], dev_effects[29]);
+    let grade_highlight = vec3<f32>(dev_effects[30], dev_effects[31], dev_effects[32]);
+    if (any(abs(grade_shadow) > vec3<f32>(1e-8)) || any(abs(grade_highlight) > vec3<f32>(1e-8))) {
+        let y = max(dev_working_luma(v), 0.0);
+        let er = log2(max(y, 6.1035156e-5)) - log2(0.1845);
+        let sd = (er + 2.0) / 1.8;
+        let hd = (er - 2.0) / 1.8;
+        let sw = exp(-0.5 * sd * sd);
+        let hw = exp(-0.5 * hd * hd);
+        v = v + sqrt(y) * (grade_shadow * sw + grade_highlight * hw);
+    }
+    // Per-channel sigmoid blended toward the max-RGB ratio path.
+    let pc = vec3<f32>(dev_scene_lut(v.r), dev_scene_lut(v.g), dev_scene_lut(v.b));
+    var outc = pc;
+    let n = max(max(v.r, v.g), v.b);
+    if (n > 1e-8) {
+        let mapped_n = dev_scene_lut(n);
+        let hw = dev_smootherstep(0.5, 1.0, mapped_n);
+        var blend = 1.0;
+        if (dev_effects[8] < 1.5) {
+            blend = 0.90 + (0.20 - 0.90) * hw;
+            if (dev_effects[8] < 0.5) { blend = min(blend + 0.10, 1.0); }
+        }
+        outc = mix(pc, v * (mapped_n / n), blend);
+        outc = dev_compress_highlight_chroma(
+            outc, mapped_n, n, dev_effects[8], dev_effects[83] > 0.5
+        );
+    }
+    // Contrast is independent of the sigmoid shoulder: a two-sided power
+    // curve fixed at black, 18.45% grey and white. CPU twin: apply_scene_contrast.
+    let cg = dev_effects[33];
+    if (abs(cg - 1.0) > 1e-5) {
+        let y = clamp(dev_working_luma(outc), 0.0, 1.0);
+        let pivot = 0.1845;
+        var target_l = pivot * pow(y / pivot, cg);
+        if (y > pivot) {
+            target_l = 1.0 - (1.0 - pivot) * pow((1.0 - y) / (1.0 - pivot), cg);
+        }
+        outc = select(
+            dev_apply_luma_target(outc, target_l),
+            dev_apply_working_luma_target(outc, target_l),
+            dev_effects[57] > 0.5,
+        );
+    }
+    if (dev_effects[25] > 0.5) {
+        outc = dev_restore_shadow_chroma(outc);
+    }
+    // Colour stage inside the scene chain: RAW only (dev_effects[10]). An
+    // Identity scene commits colour in the display domain, so its proxies carry
+    // it in every mode; colour-proxy mode 1 always owns the colour stage.
+    let proxy_owns_color = u.adj_p[2].x > 0.5 && u.adj_p[2].x < 1.5;
+    if (dev_effects[10] > 0.5 && !proxy_owns_color) {
+        let classification_linear = dev_gamut_clip_chroma(
+            dev_filmlike_clip(dev_working_to_linear_srgb(outc))
+        );
+        var classification = dev_linear_to_srgb(clamp(classification_linear, vec3(0.0), vec3(1.0)));
+        // Classification reads the same displayed stage as the CPU
+        // `working_to_display`, including the master curve before RGB tabs.
+        if (dev_effects[26] > 0.5) {
+            if (dev_effects[9] > 0.5) {
+                var class_lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(classification));
+                class_lab.x = dev_display_lum_at(clamp(class_lab.x, 0.0, 1.0));
+                let class_curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(class_lab));
+                classification = dev_linear_to_srgb(clamp(class_curved, vec3(0.0), vec3(1.0)));
+            } else {
+                let class_l = clamp(dev_luma(classification), 0.0, 1.0);
+                classification = dev_apply_luma_target(classification, dev_display_lum_at(class_l));
+            }
+        }
+        if (dev_rgb_curve[0] > 0.5) {
+            classification = vec3<f32>(
+                dev_rgb_curve_at(0u, classification.r),
+                dev_rgb_curve_at(1u, classification.g),
+                dev_rgb_curve_at(2u, classification.b),
+            );
+        }
+        let use_guided = dev_effects[82] > 0.5 && u.adj_p[2].x > 2.5;
+        var guided = vec3<f32>(0.0);
+        if (use_guided) {
+            // Fragment UVs address pixel centres. Convert to the integer
+            // layer-pixel coordinate expected by dev_color_proxy_at so an s=1
+            // settled proxy samples its exact control, not a half-pixel blend.
+            guided = dev_color_proxy_at(
+                local.x * u.layer_w - 0.5,
+                local.y * u.layer_h - 0.5
+            ).adjusted;
+        }
+        outc = dev_scene_color(outc, classification, guided, use_guided);
+    }
+    return outc;
+}
+
+// Working space → display-referred gamma sRGB (output clip + display curve).
+// CPU twin: SceneToneData::working_to_display.
+fn dev_scene_output(outc: vec3<f32>) -> vec3<f32> {
+    let output_linear = dev_gamut_clip_chroma(
+        dev_filmlike_clip(dev_working_to_linear_srgb(outc))
+    );
+    var g = dev_linear_to_srgb(clamp(output_linear, vec3(0.0), vec3(1.0)));
+    if (dev_effects[26] > 0.5) {
+        if (dev_effects[9] > 0.5) {
+            var lab = dev_linear_srgb_to_oklab(dev_srgb_to_linear(g));
+            lab.x = dev_display_lum_at(clamp(lab.x, 0.0, 1.0));
+            let curved = dev_gamut_clip_chroma(dev_oklab_to_linear_srgb(lab));
+            g = dev_linear_to_srgb(clamp(curved, vec3(0.0), vec3(1.0)));
+        } else {
+            let l = clamp(dev_luma(g), 0.0, 1.0);
+            g = dev_apply_luma_target(g, dev_display_lum_at(l));
+        }
+    }
+    return clamp(g, vec3(0.0), vec3(1.0));
+}
+
+struct CrColorProxy {
+    region: vec3<f32>,
+    adjusted: vec3<f32>,
+};
+
+// Bilinear sample of the colour `region`/`adjusted` proxies at layer-local pixel
+// (lx, ly). adj_p[2] = (color_on, downsample s, proxy_w, proxy_h). Both proxies
+// share the same grid, so the weights are computed once. Mirrors the CPU
+// `build_color_lowpass` mapping so preview and bake read the same field.
+fn dev_color_proxy_at(lx: f32, ly: f32) -> CrColorProxy {
+    let pw = u32(u.adj_p[2].z);
+    let ph = u32(u.adj_p[2].w);
+    var out: CrColorProxy;
+    if (pw == 0u || ph == 0u) {
+        out.region = vec3<f32>(0.0);
+        out.adjusted = vec3<f32>(0.0);
+        return out;
+    }
+    let origin = vec2<f32>(u.adj_p[1].z, u.adj_p[1].w);
+    let s = max(u.adj_p[2].y, 1.0);
+    // (lx, ly) is an integer layer pixel; texel t covers [t·s, (t+1)·s) from
+    // the origin and is centred at (t + 0.5)·s, like the CPU colour field.
+    let sample_x = lx - origin.x + 0.5;
+    let sample_y = ly - origin.y + 0.5;
+    let fx = clamp(sample_x / s - 0.5, 0.0, f32(pw - 1u));
+    let fy = clamp(sample_y / s - 0.5, 0.0, f32(ph - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, pw - 1u);
+    let y1 = min(y0 + 1u, ph - 1u);
+    let wx = fx - f32(x0);
+    let wy = fy - f32(y0);
+    let i00 = (y0 * pw + x0) * 3u;
+    let i10 = (y0 * pw + x1) * 3u;
+    let i01 = (y1 * pw + x0) * 3u;
+    let i11 = (y1 * pw + x1) * 3u;
+    let r00 = vec3<f32>(dev_region_rgb[i00], dev_region_rgb[i00 + 1u], dev_region_rgb[i00 + 2u]);
+    let r10 = vec3<f32>(dev_region_rgb[i10], dev_region_rgb[i10 + 1u], dev_region_rgb[i10 + 2u]);
+    let r01 = vec3<f32>(dev_region_rgb[i01], dev_region_rgb[i01 + 1u], dev_region_rgb[i01 + 2u]);
+    let r11 = vec3<f32>(dev_region_rgb[i11], dev_region_rgb[i11 + 1u], dev_region_rgb[i11 + 2u]);
+    out.region = mix(mix(r00, r10, wx), mix(r01, r11, wx), wy);
+    let a00 = vec3<f32>(dev_adjusted_rgb[i00], dev_adjusted_rgb[i00 + 1u], dev_adjusted_rgb[i00 + 2u]);
+    let a10 = vec3<f32>(dev_adjusted_rgb[i10], dev_adjusted_rgb[i10 + 1u], dev_adjusted_rgb[i10 + 2u]);
+    let a01 = vec3<f32>(dev_adjusted_rgb[i01], dev_adjusted_rgb[i01 + 1u], dev_adjusted_rgb[i01 + 2u]);
+    let a11 = vec3<f32>(dev_adjusted_rgb[i11], dev_adjusted_rgb[i11 + 1u], dev_adjusted_rgb[i11 + 2u]);
+    out.adjusted = mix(mix(a00, a10, wx), mix(a01, a11, wx), wy);
+    return out;
+}
+
+// Membership of colour `c` in the EDITED bands' hues: the CPU-built gate LUT
+// (dev_rgb_curve[1025..1385], 1°/entry, periodic) sampled at the pixel's UCS
+// hue, times the logistic saturation weight (midpoint 0.06 — mirrors CPU
+// MIXER_SAT_SHIFT). Exact mirror of CPU `band_affinity`, down to the LUT wrap.
+fn dev_band_affinity(c: vec3<f32>) -> f32 {
+    let linear = vec3<f32>(
+        dev_srgb_to_linear_channel(c.r),
+        dev_srgb_to_linear_channel(c.g),
+        dev_srgb_to_linear_channel(c.b),
+    );
+    let lab = dev_linear_srgb_to_oklab(linear);
+    let chroma = length(lab.yz);
+    let oklch_hue = select(0.0, atan2(lab.z, lab.y), chroma > 0.0000001);
+    let h = select(dev_ucs_hue(c), oklch_hue, dev_effects[7] > 0.5);
+    let t = fract((h + 3.14159265) / 6.28318531) * 360.0;
+    let i = min(u32(t), 359u);
+    let f = t - f32(i);
+    let a = dev_rgb_curve[1025u + i];
+    let b = dev_rgb_curve[1025u + ((i + 1u) % 360u)];
+    let gate = a + (b - a) * f;
+    let legacy_w = select(dev_mixer_weight(c, 0.06), dev_mixer_desat_weight(c), dev_effects[6] > 0.0);
+    let v2_w = select(dev_smootherstep(0.008, 0.055, chroma),
+                      dev_smootherstep(0.002, 0.025, chroma), dev_effects[6] > 0.0);
+    let w = select(legacy_w, v2_w, dev_effects[7] > 0.5);
+    return clamp(gate * w, 0.0, 1.0);
+}
+
+// Full-res spatial MEMBERSHIP indicator for mixer-band edits (active when
+// dev_effects[4] > 0.5): once the pixel belongs to an edited hue the gate opens
+// fully — the knees sit below the curve's response onset so in-between hues
+// (partial responders) receive their proxy delta whole, matching the commit.
+// A nearly-pure edited-band region still carries specks/neutrals inside; a
+// boundary mix shuts the gate. Mirrors CPU `mixer_edit_affinity`
+// (REGATE_LO 0.02, REGATE_HI 0.12). Reads the SMOOTH region (guided low-pass) —
+// "prefilter chromaticity": band membership follows the
+// neighbourhood hue so it can't flip pixel to pixel across a soft edge or JPEG
+// chroma block, and the edit tapers across a boundary. A uniform object's
+// low-pass equals its pixels, so its interior is unchanged.
+fn dev_mixer_edit_affinity(region: vec3<f32>) -> f32 {
+    return dev_smootherstep(0.02, 0.12, dev_band_affinity(region));
+}
+
+// Recombine the toned pixel with its (colour-)adjusted region plus re-added detail:
+// luminance detail in full, chroma detail attenuated, and the colour change gated
+// by the REGIONAL (guided low-pass) chroma-rescued luma and band membership, so
+// the edit TAPERS across a colour/tone boundary instead of a hard 1-px edge; the
+// per-pixel detail below keeps interior sharpness. The gate is applied a SINGLE
+// time. Mirrors CPU `finish_colored_pixel_f32` (CHROMA_DETAIL_KEEP 0.5,
+// SHADOW_COLOR_RESCUE 0.60).
+fn dev_finish_colored(toned: vec3<f32>, region: vec3<f32>, adjusted: vec3<f32>) -> vec3<f32> {
+    let d = toned - region;
+    let dl = dev_luma(d);
+    // PER-PIXEL shadow/neutral fade (pixel's OWN luma/chroma): protects a thin
+    // dark strand lying over a bright coloured region from being lifted toward
+    // white — it averages out of the region, so a region-based fade would lift
+    // it. Mass boundaries stay smooth via the edge suppression baked into the
+    // adjusted proxy. Mirrors CPU `finish_colored_pixel_f32`.
+    let lt = clamp(dev_luma(toned), 0.0, 1.0);
+    let ct = dev_chroma(toned);
+    var gate = dev_smootherstep(0.0, 0.32, lt + ct * 0.60);
+    var mixer_affinity = 1.0;
+    if (dev_effects[4] > 0.5) {
+        mixer_affinity = dev_mixer_edit_affinity(region);
+        gate = gate * mixer_affinity;
+    }
+    let dlv = vec3<f32>(dl, dl, dl);
+    // Adaptive chroma-detail keep: small deviations (JPEG chroma blocks) stay
+    // attenuated at 0.5, big ones (real colour boundaries) keep their colour.
+    // Reconstruct the FULL adjusted region + detail, then blend toward the pixel
+    // by the gate ONCE. Gate → 0 returns the exact toned pixel (bit-faithful).
+    let cd = d - dlv;
+    let detail_keep = 0.5 + 0.5 * dev_smootherstep(0.08, 0.22, length(cd));
+    let desat = max(dev_effects[5], dev_effects[6] * mixer_affinity);
+    let keep = detail_keep * (1.0 - desat);
+    let full = clamp(adjusted + dlv + cd * keep, vec3(0.0), vec3(1.0));
+    let toned_c = clamp(toned, vec3(0.0), vec3(1.0));
+    return clamp(toned_c + (full - toned_c) * gate, vec3(0.0), vec3(1.0));
+}
+
+// Develop Effects. `base_l` is the pixel's edge-aware regional luminance after
+// tone (dev_luma of the colour region proxy on the colour path) — it makes
+// Clarity a real local-contrast op and Dehaze a veil removal, matching the CPU
+// `apply_effects` (CLARITY_GAIN 2.2 / CLARITY_LIMIT 0.28 / DEHAZE 0.7, 0.25).
+// dev_effects = raw [texture, clarity, dehaze, vignette].
+fn dev_effects_stage(c_in: vec3<f32>, local: vec2<f32>, base_l: f32) -> vec3<f32> {
+    var c = c_in;
+    let texture_raw = dev_effects[0];
+    let clarity_raw = dev_effects[1];
+    let dehaze_raw = dev_effects[2];
+    let vignette_raw = dev_effects[3];
+    if (dev_active(texture_raw)) {
+        let l = clamp(dev_luma(c), 0.0, 1.0);
+        let base = clamp(base_l, 0.0, 1.0);
+        let k = dev_eased(texture_raw) * 1.35;
+        let tonal = dev_bell(base, 0.5, 0.62);
+        let boost = k * tonal * (l - base);
+        let delta = 0.14 * tanh(boost / 0.14);
+        c = dev_apply_luma_target(c, clamp(l + delta, 0.0, 1.0));
+    }
+    if (dev_active(clarity_raw)) {
+        let l = clamp(dev_luma(c), 0.0, 1.0);
+        let base = clamp(base_l, 0.0, 1.0);
+        let k = dev_eased(clarity_raw) * (200.0 / 180.0) * 2.2;
+        let mid = dev_bell(base, 0.5, 0.56);
+        let boost = k * mid * (l - base);
+        let delta = 0.28 * tanh(boost / 0.28);
+        c = dev_tone_delta(c, delta);
+    }
+    if (dev_active(dehaze_raw)) {
+        let base = clamp(base_l, 0.0, 1.0);
+        let d = clamp(dev_eased(dehaze_raw) * (200.0 / 160.0), -1.0, 1.0);
+        if (d > 0.0) {
+            let veil = dev_smootherstep(0.25, 0.95, base);
+            let t = max(1.0 - d * veil * 0.7, 0.25);
+            let a = 1.0 - t;
+            c = (c - vec3<f32>(a, a, a)) / t;
+        } else {
+            let m = -d * 0.45 * dev_smootherstep(0.10, 0.90, base);
+            c = c * (1.0 - m) + vec3<f32>(m, m, m);
+        }
+    }
+    if (dev_active(vignette_raw)) {
+        let vignette = dev_eased(vignette_raw);
+        let n = dev_vignette_pos(local);
+        let edge = clamp(length(n) / 0.707, 0.0, 1.0);
+        let amount = dev_smootherstep(0.18, 1.0, edge) * abs(vignette) * 0.42;
+        let delta = select(amount, -amount, vignette > 0.0);
+        c = dev_tone_delta(c, delta);
+    }
+    return clamp(c, vec3(0.0), vec3(1.0));
+}
+
+// Vignette position of the pixel at `local`: x / (w − 1) − 0.5 for integer
+// pixel x, like the CPU `x · inv_w − 0.5`.
+fn dev_vignette_pos(local: vec2<f32>) -> vec2<f32> {
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let px = local * size - 0.5;
+    return px / max(size - 1.0, vec2<f32>(1.0)) - 0.5;
+}
+
+// RAW twin of dev_effects_stage on the unclamped working pixel (CPU twin:
+// apply_effects_linear_in_space); `base_l` is the guided working luminance.
+fn dev_effects_linear(c_in: vec3<f32>, local: vec2<f32>, base_l: f32) -> vec3<f32> {
+    var c = c_in;
+    let texture_raw = dev_effects[0];
+    let clarity_raw = dev_effects[1];
+    let dehaze_raw = dev_effects[2];
+    let vignette_raw = dev_effects[3];
+    if (dev_active(texture_raw)) {
+        let l = max(dev_working_luma(c), 0.0);
+        let base = max(base_l, 0.0);
+        let k = dev_eased(texture_raw) * 1.35;
+        let boost = k * dev_bell(clamp(base, 0.0, 1.0), 0.5, 0.62) * (l - base);
+        let delta = 0.14 * tanh(boost / 0.14);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    if (dev_active(clarity_raw)) {
+        let l = max(dev_working_luma(c), 0.0);
+        let base = max(base_l, 0.0);
+        let k = dev_eased(clarity_raw) * (200.0 / 180.0) * 2.2;
+        let boost = k * dev_bell(clamp(base, 0.0, 1.0), 0.5, 0.56) * (l - base);
+        let delta = 0.28 * tanh(boost / 0.28);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    if (dev_active(dehaze_raw)) {
+        let base = clamp(base_l, 0.0, 1.0);
+        let d = clamp(dev_eased(dehaze_raw) * (200.0 / 160.0), -1.0, 1.0);
+        if (d > 0.0) {
+            let veil = dev_smootherstep(0.25, 0.95, base);
+            let t = max(1.0 - d * veil * 0.7, 0.25);
+            let a = 1.0 - t;
+            c = (c - vec3<f32>(a, a, a)) / t;
+        } else {
+            let m = -d * 0.45 * dev_smootherstep(0.10, 0.90, base);
+            c = c * (1.0 - m) + vec3<f32>(m, m, m);
+        }
+    }
+    if (dev_active(vignette_raw)) {
+        let vignette = dev_eased(vignette_raw);
+        let n = dev_vignette_pos(local);
+        let edge = clamp(length(n) / 0.707, 0.0, 1.0);
+        let amount = dev_smootherstep(0.18, 1.0, edge) * abs(vignette) * 0.42;
+        let delta = select(amount, -amount, vignette > 0.0);
+        let l = max(dev_working_luma(c), 0.0);
+        c = dev_set_working_luma(c, max(l + delta, 0.0));
+    }
+    return c;
+}
+
+fn dev_set_working_luma(c: vec3<f32>, target_l: f32) -> vec3<f32> {
+    let old = dev_working_luma(c);
+    if (abs(old) > 1e-6) {
+        return c * (target_l / old);
+    }
+    return vec3<f32>(target_l);
+}
+
+fn dev_effects_any() -> bool {
+    return dev_active(dev_effects[0]) || dev_active(dev_effects[1])
+        || dev_active(dev_effects[2]) || dev_active(dev_effects[3]);
+}
+
+// Effects base on the plane's base grid (bank [271] == 1, see
+// fs_develop_base_luma): cell (i, j) spans [origin + (i, j)·cell, +cell) in
+// layer px and is sampled bilinearly at pixel centres, like the CPU upsample.
+fn dev_effects_base_at(local: vec2<f32>) -> f32 {
+    let gw = u32(dev_param(276u));
+    let gh = u32(dev_param(277u));
+    if (gw == 0u || gh == 0u) {
+        return 0.0;
+    }
+    let cell = max(dev_param(275u), 1.0);
+    let off = u32(dev_param(272u));
+    let lx = local.x * dev_param(266u);
+    let ly = local.y * dev_param(267u);
+    let fx = clamp((lx - dev_param(273u)) / cell - 0.5, 0.0, f32(gw - 1u));
+    let fy = clamp((ly - dev_param(274u)) / cell - 0.5, 0.0, f32(gh - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, gw - 1u);
+    let y1 = min(y0 + 1u, gh - 1u);
+    let wx = fx - f32(x0);
+    let wy = fy - f32(y0);
+    let v00 = dev_region_luma[off + y0 * gw + x0];
+    let v10 = dev_region_luma[off + y0 * gw + x1];
+    let v01 = dev_region_luma[off + y1 * gw + x0];
+    let v11 = dev_region_luma[off + y1 * gw + x1];
+    let top = v00 + (v10 - v00) * wx;
+    let bot = v01 + (v11 - v01) * wx;
+    return top + (bot - top) * wy;
+}
+
+// Effects base when the colour field does not supply one: the plane's base
+// grid when it was built, else the pixel's own luminance.
+fn dev_plane_effects_base(local: vec2<f32>, pixel: vec3<f32>) -> f32 {
+    let kind = dev_param(271u);
+    if ((kind > 0.5 && kind < 1.5) || kind > 2.5) {
+        return dev_effects_base_at(local);
+    }
+    return clamp(dev_luma(pixel), 0.0, 1.0);
+}
+
+// Develop tone stage: White Balance + Exposure as per-channel linear gains,
+// then the tone curve on luminance, then chroma re-applied around the new luma.
+// adj_p[0] = (gain_r, gain_g, gain_b, ev). Mirrors CPU ToneData::apply / apply_local.
+// When adj_p[1].x==1 the local-adaptation path runs: the global curve (u.lut, here
+// WITHOUT Highlights/Shadows) is read at the pixel luma and the H/S/W/B offset is
+// read at the REGIONAL luma. When adj_p[2].x==1 the colour stage recombines the
+// region/adjusted proxies. Both match the CPU bake, so there is no pop on commit.
+// Interleaved-gradient ordered dither in [0,1) — cheap, seam-free, no array.
+fn dev_ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Detail preservation for the local-adaptation lift. Mirrors the CPU
+// `local_detail_boost` exactly (EPS 0.02, MAX 2.2, strength 0.5, keep band
+// 0.10–0.35).
+fn dev_local_detail_boost(l: f32, base: f32, offset: f32) -> f32 {
+    if (abs(offset) <= 1e-4) {
+        return 0.0;
+    }
+    let base_new = clamp(base + offset, 0.0, 1.0);
+    var ratio: f32;
+    if (offset > 0.0) {
+        ratio = (base_new + 0.02) / (base + 0.02);
+    } else {
+        ratio = (1.0 - base_new + 0.02) / (1.0 - base + 0.02);
+    }
+    let gain = 1.0 + (clamp(ratio, 1.0, 2.2) - 1.0) * 0.5;
+    let d = l - base;
+    let texture_w = 1.0 - dev_smootherstep(0.10, 0.35, abs(d));
+    return d * (gain - 1.0) * texture_w;
+}
+
+// Interpolated lookup into one channel of the R/G/B point-curve tables.
+fn dev_rgb_curve_at(ch: u32, v: f32) -> f32 {
+    let x = clamp(v, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let t = x - f32(i0);
+    let base = 1u + ch * 256u;
+    return mix(dev_rgb_curve[base + i0], dev_rgb_curve[base + i1], t);
+}
+
+// The only way from `fs_main` into the Develop chain. `shader_without_develop`
+// cuts the body between the two marker lines, leaving the pixel as it came:
+// DX12's old shader compiler (FXC) takes minutes over the chain, seconds
+// without it, and a device that compiles with it previews Develop on the CPU.
+fn develop_apply(srgb_in: vec3<f32>, local: vec2<f32>, lod: f32) -> vec3<f32> {
+    // develop-chain-begin
+    // GPU Detail plane: the pre-pass already ran the chain and Detail over
+    // this view. Pixels outside it (a view that has just panned, before the
+    // plane follows) take the ordinary chain below, without Detail.
+    if (dev_param(256u) > 0.5) {
+        let lx = local.x * dev_param(266u);
+        let ly = local.y * dev_param(267u);
+        if (lx >= dev_param(260u) && ly >= dev_param(261u)
+            && lx < dev_param(262u) && ly < dev_param(263u)) {
+            return dev_detail_output(lx, ly);
+        }
+    }
+    var toned: vec3<f32>;
+    if (u.adj_pad_c == 1u) {
+        // Scene-referred session: ignore the 8-bit atlas value entirely and run
+        // the full scene chain from the f16 linear master (no input dither
+        // needed — the source is not quantized). textureSampleLevel is legal in
+        // non-uniform control flow. Display curves are inside the chain, so the
+        // rgb-point-curve block below is skipped for this path (scene sessions
+        // fold them into dev_scene_display's display stage instead).
+        // A zoomed-out tap reads its sub-block mean (bilinear, scene mips).
+        var scene_rgb: vec3<f32>;
+        if (lod >= 0.0) {
+            scene_rgb = textureSampleLevel(dev_scene_tex, atlas_lin, local, lod).rgb;
+        } else {
+            // The nearest texel, by `textureLoad`: OpenGL cannot read one
+            // texture through two samplers, and its shader is refused whole.
+            let dims = vec2<i32>(textureDimensions(dev_scene_tex, 0));
+            let texel = clamp(vec2<i32>(floor(local * vec2<f32>(dims))), vec2<i32>(0), dims - 1);
+            scene_rgb = textureLoad(dev_scene_tex, texel, 0).rgb;
+        }
+        toned = dev_scene_display(scene_rgb, local);
+    } else {
+    // Tone stage (skipped when inactive, so a Colour-only edit does not roll off
+    // highlights — matching the CPU bake's `tone = None`).
+    toned = clamp(srgb_in, vec3(0.0), vec3(1.0));
+    // The preview atlas is 8-bit, so a 16-bit source (e.g. a RAW) loses its smooth
+    // gradients here; a hard tone push then shows 256-step banding that the 16-bit
+    // commit doesn't have. Add a sub-LSB ordered dither (~±0.5 of an 8-bit step,
+    // per channel) BEFORE the curve so the banding dissolves into imperceptible
+    // noise, matching the smooth commit. Cost is one fract-hash per channel.
+    let dpx = vec2<f32>(local.x * u.layer_w, local.y * u.layer_h);
+    let dither = vec3<f32>(
+        dev_ign(dpx) - 0.5,
+        dev_ign(dpx + vec2<f32>(11.3, 7.1)) - 0.5,
+        dev_ign(dpx + vec2<f32>(23.7, 19.5)) - 0.5,
+    ) * (1.0 / 255.0);
+    toned = clamp(toned + dither, vec3(0.0), vec3(1.0));
+    if (u.adj_pad_a == 1u) {
+        let gp = u.adj_p[0];
+        let gain = vec3<f32>(gp.x, gp.y, gp.z);
+        let ev = gp.w;
+        var lin = dev_srgb_to_linear(toned) * gain * ev;
+        let l0_ro = max(dev_luma_lin(lin), 0.0);
+        let target_ro = dev_highlight_rolloff(l0_ro);
+        if (l0_ro > 1e-6) {
+            lin = lin * (target_ro / l0_ro);
+        }
+        lin = dev_fit_linear_rgb_to_luma(lin, target_ro);
+        let rgb = clamp(dev_linear_to_srgb(lin), vec3(0.0), vec3(1.0));
+        let l = clamp(dev_luma(rgb), 0.0, 1.0);
+        var target_l = dev_lut(l);
+        if (u.adj_p[1].x > 0.5) {
+            let region_l = dev_region_luma_at(local.x * u.layer_w, local.y * u.layer_h);
+            let offset = dev_local_lut_at(region_l);
+            target_l = clamp(
+                dev_lut(l) + offset + dev_local_detail_boost(l, region_l, offset),
+                0.0, 1.0,
+            );
+        }
+        toned = dev_apply_luma_target(rgb, target_l);
+    }
+    }
+    return dev_develop_finish(toned, local);
+    // develop-chain-end
+}
+
+// Everything after tone: final curves, the colour proxies and Effects.
+// Final per-channel curve pass. A scene may also use these tables earlier
+// only to classify colour-band membership; CPU does the same classification
+// read before applying the composed camera + user curves to final output.
+fn dev_final_curves(c: vec3<f32>) -> vec3<f32> {
+    if (dev_rgb_curve[0] > 0.5) {
+        return vec3<f32>(
+            dev_rgb_curve_at(0u, c.r),
+            dev_rgb_curve_at(1u, c.g),
+            dev_rgb_curve_at(2u, c.b),
+        );
+    }
+    return c;
+}
+
+fn dev_develop_finish(toned_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    var toned = dev_final_curves(toned_in);
+    if (u.adj_p[2].x > 0.5) {
+        // Integer layer-pixel coordinate: the proxies map texel t to its
+        // centre at (t + 0.5)·s, like the CPU colour field.
+        let cp = dev_color_proxy_at(local.x * u.layer_w - 0.5, local.y * u.layer_h - 0.5);
+        if (u.adj_p[2].x > 3.5) {
+            return clamp(cp.adjusted, vec3(0.0), vec3(1.0));
+        }
+        if (u.adj_p[2].x > 2.5) {
+            return dev_effects_stage(toned, local, dev_luma(cp.region));
+        }
+        let pixel = toned;
+        toned = dev_finish_colored(toned, cp.region, cp.adjusted);
+        if (u.adj_p[2].x > 1.5) {
+            return clamp(toned, vec3(0.0), vec3(1.0));
+        }
+        // Colour Smoothing below 100 blends the proxy reconstruction toward
+        // the per-pixel transform (dev_effects[84] = smoothing / 100), like the
+        // commit's `recombine_color`.
+        let smoothing = dev_effects[84];
+        if (smoothing < 1.0) {
+            let direct = dev_display_direct_color(pixel);
+            toned = clamp(direct + (toned - direct) * smoothing, vec3(0.0), vec3(1.0));
+        }
+        // With the colour field the toned region low-pass doubles as the
+        // spatial effects' base, exactly like the CPU `finish_colored_pixel_f32`;
+        // per-pixel colour (smoothing 0) reads the regional base luminance.
+        let base = select(dev_plane_effects_base(local, pixel), dev_luma(cp.region),
+                          smoothing > 0.001);
+        return dev_apply_locals_display(dev_effects_stage(toned, local, base), local);
+    }
+    return dev_apply_locals_display(
+        dev_effects_stage(toned, local, dev_plane_effects_base(local, toned)),
+        local,
+    );
+}
+
+// ── Local adjustments (Linear / Radial masks) ─────────────────────────────
+// dev_local_lut[DEV_LOCALS_AT] = mask count, then DEV_LOCAL_STRIDE floats per
+// mask (packed by `pack_develop_locals`): [0] shape kind (0 linear, 1
+// radial), [1..7) shape, [8] Saturation, [9] RAW contrast gamma, [10] its
+// flag, [11] Identity tone flag, [12..15) gains, [15] exposure multiplier,
+// [16] RAW tone-eq flag, [17] tone-map mode, [18] Develop3 flag, [19..28)
+// RAW CAT16·2^EV matrix, [32..288) tone LUT, [288..544) RAW tone-eq table.
+const DEV_LOCALS_AT: u32 = 256u;
+const DEV_LOCAL_STRIDE: u32 = 544u;
+
+fn dev_local_param(k: u32, i: u32) -> f32 {
+    return dev_local_lut[DEV_LOCALS_AT + 1u + k * DEV_LOCAL_STRIDE + i];
+}
+
+fn dev_locals_count() -> u32 {
+    return u32(dev_local_lut[DEV_LOCALS_AT]);
+}
+
+// Interpolated read of a mask's 256-entry table at t ∈ [0, 1].
+fn dev_local_table(k: u32, at: u32, t: f32) -> f32 {
+    let x = clamp(t, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let a = dev_local_param(k, at + i0);
+    let b = dev_local_param(k, at + i1);
+    return a + (b - a) * (x - f32(i0));
+}
+
+// Mask weight at image-normalized (x / (w − 1), y / (h − 1)).
+// CPU twin: LocalMaskShape::weight.
+fn dev_local_weight(k: u32, n: vec2<f32>) -> f32 {
+    if (dev_local_param(k, 0u) < 0.5) {
+        let x0 = dev_local_param(k, 1u);
+        let y0 = dev_local_param(k, 2u);
+        let dx = dev_local_param(k, 3u) - x0;
+        let dy = dev_local_param(k, 4u) - y0;
+        let len2 = max(dx * dx + dy * dy, 1e-8);
+        let t = ((n.x - x0) * dx + (n.y - y0) * dy) / len2;
+        return 1.0 - dev_smootherstep(0.0, 1.0, t);
+    }
+    let dx = (n.x - dev_local_param(k, 1u)) / max(dev_local_param(k, 3u), 1e-4);
+    let dy = (n.y - dev_local_param(k, 2u)) / max(dev_local_param(k, 4u), 1e-4);
+    let rho = sqrt(dx * dx + dy * dy);
+    let inner = min(1.0 - clamp(dev_local_param(k, 5u), 0.0, 1.0), 1.0 - 1e-3);
+    let w = 1.0 - dev_smootherstep(inner, 1.0, rho);
+    return select(w, 1.0 - w, dev_local_param(k, 6u) > 0.5);
+}
+
+// Image-normalized position of the integer pixel `px` (x · inv_w on the CPU).
+fn dev_local_pos(px: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
+    return px / max(size - 1.0, vec2<f32>(1.0));
+}
+
+// Identity (display) masks after Effects. Each mask runs its own legacy tone
+// and Saturation on the developed pixel and blends back by its weight.
+// CPU twin: DevelopPlan::apply_locals. RAW scenes run theirs in the working
+// space (dev_apply_locals_working).
+fn dev_apply_locals_display(c_in: vec3<f32>, local: vec2<f32>) -> vec3<f32> {
+    let count = dev_locals_count();
+    if (count == 0u || dev_effects[10] > 0.5) {
+        return c_in;
+    }
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let n = dev_local_pos(local * size - 0.5, size);
+    var c = c_in;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let m = dev_local_weight(k, n);
+        if (m <= 0.003) {
+            continue;
+        }
+        var c2 = c;
+        if (dev_local_param(k, 11u) > 0.5) {
+            let gains = vec3<f32>(dev_local_param(k, 12u), dev_local_param(k, 13u), dev_local_param(k, 14u));
+            var lin = dev_srgb_to_linear(c2) * gains * dev_local_param(k, 15u);
+            let l0 = max(dev_luma_lin(lin), 0.0);
+            let target_ro = dev_highlight_rolloff(l0);
+            if (l0 > 1e-6) {
+                lin = lin * (target_ro / l0);
+            }
+            lin = dev_fit_linear_rgb_to_luma(lin, target_ro);
+            let rgb = clamp(dev_linear_to_srgb(lin), vec3(0.0), vec3(1.0));
+            let l = clamp(dev_luma(rgb), 0.0, 1.0);
+            c2 = clamp(dev_apply_luma_target(rgb, dev_local_table(k, 32u, l)), vec3(0.0), vec3(1.0));
+        }
+        let sat = dev_local_param(k, 8u);
+        if (abs(sat) > 0.001) {
+            let d = clamp(dev_eased(sat), -1.0, 1.0);
+            let factor = select(1.0 + d * 1.50, 1.0 + d, d < 0.0);
+            var lin = dev_srgb_to_linear(clamp(c2, vec3(0.0), vec3(1.0)));
+            if (abs(d) > 0.001 && abs(factor - 1.0) > 0.001) {
+                lin = dev_scale_linear_chroma_hull(lin, factor);
+            }
+            c2 = clamp(dev_linear_to_srgb(lin), vec3(0.0), vec3(1.0));
+        }
+        c = c + (c2 - c) * m;
+    }
+    return c;
+}
+
+// A RAW mask's own scene tone on a working pixel (CPU twin: the mask's
+// SceneToneData::scene_to_working — identity look, own exposure for the
+// tone equalizer, no grade, contrast or shadow-chroma stage).
+fn dev_local_scene_working(v_in: vec3<f32>, k: u32) -> vec3<f32> {
+    let m0 = vec3<f32>(dev_local_param(k, 19u), dev_local_param(k, 20u), dev_local_param(k, 21u));
+    let m1 = vec3<f32>(dev_local_param(k, 22u), dev_local_param(k, 23u), dev_local_param(k, 24u));
+    let m2 = vec3<f32>(dev_local_param(k, 25u), dev_local_param(k, 26u), dev_local_param(k, 27u));
+    var v = vec3<f32>(dot(m0, v_in), dot(m1, v_in), dot(m2, v_in));
+    if (dev_local_param(k, 16u) > 0.5) {
+        let e = log2(max(dev_working_luma(v), 6.1035156e-5));
+        v = v * exp2(dev_local_table(k, 288u, (e + 14.0) / 20.0));
+    }
+    let lut_t = vec3<f32>(
+        log2(max(v.r, 6.1035156e-5)),
+        log2(max(v.g, 6.1035156e-5)),
+        log2(max(v.b, 6.1035156e-5)),
+    );
+    let pc = vec3<f32>(
+        select(dev_local_table(k, 32u, (lut_t.r + 14.0) / 20.0), 0.0, v.r <= 0.0),
+        select(dev_local_table(k, 32u, (lut_t.g + 14.0) / 20.0), 0.0, v.g <= 0.0),
+        select(dev_local_table(k, 32u, (lut_t.b + 14.0) / 20.0), 0.0, v.b <= 0.0),
+    );
+    var outc = pc;
+    let n = max(max(v.r, v.g), v.b);
+    if (n > 1e-8) {
+        let mapped_n = dev_local_table(k, 32u, (log2(max(n, 6.1035156e-5)) + 14.0) / 20.0);
+        let mode = dev_local_param(k, 17u);
+        let hw = dev_smootherstep(0.5, 1.0, mapped_n);
+        var blend = 1.0;
+        if (mode < 1.5) {
+            blend = 0.90 + (0.20 - 0.90) * hw;
+            if (mode < 0.5) { blend = min(blend + 0.10, 1.0); }
+        }
+        outc = mix(pc, v * (mapped_n / n), blend);
+        outc = dev_compress_highlight_chroma(outc, mapped_n, n, mode, dev_local_param(k, 18u) > 0.5);
+    }
+    return outc;
+}
+
+// RAW masks on the working pixel after Detail (CPU twin:
+// apply_scene_locals_linear_region). `px` is the integer layer pixel.
+fn dev_apply_locals_working(v_in: vec3<f32>, px: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
+    let count = dev_locals_count();
+    if (count == 0u || dev_effects[10] < 0.5) {
+        return v_in;
+    }
+    let n = dev_local_pos(px, size);
+    var v = v_in;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let m = dev_local_weight(k, n);
+        if (m <= 0.003) {
+            continue;
+        }
+        var a = dev_local_scene_working(v, k);
+        if (dev_local_param(k, 10u) > 0.5) {
+            let gamma = dev_local_param(k, 9u);
+            let y = clamp(dev_working_luma(a), 0.0, 1.0);
+            let pivot = 0.1845;
+            var target_l = pivot * pow(y / pivot, gamma);
+            if (y > pivot) {
+                target_l = 1.0 - (1.0 - pivot) * pow((1.0 - y) / (1.0 - pivot), gamma);
+            }
+            a = select(
+                dev_apply_luma_target(a, target_l),
+                dev_apply_working_luma_target(a, target_l),
+                dev_effects[57] > 0.5,
+            );
+        }
+        let sat = dev_local_param(k, 8u);
+        if (abs(sat) > 0.001) {
+            let d = clamp(dev_eased(sat), -1.0, 1.0);
+            let factor = select(1.0 + d * 1.50, 1.0 + d, d < 0.0);
+            if (abs(d) > 0.001 && abs(factor - 1.0) > 0.001) {
+                a = dev_scale_linear_chroma_ex(a, factor, dev_local_param(k, 18u) > 0.5);
+            }
+        }
+        v = v + (a - v) * m;
+    }
+    return v;
+}
+
+
+// Read-back of the GPU-resident Detail plane at full-resolution layer pixel
+// (lx, ly). Its parameters ride in the develop parameter bank past the tone
+// LUT: [256] active, [257] downsample s, [258..260) plane w, h, [260..264)
+// region origin x, y and end x, y, [264] linear (RAW), [265] f32 offset of
+// the plane inside dev_adjusted_rgb (after the colour proxy), [266..268)
+// full layer w, h. Texel (i, j) is the block at origin + (i, j)·s, sampled at
+// its centre like the mode-4 native plane. RAW planes hold working values:
+// Detail sits before the output transform and final curves there.
+fn dev_detail_output(lx: f32, ly: f32) -> vec3<f32> {
+    let pw = u32(dev_param(258u));
+    let ph = u32(dev_param(259u));
+    if (pw == 0u || ph == 0u) {
+        return vec3<f32>(0.0);
+    }
+    let s = max(dev_param(257u), 1.0);
+    let base = u32(dev_param(265u));
+    let fx = clamp((lx - dev_param(260u)) / s - 0.5, 0.0, f32(pw - 1u));
+    let fy = clamp((ly - dev_param(261u)) / s - 0.5, 0.0, f32(ph - 1u));
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, pw - 1u);
+    let y1 = min(y0 + 1u, ph - 1u);
+    let wx = fx - f32(x0);
+    let wy = fy - f32(y0);
+    let i00 = base + (y0 * pw + x0) * 3u;
+    let i10 = base + (y0 * pw + x1) * 3u;
+    let i01 = base + (y1 * pw + x0) * 3u;
+    let i11 = base + (y1 * pw + x1) * 3u;
+    let a00 = vec3<f32>(dev_adjusted_rgb[i00], dev_adjusted_rgb[i00 + 1u], dev_adjusted_rgb[i00 + 2u]);
+    let a10 = vec3<f32>(dev_adjusted_rgb[i10], dev_adjusted_rgb[i10 + 1u], dev_adjusted_rgb[i10 + 2u]);
+    let a01 = vec3<f32>(dev_adjusted_rgb[i01], dev_adjusted_rgb[i01 + 1u], dev_adjusted_rgb[i01 + 2u]);
+    let a11 = vec3<f32>(dev_adjusted_rgb[i11], dev_adjusted_rgb[i11 + 1u], dev_adjusted_rgb[i11 + 2u]);
+    let raw = dev_param(264u) > 0.5;
+    var v = mix(mix(a00, a10, wx), mix(a01, a11, wx), wy);
+    if (s > 1.0) {
+        if (s <= 1.0 / max(u.zoom, 1e-6) + 0.01) {
+            // A zoomed-out texel no larger than a screen pixel: take the texel
+            // under the sample; the display grid averages them like pixels.
+            let ix = u32(clamp(floor(fx + 0.5), 0.0, f32(pw - 1u)));
+            let iy = u32(clamp(floor(fy + 0.5), 0.0, f32(ph - 1u)));
+            let i = base + (iy * pw + ix) * 3u;
+            v = vec3<f32>(dev_adjusted_rgb[i], dev_adjusted_rgb[i + 1u], dev_adjusted_rgb[i + 2u]);
+        } else if (raw) {
+            // A coarser RAW plane blends in the display encoding, like pixels.
+            v = dev_working_decode(mix(
+                mix(dev_working_encode(a00), dev_working_encode(a10), wx),
+                mix(dev_working_encode(a01), dev_working_encode(a11), wx),
+                wy,
+            ));
+        }
+    }
+    if (raw) {
+        // RAW masks follow Detail in the commit.
+        let size = vec2<f32>(dev_param(266u), dev_param(267u));
+        var g = dev_scene_output(dev_apply_locals_working(v, vec2<f32>(lx, ly) - 0.5, size));
+        if (dev_rgb_curve[0] > 0.5) {
+            g = vec3<f32>(
+                dev_rgb_curve_at(0u, g.r),
+                dev_rgb_curve_at(1u, g.g),
+                dev_rgb_curve_at(2u, g.b),
+            );
+        }
+        return clamp(g, vec3(0.0), vec3(1.0));
+    }
+    return clamp(v, vec3(0.0), vec3(1.0));
+}
+
+// GPU-resident Detail pre-pass: one fragment per texel of the Detail plane,
+// evaluating the chain the commit feeds into Detail — display RGB for an
+// Identity scene, working RGB (dev_param(264) == 1) for RAW. Texel (i, j) covers
+// the layer block [origin + (i, j)·s, +s) clipped to the region end; s > 1
+// runs the chain on the block's display grid (`dev_plane_tap`) and averages
+// the results the way the zoomed-out display averages the committed pixels.
+// Uniform reuse: offset = plane origin, view_offset = region end
+// (exclusive), zoom = s.
+@fragment
+fn fs_develop_prepass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let b = dev_plane_block(u32(pos.x), u32(pos.y));
+    let taps = b.n * b.n;
+    var v: vec3<f32>;
+    if (dev_param(264u) > 0.5) {
+        // RAW Effects run on the working pixel before Detail; the base is
+        // the guided working luminance of this texel (bank [271] == 2).
+        var base = 0.0;
+        if (dev_param(271u) > 1.5 && dev_param(271u) < 2.5) {
+            let pw = u32(dev_param(258u));
+            base = dev_region_luma[u32(dev_param(272u)) + u32(pos.y) * pw + u32(pos.x)];
+        }
+        let effects = dev_effects_any();
+        if (taps == 1u) {
+            let t = dev_plane_tap(b, 0u);
+            v = dev_scene_working(t.rgb, t.local);
+            if (effects) {
+                v = dev_effects_linear(v, t.local, base);
+            }
+        } else {
+            var acc = vec3<f32>(0.0);
+            for (var k = 0u; k < taps; k = k + 1u) {
+                let t = dev_plane_tap(b, k);
+                var w = dev_scene_working(t.rgb, t.local);
+                if (effects) {
+                    w = dev_effects_linear(w, t.local, base);
+                }
+                acc = acc + dev_working_encode(w);
+            }
+            v = dev_working_decode(acc / f32(taps));
+        }
+    } else {
+        var acc = vec3<f32>(0.0);
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            acc = acc + dev_develop_finish(dev_scene_display(t.rgb, t.local), t.local);
+        }
+        v = acc / f32(taps);
+    }
+    return vec4<f32>(v, 1.0);
+}
+
+// A working pixel as the display receives it — clipped into the output gamut
+// like `dev_scene_output`, then sRGB encoded — and its inverse: the domain the
+// zoomed-out display averages the committed pixels in, so a RAW plane block
+// averages like them (a highlight past white counts as white, not brighter).
+fn dev_working_encode(w: vec3<f32>) -> vec3<f32> {
+    let l = dev_gamut_clip_chroma(dev_filmlike_clip(dev_working_to_linear_srgb(w)));
+    return dev_linear_to_srgb(clamp(l, vec3(0.0), vec3(1.0)));
+}
+
+fn dev_working_decode(e: vec3<f32>) -> vec3<f32> {
+    return dev_linear_srgb_to_working(dev_srgb_to_linear(e));
+}
+
+struct DevPlaneTexel {
+    rgb: vec3<f32>,
+    local: vec2<f32>,
+};
+
+// Layer block of Detail-plane texel (i, j) and its n×n sampling grid.
+struct DevPlaneBlock {
+    x0: u32,
+    y0: u32,
+    span_x: u32,
+    span_y: u32,
+    n: u32,
+};
+
+fn dev_plane_block(i: u32, j: u32) -> DevPlaneBlock {
+    let s = max(u32(u.zoom), 1u);
+    let lw = u32(u.layer_w);
+    let lh = u32(u.layer_h);
+    let ex = min(u32(u.view_offset_x), lw);
+    let ey = min(u32(u.view_offset_y), lh);
+    var b: DevPlaneBlock;
+    b.x0 = u32(u.offset_x) + i * s;
+    b.y0 = u32(u.offset_y) + j * s;
+    b.span_x = max(min(b.x0 + s, ex), b.x0 + 1u) - b.x0;
+    b.span_y = max(min(b.y0 + s, ey), b.y0 + 1u) - b.y0;
+    b.n = dev_grid_taps(f32(s));
+    return b;
+}
+
+// Scene value and position of grid tap k (row-major) of block `b`.
+fn dev_plane_tap(b: DevPlaneBlock, k: u32) -> DevPlaneTexel {
+    let kx = k % b.n;
+    let ky = k / b.n;
+    let size = vec2<f32>(u.layer_w, u.layer_h);
+    let span = vec2<f32>(f32(b.span_x), f32(b.span_y)) / f32(b.n);
+    let lod = dev_span_lod(max(span.x, span.y));
+    var out: DevPlaneTexel;
+    if (lod >= 0.0) {
+        let c = vec2<f32>(f32(b.x0), f32(b.y0)) + (vec2<f32>(f32(kx), f32(ky)) + 0.5) * span;
+        out.local = c / size;
+        out.rgb = textureSampleLevel(dev_scene_tex, atlas_lin, out.local, lod).rgb;
+        return out;
+    }
+    let x = b.x0 + zoom_tap(kx, b.n, f32(b.span_x));
+    let y = b.y0 + zoom_tap(ky, b.n, f32(b.span_y));
+    out.rgb = textureLoad(dev_scene_tex, vec2<i32>(i32(x), i32(y)), 0).rgb;
+    out.local = (vec2<f32>(f32(x), f32(y)) + 0.5) / size;
+    return out;
+}
+
+// Effects-base luminance pre-pass, one fragment per base-grid cell. RAW
+// (bank [271] == 2): the post-colour working luminance of each plane texel.
+// Identity: the toned, pre-colour display luminance pooled over the cell's
+// pixels [origin + (i, j)·cell, +cell) ∩ [origin, end) — read edge-clamped,
+// like the CPU base windows — (1), or of each plane texel when zoomed out
+// (3). A plane texel pools its grid taps. The guided low-pass runs next.
+@fragment
+fn fs_develop_base_luma(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = u32(pos.x);
+    let j = u32(pos.y);
+    let kind = dev_param(271u);
+    if (kind > 1.5 && kind < 2.5) {
+        let b = dev_plane_block(i, j);
+        let taps = b.n * b.n;
+        var acc = 0.0;
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            acc = acc + max(dev_working_luma(dev_scene_working(t.rgb, t.local)), 0.0);
+        }
+        return vec4<f32>(acc / f32(taps), 0.0, 0.0, 1.0);
+    }
+    let cell = i32(dev_param(275u));
+    if (kind > 2.5) {
+        let b = dev_plane_block(i, j);
+        let taps = b.n * b.n;
+        var acc = 0.0;
+        for (var k = 0u; k < taps; k = k + 1u) {
+            let t = dev_plane_tap(b, k);
+            let toned = dev_final_curves(dev_scene_display(t.rgb, t.local));
+            acc = acc + clamp(dev_luma(toned), 0.0, 1.0);
+        }
+        return vec4<f32>(acc / f32(taps), 0.0, 0.0, 1.0);
+    }
+    let lw = i32(u.layer_w);
+    let lh = i32(u.layer_h);
+    let x0 = i32(dev_param(273u)) + i32(i) * cell;
+    let y0 = i32(dev_param(274u)) + i32(j) * cell;
+    let x1 = min(x0 + cell, i32(dev_param(278u)));
+    let y1 = min(y0 + cell, i32(dev_param(279u)));
+    var acc = 0.0;
+    var n = 0.0;
+    for (var y = y0; y < y1; y = y + 1) {
+        for (var x = x0; x < x1; x = x + 1) {
+            let cx = clamp(x, 0, lw - 1);
+            let cy = clamp(y, 0, lh - 1);
+            let rgb = textureLoad(dev_scene_tex, vec2<i32>(cx, cy), 0).rgb;
+            let local = (vec2<f32>(f32(cx), f32(cy)) + 0.5) / vec2<f32>(u.layer_w, u.layer_h);
+            let toned = dev_final_curves(dev_scene_display(rgb, local));
+            acc = acc + clamp(dev_luma(toned), 0.0, 1.0);
+            n = n + 1.0;
+        }
+    }
+    return vec4<f32>(acc / max(n, 1.0), 0.0, 0.0, 1.0);
+}
+
+// Colour-field pre-pass: one fragment per cell of the display-domain colour
+// field, averaging the toned (pre-colour) value of the plane texels it pools —
+// the cells `build_color_proxy_field_from_buffer` pools on the CPU. Bank:
+// [268] cell size in texels, [269] / [270] phase x / y in texels.
+@fragment
+fn fs_develop_cells(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let s = max(u32(dev_param(268u)), 1u);
+    let phase_x = u32(dev_param(269u));
+    let phase_y = u32(dev_param(270u));
+    let pw = u32(dev_param(258u));
+    let ph = u32(dev_param(259u));
+    let cx = u32(pos.x);
+    let cy = u32(pos.y);
+    let x0 = max(cx * s, phase_x) - phase_x;
+    let x1 = min(max((cx + 1u) * s, phase_x) - phase_x, pw);
+    let y0 = max(cy * s, phase_y) - phase_y;
+    let y1 = min(max((cy + 1u) * s, phase_y) - phase_y, ph);
+    var acc = vec3<f32>(0.0);
+    var n = 0.0;
+    for (var ty = y0; ty < y1; ty = ty + 1u) {
+        for (var tx = x0; tx < x1; tx = tx + 1u) {
+            let b = dev_plane_block(tx, ty);
+            let taps = b.n * b.n;
+            var texel = vec3<f32>(0.0);
+            for (var k = 0u; k < taps; k = k + 1u) {
+                let t = dev_plane_tap(b, k);
+                texel = texel + dev_final_curves(dev_scene_display(t.rgb, t.local));
+            }
+            acc = acc + texel / f32(taps);
+            n = n + 1.0;
+        }
+    }
+    return vec4<f32>(acc / max(n, 1.0), 1.0);
+}
+
+// ── Zoomed-out display grid ──────────────────────────────────────────────────
+// A screen pixel (or Detail-plane texel) covering `footprint` layer px runs the
+// Develop chain on an n×n grid. Each tap stands for its footprint/n sub-block:
+// when that is wider than a pixel the scene is read as the sub-block's mean
+// (a bilinear read of the scene mips), so every pixel contributes and fine texture
+// and noise do not alias. Committed layers use the full-area filter
+// (`area_sample`).
+fn zoom_taps_per_axis(footprint: f32) -> u32 {
+    return clamp(u32(footprint * 0.5 + 1.0), 1u, 3u);
+}
+
+// Scene mip level for a tap standing for a `span`-px sub-block, or -1 when
+// the tap is a single pixel. A bilinear read at level L spans ~2·2^L px, hence
+// one level finer than the span: a wider read would blur and, averaged before
+// the chain's tone curve, brighten fine dark/light texture. A whole level
+// keeps it one bilinear fetch (trilinear doubled the preview's fetch cost).
+fn dev_span_lod(span: f32) -> f32 {
+    return select(-1.0, max(round(log2(span) - 1.0), 0.0), span > 1.001);
+}
+
+// The Develop layer's grid, capped by the App's draft setting (bank slot 280:
+// 1 while a slider or the view is dragged, 3 at rest).
+fn dev_grid_taps(footprint: f32) -> u32 {
+    let cap = u32(dev_param(280u));
+    return max(min(zoom_taps_per_axis(footprint), cap), 1u);
+}
+
+// Pixel offset of grid tap k of n across a span of `span` pixels.
+fn zoom_tap(k: u32, n: u32, span: f32) -> u32 {
+    return u32(floor((f32(k) + 0.5) * span / f32(n)));
+}
+
+// One layer pixel of the untransformed path as the display sees it: sRGB after
+// the layer's live Develop / adjustment preview, and its coverage (alpha ×
+// mask). An absent tile is transparent. `local` / `lod` place the Develop
+// chain's scene read (the tap's sub-block, see `dev_span_lod`).
+fn layer_texel_srgb(ix: i32, iy: i32, local: vec2<f32>, lod: f32) -> vec4<f32> {
+    let ux = u32(ix);
+    let uy = u32(iy);
+    let tx = ux / 256u;
+    let ty = uy / 256u;
+    if (tx >= u.layer_tiles_w || ty >= u.layer_tiles_h) {
+        return vec4<f32>(0.0);
+    }
+    let slot = tile_map[ty * u.layer_tiles_w + tx];
+    if (slot < 0) {
+        return vec4<f32>(0.0);
+    }
+    let c = textureLoad(
+        atlas_tex,
+        vec2<i32>(
+            i32(u32(slot & 0xFFFF) * 256u + ux % 256u),
+            i32(u32(slot >> 16u) * 256u + uy % 256u),
+        ),
+        0,
+    );
+    var m = 1.0;
+    if (clip_is_child()) {
+        let sh = clip_shift();
+        m = clip_mask_at(ix + sh.x, iy + sh.y, u.layer_w, u.layer_h);
+    } else {
+        m = sample_mask_nearest_i(ix, iy);
+    }
+    var srgb = c.rgb;
+    if (!ATLAS_TEX_IS_BYTES) {
+        srgb = dev_linear_to_srgb(c.rgb);
+    }
+    if (u.adj_kind == 20u) {
+        srgb = develop_apply(srgb, local, lod);
+    } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+        srgb = apply_adjustment(srgb);
+    }
+    return vec4<f32>(srgb, c.a * m);
+}
+
+// Bayer-8 threshold (0..1), identical matrix to the CPU `bayer8` so the GPU
+// preview dither matches the committed bake's character.
+fn dev_bayer8(x: u32, y: u32) -> f32 {
+    var b = array<f32, 64>(
+        0.0,  32.0, 8.0,  40.0, 2.0,  34.0, 10.0, 42.0,
+        48.0, 16.0, 56.0, 24.0, 50.0, 18.0, 58.0, 26.0,
+        12.0, 44.0, 4.0,  36.0, 14.0, 46.0, 6.0,  38.0,
+        60.0, 28.0, 52.0, 20.0, 62.0, 30.0, 54.0, 22.0,
+        3.0,  35.0, 11.0, 43.0, 1.0,  33.0, 9.0,  41.0,
+        51.0, 19.0, 59.0, 27.0, 49.0, 17.0, 57.0, 25.0,
+        15.0, 47.0, 7.0,  39.0, 13.0, 45.0, 5.0,  37.0,
+        63.0, 31.0, 55.0, 23.0, 61.0, 29.0, 53.0, 21.0,
+    );
+    let i = (y & 7u) * 8u + (x & 7u);
+    return (b[i] + 0.5) / 64.0;
+}
+
+// Ordered (Bayer-8) dither in 8-bit sRGB space, mirroring the CPU bake's
+// `quantize_dither`. The compositor stores into an Rgba8 sRGB target, so a smooth
+// Develop colour gradient (the saturation-boosted regional low-pass) would
+// posterize into visible bands without this — the bake dithers, the live preview
+// did not, hence the "striping only in preview" artifact. Keyed to framebuffer
+// pixel coords so the pattern stays a crisp 1px at any zoom; the per-channel
+// offset stops R/G/B sharing one pattern (which would dither luma only and leave
+// chroma banding).
+fn dev_dither_srgb(c: vec3<f32>, frag: vec2<f32>) -> vec3<f32> {
+    let px = u32(frag.x);
+    let py = u32(frag.y);
+    let d = vec3<f32>(
+        dev_bayer8(px,      py     ) - 0.5,
+        dev_bayer8(px + 2u, py + 5u) - 0.5,
+        dev_bayer8(px + 5u, py + 2u) - 0.5,
+    ) * (1.0 / 255.0);
+    return clamp(c + d, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// ── Tile-atlas helpers ───────────────────────────────────────────────────────
+
+fn sample_tile_nearest_i(lx: i32, ly: i32) -> vec4<f32> {
+    if (lx < 0 || ly < 0) { return vec4<f32>(0.0); }
+    let ux = u32(lx);
+    let uy = u32(ly);
+    let tx = ux / 256u;
+    let ty = uy / 256u;
+    if (tx >= u.layer_tiles_w || ty >= u.layer_tiles_h) { return vec4<f32>(0.0); }
+    let tile_idx = ty * u.layer_tiles_w + tx;
+    let slot = tile_map[tile_idx];
+    if (slot < 0) { return vec4<f32>(0.0); }
+    let slot_x = u32(slot & 0xFFFF);
+    let slot_y = u32(slot >> 16u);
+    let atlas_x = f32(slot_x * 256u + ux % 256u) + 0.5;
+    let atlas_y = f32(slot_y * 256u + uy % 256u) + 0.5;
+    let atlas_dim = vec2<f32>(textureDimensions(atlas_tex));
+    return atlas_linear(textureSampleLevel(atlas_tex, samp, vec2<f32>(atlas_x / atlas_dim.x, atlas_y / atlas_dim.y), 0.0));
+}
+
+fn sample_tile_nearest_clamped_i(lx: i32, ly: i32) -> vec4<f32> {
+    let max_x = max(u.layer_w - 1.0, 0.0);
+    let max_y = max(u.layer_h - 1.0, 0.0);
+    return sample_tile_nearest_i(
+        clamp(lx, 0, i32(max_x)),
+        clamp(ly, 0, i32(max_y)),
+    );
+}
+
+fn sample_tile_bilinear_clamped(lx: f32, ly: f32) -> vec4<f32> {
+    let ix = i32(floor(lx));
+    let iy = i32(floor(ly));
+    let fx = fract(lx);
+    let fy = fract(ly);
+    let c00 = sample_tile_nearest_clamped_i(ix,     iy    );
+    let c10 = sample_tile_nearest_clamped_i(ix + 1, iy    );
+    let c01 = sample_tile_nearest_clamped_i(ix,     iy + 1);
+    let c11 = sample_tile_nearest_clamped_i(ix + 1, iy + 1);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+fn sample_tile_bilinear(lx: f32, ly: f32) -> vec4<f32> {
+    let ix = i32(floor(lx));
+    let iy = i32(floor(ly));
+    let fx = fract(lx);
+    let fy = fract(ly);
+    let c00 = sample_tile_nearest_i(ix,     iy    );
+    let c10 = sample_tile_nearest_i(ix + 1, iy    );
+    let c01 = sample_tile_nearest_i(ix,     iy + 1);
+    let c11 = sample_tile_nearest_i(ix + 1, iy + 1);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+fn filter_weighted_sample(lx: f32, ly: f32, weight: f32) -> vec4<f32> {
+    let c = sample_tile_bilinear_clamped(lx, ly);
+    return vec4<f32>(c.rgb * c.a * weight, c.a * weight);
+}
+
+fn filter_preview_blur(lx: f32, ly: f32, radius_in: f32) -> vec4<f32> {
+    let radius = clamp(radius_in, 0.0, 250.0);
+    if (radius <= 0.01) {
+        return sample_tile_bilinear_clamped(lx, ly);
+    }
+
+    let sigma = max(radius, 0.5);
+    let support = sigma * 2.75;
+    let golden_angle = 2.39996323;
+    let sample_count = 72.0;
+
+    var acc = vec4<f32>(0.0);
+    var total_w = 0.0;
+
+    for (var i: i32 = 0; i < 72; i = i + 1) {
+        let fi = f32(i);
+        let t = (fi + 0.5) / sample_count;
+        let d = sqrt(t) * support;
+        let a = fi * golden_angle;
+        let w = exp(-0.5 * (d * d) / (sigma * sigma));
+        acc += filter_weighted_sample(lx + cos(a) * d, ly + sin(a) * d, w);
+        total_w += w;
+    }
+
+    let out_a = acc.a / max(total_w, 0.00001);
+    if (acc.a <= 0.00001) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(acc.rgb / acc.a, out_a);
+}
+
+fn filter_noise_hash(p: vec2<f32>, c: f32) -> f32 {
+    return fract(sin(dot(p + vec2<f32>(c * 17.13, c * 3.71), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+fn apply_filter_preview(src_in: vec4<f32>, lx: f32, ly: f32) -> vec4<f32> {
+    let P0 = u.adj_p[0];
+    switch u.adj_kind {
+        case 30u: { // Gaussian Blur
+            return filter_preview_blur(lx, ly, P0.x);
+        }
+        case 31u: { // Sharpen / Unsharp preview
+            let amount = P0.x;
+            let blur = filter_preview_blur(lx, ly, P0.y);
+            return vec4<f32>(clamp(src_in.rgb + (src_in.rgb - blur.rgb) * amount, vec3(0.0), vec3(1.0)), src_in.a);
+        }
+        case 32u: { // High Pass
+            let blur = filter_preview_blur(lx, ly, P0.x);
+            return vec4<f32>(clamp(src_in.rgb - blur.rgb + vec3<f32>(0.5), vec3(0.0), vec3(1.0)), src_in.a);
+        }
+        case 33u: { // Add Noise
+            let amount = clamp(P0.x / 100.0, 0.0, 1.0);
+            let mono = P0.y > 0.5;
+            let mag = amount;
+            let n0 = (filter_noise_hash(vec2<f32>(lx, ly), 0.0) - 0.5) * 2.0 * mag;
+            if (mono) {
+                return vec4<f32>(clamp(src_in.rgb + vec3<f32>(n0), vec3(0.0), vec3(1.0)), src_in.a);
+            }
+            let n1 = (filter_noise_hash(vec2<f32>(lx, ly), 1.0) - 0.5) * 2.0 * mag;
+            let n2 = (filter_noise_hash(vec2<f32>(lx, ly), 2.0) - 0.5) * 2.0 * mag;
+            return vec4<f32>(clamp(src_in.rgb + vec3<f32>(n0, n1, n2), vec3(0.0), vec3(1.0)), src_in.a);
+        }
+        case 34u: { // Pixelate
+            let cell = max(P0.x, 1.0);
+            let cx = floor(lx / cell) * cell + cell * 0.5;
+            let cy = floor(ly / cell) * cell + cell * 0.5;
+            return sample_tile_bilinear_clamped(cx, cy);
+        }
+        case 35u: { // Reduce Noise approximation
+            let s = clamp(P0.x / 100.0, 0.0, 1.0);
+            let blur = filter_preview_blur(lx, ly, 0.8 + s * 2.2);
+            let edge = clamp(length(src_in.rgb - blur.rgb) / 0.18, 0.0, 1.0);
+            let mix_a = s * (1.0 - edge);
+            return vec4<f32>(mix(src_in.rgb, blur.rgb, mix_a), src_in.a);
+        }
+        default: {
+            return src_in;
+        }
+    }
+}
+
+// The mask tile lives in the sRGB atlas, so the sampled value is linearized;
+// invert with the exact sRGB transfer curve (not pow 1/2.2) to recover the
+// stored byte and match the CPU, which reads the mask byte directly.
+fn mask_value_from_sample(c: vec4<f32>) -> f32 {
+    let l = clamp(c.r, 0.0, 1.0);
+    if (ATLAS_TEX_IS_BYTES) {
+        return l;
+    }
+    if (l <= 0.0031308) {
+        return l * 12.92;
+    }
+    return 1.055 * pow(l, 1.0 / 2.4) - 0.055;
+}
+
+// Clamp-to-edge, mirroring LayerMask::sample on the CPU: out-of-bounds
+// coordinates take the nearest edge texel instead of hard-revealing.
+fn sample_mask_nearest_i(lx: i32, ly: i32) -> f32 {
+    if (u.mask_enabled == 0u) { return 1.0; }
+    let ux = u32(clamp(lx, 0, max(i32(u.layer_w) - 1, 0)));
+    let uy = u32(clamp(ly, 0, max(i32(u.layer_h) - 1, 0)));
+    let tx = ux / 256u;
+    let ty = uy / 256u;
+    if (tx >= u.layer_tiles_w || ty >= u.layer_tiles_h) { return 1.0; }
+    let tile_idx = ty * u.layer_tiles_w + tx;
+    let slot = mask_tile_map[tile_idx];
+    var value: f32 = 0.0;
+    if (slot >= 0) {
+        let slot_x = u32(slot & 0xFFFF);
+        let slot_y = u32(slot >> 16u);
+        let atlas_x = f32(slot_x * 256u + ux % 256u) + 0.5;
+        let atlas_y = f32(slot_y * 256u + uy % 256u) + 0.5;
+        let atlas_dim = vec2<f32>(textureDimensions(atlas_tex));
+        value = mask_value_from_sample(textureSampleLevel(atlas_tex, samp, vec2<f32>(atlas_x / atlas_dim.x, atlas_y / atlas_dim.y), 0.0));
+    }
+    if (u.mask_inverted == 1u) {
+        return 1.0 - value;
+    }
+    return value;
+}
+
+fn sample_mask_bilinear(lx: f32, ly: f32) -> f32 {
+    if (u.mask_enabled == 0u) { return 1.0; }
+    let ix = i32(floor(lx));
+    let iy = i32(floor(ly));
+    let fx = fract(lx);
+    let fy = fract(ly);
+    let c00 = sample_mask_nearest_i(ix,     iy    );
+    let c10 = sample_mask_nearest_i(ix + 1, iy    );
+    let c01 = sample_mask_nearest_i(ix,     iy + 1);
+    let c11 = sample_mask_nearest_i(ix + 1, iy + 1);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+// Live clipping-mask / PowerClip pin. `clip_shift_packed` is 0 for a non-clip
+// layer, and for a clip child holds two i16 pin deltas biased by 0x8000 (so the
+// word is never 0). `clip_is_child` gates the pin; `clip_shift` unpacks it.
+fn clip_is_child() -> bool { return u.clip_shift_packed != 0u; }
+fn clip_shift() -> vec2<i32> {
+    return vec2<i32>(
+        i32(u.clip_shift_packed >> 16u) - 0x8000,
+        i32(u.clip_shift_packed & 0xFFFFu) - 0x8000,
+    );
+}
+// Sample the clip mask at a canvas-fixed layer-local coord. Out of the frame's
+// baked footprint reads as hidden (0) rather than edge-clamped, so a frame that
+// touches the content edge can't smear when the image is dragged/transformed.
+fn clip_mask_at(lx: i32, ly: i32, lw: f32, lh: f32) -> f32 {
+    if (lx < 0 || ly < 0 || lx >= i32(lw) || ly >= i32(lh)) { return 0.0; }
+    return sample_mask_nearest_i(lx, ly);
+}
+
+// ── Zoomed-out area filter ───────────────────────────────────────────────────
+// A screen pixel covering `footprint` > 1 layer px shows the exact area average
+// of that footprint (Photoshop-style, in sRGB byte space), so fine texture and
+// noise neither alias nor sparkle. The atlas mips hold alpha-weighted 2×2
+// averages; the footprint is read from the level whose texels are a quarter to
+// a half of it, so at most 5×5 texels contribute. Must match
+// `tile_atlas::ATLAS_MIP_LEVELS`.
+const ATLAS_MIP_LEVELS: u32 = 6u;
+
+// Atlas texel of `slot` at in-tile level-`lv` coords (`shift` = 8 − lv).
+fn area_slot_texel(slot: i32, local: vec2<u32>, shift: u32, lv: u32) -> vec4<f32> {
+    let base = vec2<u32>(u32(slot & 0xFFFF), u32(slot >> 16u)) << vec2<u32>(shift);
+    return textureLoad(atlas_raw, vec2<i32>(base + local), i32(lv));
+}
+
+// Level-`lv` texel of the untransformed layer: (sRGB rgb, alpha × mask).
+// Tile maths uses shifts: integer division is slow on GPUs.
+fn area_texel(tx: u32, ty: u32, lv: u32) -> vec4<f32> {
+    let shift = 8u - lv;
+    let tile_x = tx >> shift;
+    let tile_y = ty >> shift;
+    if (tile_x >= u.layer_tiles_w || tile_y >= u.layer_tiles_h) {
+        return vec4<f32>(0.0);
+    }
+    let tile_idx = tile_y * u.layer_tiles_w + tile_x;
+    let slot = tile_map[tile_idx];
+    if (slot < 0) {
+        return vec4<f32>(0.0);
+    }
+    let in_tile = (256u >> lv) - 1u;
+    let local = vec2<u32>(tx & in_tile, ty & in_tile);
+    let c = area_slot_texel(slot, local, shift, lv);
+    var m = 1.0;
+    if (clip_is_child()) {
+        let s = 1u << lv;
+        let sh = clip_shift();
+        m = clip_mask_at(
+            i32(tx * s + s / 2u) + sh.x,
+            i32(ty * s + s / 2u) + sh.y,
+            u.layer_w, u.layer_h);
+    } else if (u.mask_enabled != 0u) {
+        let mslot = mask_tile_map[tile_idx];
+        var v = 0.0;
+        if (mslot >= 0) {
+            v = area_slot_texel(mslot, local, shift, lv).r;
+        }
+        if (u.mask_inverted == 1u) {
+            v = 1.0 - v;
+        }
+        m = v;
+    }
+    return vec4<f32>(c.rgb, c.a * m);
+}
+
+// Overlap of the box [a, b) with level texel i.
+fn area_box_weight(a: f32, b: f32, i: u32) -> f32 {
+    return max(min(b, f32(i + 1u)) - max(a, f32(i)), 0.0);
+}
+
+// Area average of the layer over the footprint centred on layer px (lx, ly),
+// clipped to the layer: (sRGB rgb, coverage). The footprint is walked in
+// aligned 2×2 texel blocks (a block never straddles a tile); an opaque block
+// is one bilinear fetch placed so the hardware applies the box weights, any
+// other block — or a masked / clipped layer — is summed texel by texel with
+// alpha weighting.
+fn area_sample(lx: f32, ly: f32, footprint: f32) -> vec4<f32> {
+    let lv = u32(clamp(floor(log2(footprint * 0.5)), 0.0, f32(ATLAS_MIP_LEVELS - 1u)));
+    let s = f32(1u << lv);
+    let half = 0.5 * footprint;
+    let x0 = max(lx - half, 0.0) / s;
+    let x1 = min(lx + half, u.layer_w) / s;
+    let y0 = max(ly - half, 0.0) / s;
+    let y1 = min(ly + half, u.layer_h) / s;
+    let shift = 8u - lv;
+    let in_tile = (256u >> lv) - 1u;
+    let inv_dims = 1.0 / vec2<f32>(textureDimensions(atlas_raw, lv));
+    let fast = u.mask_enabled == 0u && !clip_is_child();
+    let bx0 = u32(floor(x0)) >> 1u;
+    let by0 = u32(floor(y0)) >> 1u;
+    var acc = vec3<f32>(0.0);
+    var cov = 0.0;
+    var area = 0.0;
+    for (var j = 0u; j < 4u; j = j + 1u) {
+        let ty = (by0 + j) * 2u;
+        if (f32(ty) >= y1) {
+            break;
+        }
+        let wy0 = area_box_weight(y0, y1, ty);
+        let wy1 = area_box_weight(y0, y1, ty + 1u);
+        let wy = wy0 + wy1;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            let tx = (bx0 + i) * 2u;
+            if (f32(tx) >= x1) {
+                break;
+            }
+            let wx0 = area_box_weight(x0, x1, tx);
+            let wx1 = area_box_weight(x0, x1, tx + 1u);
+            let wx = wx0 + wx1;
+            let w = wx * wy;
+            if (w <= 0.0) {
+                continue;
+            }
+            area = area + w;
+            let tile_x = tx >> shift;
+            let tile_y = ty >> shift;
+            if (tile_x >= u.layer_tiles_w || tile_y >= u.layer_tiles_h) {
+                continue;
+            }
+            let slot = tile_map[tile_y * u.layer_tiles_w + tile_x];
+            if (slot < 0) {
+                continue;
+            }
+            if (fast) {
+                let base = vec2<u32>(u32(slot & 0xFFFF), u32(slot >> 16u)) << vec2<u32>(shift);
+                let pos = vec2<f32>(base + vec2<u32>(tx & in_tile, ty & in_tile))
+                    + vec2<f32>(0.5 + wx1 / wx, 0.5 + wy1 / wy);
+                let c = textureSampleLevel(atlas_raw, atlas_lin, pos * inv_dims, f32(lv));
+                if (c.a >= 0.9999) {
+                    acc = acc + c.rgb * w;
+                    cov = cov + w;
+                    continue;
+                }
+            }
+            for (var dj = 0u; dj < 2u; dj = dj + 1u) {
+                let wyk = select(wy0, wy1, dj == 1u);
+                if (wyk <= 0.0) {
+                    continue;
+                }
+                for (var di = 0u; di < 2u; di = di + 1u) {
+                    let wxk = select(wx0, wx1, di == 1u);
+                    if (wxk <= 0.0) {
+                        continue;
+                    }
+                    let t = area_texel(tx + di, ty + dj, lv);
+                    let tw = wxk * wyk;
+                    acc = acc + t.rgb * (t.a * tw);
+                    cov = cov + t.a * tw;
+                }
+            }
+        }
+    }
+    if (cov <= 0.00001 || area <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(acc / cov, cov / area);
+}
+
+// ── Per-layer adjustment preview (adj_kind 1..=13) ────────────────────────────
+// These functions are a VERBATIM copy of the ones in ADJUSTMENT_SHADER so the
+// live Ctrl+L/M preview (applied to a raster layer's own pixels here) matches
+// the adjustment-LAYER pipeline and the CPU bake exactly. Keep both copies and
+// core::layer::AdjustmentType::apply_pixel in sync.
+fn lum299(c: vec3<f32>) -> f32 { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+fn adj_chroma(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn adj_smootherstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = clamp((x - edge0) / max(edge1 - edge0, 0.00001), 0.0, 1.0);
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+fn adj_set_rgb_preserving_luma(candidate: vec3<f32>, target_luma_in: f32) -> vec3<f32> {
+    let target_luma = clamp(target_luma_in, 0.0, 1.0);
+    var c = candidate;
+    let mn = min(min(c.r, c.g), c.b);
+    if (mn < 0.0) {
+        let anchor = max(target_luma, 0.035);
+        let scale = clamp(anchor / max(anchor - mn, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    let mx = max(max(c.r, c.g), c.b);
+    if (mx > 1.0) {
+        let scale = clamp((1.0 - target_luma) / max(mx - target_luma, 0.00001), 0.0, 1.0);
+        c = vec3(target_luma) + (c - vec3(target_luma)) * scale;
+    }
+    return clamp(c, vec3(0.0), vec3(1.0));
+}
+
+fn adj_chroma_headroom(d: vec3<f32>, l: f32) -> f32 {
+    var room = 1e9;
+    if (d.r > 1e-6) { room = min(room, (1.0 - l) / d.r - 1.0); } else if (d.r < -1e-6) { room = min(room, l / -d.r - 1.0); }
+    if (d.g > 1e-6) { room = min(room, (1.0 - l) / d.g - 1.0); } else if (d.g < -1e-6) { room = min(room, l / -d.g - 1.0); }
+    if (d.b > 1e-6) { room = min(room, (1.0 - l) / d.b - 1.0); } else if (d.b < -1e-6) { room = min(room, l / -d.b - 1.0); }
+    return max(room, 0.0);
+}
+
+fn adj_scale_chroma_around_luma(c: vec3<f32>, factor_in: f32) -> vec3<f32> {
+    let l = clamp(lum299(c), 0.0, 1.0);
+    let protect = adj_smootherstep(0.035, 0.14, l) * (1.0 - adj_smootherstep(0.90, 0.99, l));
+    let req = (clamp(factor_in, 0.0, 2.35) - 1.0) * protect;
+    let d = c - vec3(l);
+    var f = 1.0 + req;
+    if (req > 0.0) {
+        let room = adj_chroma_headroom(d, l);
+        f = select(1.0, 1.0 + room * tanh(req / room), room > 1e-4);
+    }
+    return adj_set_rgb_preserving_luma(vec3(l) + d * f, l);
+}
+
+fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
+    let c = clamp(c_in, vec3(0.0), vec3(1.0));
+    let P0 = u.adj_p[0];
+    let P1 = u.adj_p[1];
+    let P2 = u.adj_p[2];
+    switch u.adj_kind {
+        case 1u: { // BrightnessContrast
+            let bv = P0.x / 255.0;
+            let cv = (P0.y + 100.0) / 100.0;
+            return clamp((c + vec3(bv) - vec3(0.5)) * cv + vec3(0.5), vec3(0.0), vec3(1.0));
+        }
+        case 2u: { // HueSaturation
+            var hsl = rgb_to_hsl(c);
+            let nh = fract(hsl.x + P0.x / 360.0 + 1.0);
+            let nl = clamp(hsl.z + P0.z / 100.0, 0.0, 1.0);
+            var adjusted = hsl_to_rgb(vec3(nh, hsl.y, nl));
+            let sf = P0.y / 100.0;
+            if (abs(sf) > 0.001) {
+                let chroma_gate = adj_smootherstep(0.035, 0.20, adj_chroma(adjusted));
+                let factor = select(1.0 + sf, 1.0 + sf * 1.35 * chroma_gate, sf >= 0.0);
+                adjusted = adj_scale_chroma_around_luma(adjusted, factor);
+            }
+            return adjusted;
+        }
+        case 3u: { // Levels
+            let ib = P0.x / 255.0;
+            let iw = P0.y / 255.0;
+            let gamma = max(P0.z, 0.01);
+            let ob = P0.w / 255.0;
+            let ow = P1.x / 255.0;
+            var v = clamp((c - vec3(ib)) / max(iw - ib, 0.001), vec3(0.0), vec3(1.0));
+            v = pow(v, vec3(1.0 / gamma));
+            return clamp(vec3(ob) + v * (ow - ob), vec3(0.0), vec3(1.0));
+        }
+        case 13u: { // Per-channel Levels/Curves: three 256-entry LUTs (R@0, G@256, B@512),
+                    // each already composed as master(channel(v)) on the CPU bake.
+            let ri = u32(c.r * 255.0 + 0.5);
+            let gi = u32(c.g * 255.0 + 0.5) + 256u;
+            let bi = u32(c.b * 255.0 + 0.5) + 512u;
+            return vec3<f32>(
+                u.lut[ri >> 2u][ri & 3u],
+                u.lut[gi >> 2u][gi & 3u],
+                u.lut[bi >> 2u][bi & 3u],
+            );
+        }
+        case 5u: { // ColorBalance
+            let orig_lum = lum299(c);
+            let lw = orig_lum;
+            let sw = max(1.0 - 2.0 * lw, 0.0);
+            let hw = max(2.0 * lw - 1.0, 0.0);
+            let mw = 1.0 - sw - hw;
+            let shadows = P0.xyz;
+            let midtones = P1.xyz;
+            let highlights = P2.xyz;
+            var nc = clamp(c + sw * shadows / 100.0 + mw * midtones / 100.0 + hw * highlights / 100.0, vec3(0.0), vec3(1.0));
+            if (P0.w > 0.5) {
+                let new_lum = lum299(nc);
+                if (new_lum > 0.001) { nc = clamp(nc * (orig_lum / new_lum), vec3(0.0), vec3(1.0)); }
+            }
+            return nc;
+        }
+        case 6u: { // Vibrance
+            let hsl = rgb_to_hsl(c);
+            let boost = P0.x / 100.0 * (1.0 - hsl.y);
+            let ns = clamp(hsl.y + boost + P0.y / 100.0, 0.0, 1.0);
+            return hsl_to_rgb(vec3(hsl.x, ns, hsl.z));
+        }
+        case 7u: { // Exposure
+            var v = c * pow(2.0, P0.x);
+            v = v + vec3(P0.y);
+            return clamp(pow(max(v, vec3(0.0)), vec3(1.0 / max(P0.z, 0.01))), vec3(0.0), vec3(1.0));
+        }
+        case 8u: { // Invert
+            return vec3(1.0) - c;
+        }
+        case 9u: { // Threshold
+            let v = select(0.0, 1.0, lum299(c) >= P0.x / 255.0);
+            return vec3(v);
+        }
+        case 10u: { // Posterize
+            let lv = max(P0.x, 2.0);
+            return floor(c * lv) / (lv - 1.0);
+        }
+        case 11u: { // Desaturate
+            return vec3(lum299(c));
+        }
+        case 12u: { // GradientMap: 64 RGB ramp samples packed in u.lut
+            var t = lum299(c);
+            if (P0.x > 0.5) {
+                t = 1.0 - t;
+            }
+            if (P0.y > 0.5) {
+                let h = fract(sin(dot(c, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+                t = clamp(t + (h - 0.5) * (1.0 / 48.0), 0.0, 1.0);
+            }
+            let x = clamp(t, 0.0, 1.0) * 63.0;
+            let i0 = u32(floor(x));
+            let i1 = min(i0 + 1u, 63u);
+            return mix(u.lut[i0].xyz, u.lut[i1].xyz, fract(x));
+        }
+        default: { return c; }
+    }
+}
+
+// ── Fragment shader ──────────────────────────────────────────────────────────
+// NOTE: the Detail stage (wavelet sharpening / NR) has NO live GPU mirror — it
+// previews through the debounced CPU refine bake, which runs the real commit
+// pipeline (zero parity risk).
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let dst = textureSampleLevel(dst_tex, samp, in.uv, 0.0);
+
+    let screen_x = in.uv.x * u.viewport_w;
+    let screen_y = in.uv.y * u.viewport_h;
+
+    let canvas_x = screen_x / u.zoom + u.view_offset_x;
+    let canvas_y = screen_y / u.zoom + u.view_offset_y;
+
+    var src: vec4<f32>;
+    var mask_a: f32 = 1.0;
+    var dev_local: vec2<f32> = vec2<f32>(0.5, 0.5);
+    var filter_lx: f32 = 0.0;
+    var filter_ly: f32 = 0.0;
+    var supersampled = false;
+    // Scene LOD of a one-sample Develop draft (-1 = one pixel, see `dev_span_lod`).
+    var dev_lod: f32 = -1.0;
+
+    if (u.xform_active == 2u) {
+        // Free Transform uses a full inverse homography. The existing twelve
+        // transform slots are packed as m00..m22, layer origin x/y, spare.
+        let w = u.xform_tx * canvas_x + u.xform_ty * canvas_y + u.xform_orig_ox;
+        if (abs(w) < 0.000001) {
+            return dst;
+        }
+        let src_canvas_x = (u.xform_inv_a * canvas_x + u.xform_inv_b * canvas_y + u.xform_inv_c) / w;
+        let src_canvas_y = (u.xform_inv_d * canvas_x + u.xform_pivot_x * canvas_y + u.xform_pivot_y) / w;
+        let slx = src_canvas_x - u.xform_orig_oy;
+        let sly = src_canvas_y - u.xform_orig_w;
+        if (slx < 0.0 || sly < 0.0 || slx >= u.layer_w || sly >= u.layer_h) {
+            return dst;
+        }
+        // `slx/sly` are pixel-EDGE coordinates, while the bilinear samplers below
+        // index texel CENTRES. Without this half-texel shift the preview sits half
+        // a source pixel up-left of the CPU bake (which subtracts the same 0.5),
+        // so an identity transform already blurs the layer and committing snaps it
+        // back — the more it is scaled up, the bigger that jump.
+        let sclx = slx - 0.5;
+        let scly = sly - 0.5;
+        src = sample_tile_bilinear(sclx, scly);
+        // A clip child's frame stays fixed in canvas space while the image is
+        // transformed, so sample the clip mask at the UN-transformed canvas
+        // position (layer origin is packed in xform_orig_oy/xform_orig_w here), not
+        // the rotated/scaled layer position. Non-clip masks transform with the layer.
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(
+                i32(canvas_x - u.xform_orig_oy) + sh.x,
+                i32(canvas_y - u.xform_orig_w) + sh.y,
+                u.layer_w, u.layer_h);
+        } else {
+            mask_a = sample_mask_bilinear(sclx, scly);
+        }
+        dev_local = vec2<f32>(slx / max(u.layer_w, 1.0), sly / max(u.layer_h, 1.0));
+        filter_lx = sclx;
+        filter_ly = scly;
+    } else if (u.xform_active == 1u) {
+        // ── Free-transform preview path ────────────────────────────────────
+        // Inverse affine transform: output canvas pos to original layer-local pos.
+        //   Forward: new_pos = pivot + translate + M * (orig_canvas - pivot)
+        //   Inverse: (orig_canvas - pivot) = M_inv * (new_pos - pivot - translate)
+        let dx = canvas_x - (u.xform_pivot_x + u.xform_tx);
+        let dy = canvas_y - (u.xform_pivot_y + u.xform_ty);
+        let ex = u.xform_inv_a * dx + u.xform_inv_b * dy;
+        let ey = u.xform_inv_c * dx + u.xform_inv_d * dy;
+        let slx = ex + u.xform_pivot_x - u.xform_orig_ox;
+        let sly = ey + u.xform_pivot_y - u.xform_orig_oy;
+        if (slx < 0.0 || sly < 0.0 || slx >= u.xform_orig_w || sly >= u.xform_orig_h) {
+            return dst;
+        }
+        src = sample_tile_bilinear(slx, sly);
+        // Clip child: sample the fixed frame at the un-transformed canvas position
+        // (layer origin is xform_orig_ox/xform_orig_oy in this branch).
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(
+                i32(canvas_x - u.xform_orig_ox) + sh.x,
+                i32(canvas_y - u.xform_orig_oy) + sh.y,
+                u.xform_orig_w, u.xform_orig_h);
+        } else {
+            mask_a = sample_mask_bilinear(slx, sly);
+        }
+        dev_local = vec2<f32>(slx / max(u.xform_orig_w, 1.0), sly / max(u.xform_orig_h, 1.0));
+        filter_lx = slx;
+        filter_ly = sly;
+    } else {
+        // ── Normal (no transform) path ─────────────────────────────────────
+        let layer_x = canvas_x - u.offset_x;
+        let layer_y = canvas_y - u.offset_y;
+        dev_local = vec2<f32>(layer_x / max(u.layer_w, 1.0), layer_y / max(u.layer_h, 1.0));
+
+        if (layer_x < 0.0 || layer_y < 0.0 || layer_x >= u.layer_w || layer_y >= u.layer_h) {
+            return dst;
+        }
+
+        let tile_x = u32(layer_x) / 256u;
+        let tile_y = u32(layer_y) / 256u;
+
+        if (tile_x >= u.layer_tiles_w || tile_y >= u.layer_tiles_h) {
+            return dst;
+        }
+
+        let tile_idx = tile_y * u.layer_tiles_w + tile_x;
+        let slot = tile_map[tile_idx];
+
+        if (slot < 0) {
+            return dst;
+        }
+
+        let slot_x = u32(slot & 0xFFFF);
+        let slot_y = u32(slot >> 16u);
+
+        let atlas_x = f32(slot_x * 256u) + (layer_x % 256.0);
+        let atlas_y = f32(slot_y * 256u) + (layer_y % 256.0);
+
+        let atlas_dim = vec2<f32>(textureDimensions(atlas_tex));
+        let atlas_uv = vec2<f32>(atlas_x / atlas_dim.x, atlas_y / atlas_dim.y);
+        src = atlas_linear(textureSampleLevel(atlas_tex, samp, atlas_uv, 0.0));
+        // Live PowerClip / clipping-mask pin (Move path): sample the unmoved clip
+        // mask at the canvas-fixed spot so a dragged clipped image stays inside its
+        // frame. No-op for non-clip layers (clip_is_child false).
+        if (clip_is_child()) {
+            let sh = clip_shift();
+            mask_a = clip_mask_at(i32(layer_x) + sh.x, i32(layer_y) + sh.y, u.layer_w, u.layer_h);
+        } else {
+            mask_a = sample_mask_nearest_i(i32(layer_x), i32(layer_y));
+        }
+        filter_lx = layer_x;
+        filter_ly = layer_y;
+
+        // Zoomed out: the Develop layer averages its display grid of real
+        // pixels (see `zoom_taps_per_axis`); every other layer shows the exact
+        // footprint area (see `area_sample`). Filter previews keep their own
+        // sampling.
+        let footprint = 1.0 / max(u.zoom, 1e-6);
+        var n = 1u;
+        if (u.adj_kind == 20u) {
+            n = dev_grid_taps(footprint);
+        } else if (footprint > 1.001 && !(u.adj_kind >= 30u && u.adj_kind <= 35u)) {
+            let r = area_sample(layer_x, layer_y, footprint);
+            if (r.a <= 0.00001) {
+                return dst;
+            }
+            var srgb = r.rgb;
+            if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+                srgb = apply_adjustment(srgb);
+            }
+            src = vec4<f32>(dev_srgb_to_linear(srgb), r.a);
+            mask_a = 1.0;
+            supersampled = true;
+        }
+        if (u.adj_kind == 20u && n == 1u) {
+            dev_lod = dev_span_lod(footprint);
+        }
+        if (n > 1u) {
+            let x0 = layer_x - 0.5 * footprint;
+            let y0 = layer_y - 0.5 * footprint;
+            let max_x = i32(u.layer_w) - 1;
+            let max_y = i32(u.layer_h) - 1;
+            let size = vec2<f32>(u.layer_w, u.layer_h);
+            let span = footprint / f32(n);
+            let lod = dev_span_lod(span);
+            var acc = vec3<f32>(0.0);
+            var cov = 0.0;
+            for (var ky = 0u; ky < n; ky = ky + 1u) {
+                let cy = y0 + (f32(ky) + 0.5) * span;
+                let iy = clamp(i32(floor(cy)), 0, max_y);
+                for (var kx = 0u; kx < n; kx = kx + 1u) {
+                    let cx = x0 + (f32(kx) + 0.5) * span;
+                    let ix = clamp(i32(floor(cx)), 0, max_x);
+                    var local = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / size;
+                    if (lod >= 0.0) {
+                        local = clamp(vec2<f32>(cx, cy), vec2<f32>(0.0), size) / size;
+                    }
+                    let t = layer_texel_srgb(ix, iy, local, lod);
+                    acc = acc + t.rgb * t.a;
+                    cov = cov + t.a;
+                }
+            }
+            if (cov <= 0.00001) {
+                return dst;
+            }
+            let srgb = dev_dither_srgb(acc / cov, in.pos.xy);
+            src = vec4<f32>(dev_srgb_to_linear(srgb), cov / f32(n * n));
+            mask_a = 1.0;
+            supersampled = true;
+        }
+    }
+
+    // A supersampled pixel was adjusted per grid pixel above.
+    if (supersampled) {
+    } else if (u.adj_kind == 20u) {
+        let srgb = dev_linear_to_srgb(src.rgb);
+        let cr = develop_apply(srgb, dev_local, dev_lod);
+        src = vec4<f32>(dev_srgb_to_linear(dev_dither_srgb(cr, in.pos.xy)), src.a);
+    } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+        // Live Ctrl+L/M preview on this raster layer's own pixels. Use the exact
+        // sRGB curve (not pow 2.2): src is linear (Rgba8UnormSrgb atlas), so
+        // dev_linear_to_srgb recovers the byte-space value the CPU bake operates
+        // on — making this preview match the committed result.
+        let srgb = dev_linear_to_srgb(src.rgb);
+        let adj = apply_adjustment(srgb);
+        src = vec4<f32>(dev_srgb_to_linear(adj), src.a);
+    } else if (u.adj_kind >= 30u && u.adj_kind <= 35u) {
+        src = apply_filter_preview(src, filter_lx, filter_ly);
+    }
+
+    var sa = src.a * u.opacity * mask_a;
+    if (u.blend_mode == 17u) {
+        let threshold = dissolve_hash(
+            u32(max(floor(canvas_x), 0.0)),
+            u32(max(floor(canvas_y), 0.0))
+        );
+        if (threshold >= sa) {
+            return dst;
+        }
+        sa = 1.0;
+    }
+    if (sa <= 0.00001) {
+        return dst;
+    }
+    let da = dst.a;
+    let out_a = sa + da * (1.0 - sa);
+
+    if (out_a == 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Photoshop's default setting blends directly in the RGB document space.
+    // The atlas and ping-pong textures are sRGB formats, so texture sampling has
+    // already decoded them to linear. Convert both operands back to sRGB for the
+    // blend/composite math, then return to linear for the sRGB render target.
+    let src_rgb = dev_linear_to_srgb(src.rgb);
+    let dst_rgb = dev_linear_to_srgb(dst.rgb);
+
+    if (u.blend_mode == 0u || u.blend_mode == 17u) {
+        let out_rgb_pre = sa * src_rgb + da * (1.0 - sa) * dst_rgb;
+        return vec4<f32>(dev_srgb_to_linear(out_rgb_pre / out_a), out_a);
+    }
+
+    let Cr = blend_comp(u.blend_mode, src_rgb, dst_rgb);
+    let out_rgb_pre = (sa * da) * Cr
+        + (sa * (1.0 - da)) * src_rgb
+        + (da * (1.0 - sa)) * dst_rgb;
+    let out_rgb = out_rgb_pre / out_a;
+
+    return vec4<f32>(dev_srgb_to_linear(out_rgb), out_a);
+}

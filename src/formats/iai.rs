@@ -1,0 +1,4219 @@
+use super::{ExportOptions, Exporter, Importer};
+use crate::core::canvas::{Canvas, CanvasMetadata, ColorSpace};
+use crate::core::layer::{BlendMode, Layer, LayerType};
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
+
+/// Highest on-disk format version this build writes. v1 = single canvas;
+/// v2 adds the multi-page PDF *project* variant (`kind == "pdf_project"`);
+/// v3 adds CMYK documents (color_mode + per-layer ink planes + profile entry).
+/// RGB documents keep writing v2 so older builds still open them; v3 is only
+/// stamped when ink is present, which older builds MUST reject (their loader
+/// errors on version > 2) rather than silently strip the ink.
+///
+/// v4 adds editable vector Path layers (per-layer `"path"` model payload, Bước 4).
+/// Only stamped when a Path layer is present, so RGB/CMYK files without vector
+/// content keep writing v2/v3 and older builds still open them; a v4 file makes
+/// older builds reject (version > their max) rather than silently dropping the
+/// vector model on resave.
+///
+/// 16-bit precision does NOT bump the version: a layer that still holds a 16-bit
+/// master is written as a 16-bit RGBA PNG at `layer_{i}.png`. Older builds decode
+/// it as 8-bit (graceful precision loss they couldn't use anyway); this build
+/// detects the 16-bit payload on load and rebuilds the master. See
+/// `docs/bit-depth-and-color-capability.md`.
+/// v6 adds compact document-level PDF clear rectangles. Older builds must reject
+/// these projects rather than silently dropping an edit that affects every page.
+/// v7 adds custom tab names for source PDF pages.
+/// v8 adds materialized blank/image/PDF pages whose ids are outside the source
+/// PDF's physical page range. v10 adds ordered, compact text/image stamps shared
+/// by all pages of a PDF project. v11 introduced inline image anchors in
+/// flowing-text paragraphs; this build reads them and migrates them to the
+/// replacement Top-and-Bottom blocks. v12 stores the canonical Canvas Editor
+/// JSON in a separate bounded `document.json` entry and preserves unknown JSON
+/// fields verbatim at the value level.
+const IAI_FORMAT_VERSION: u64 = 12;
+const LEGACY_FLOW_TEXT_VERSION: u64 = 11;
+/// Sanity bound against corrupt or hostile archives, not a format limit: vector
+/// paths, text layers and legacy (v10/v11) inline images all live in the
+/// manifest, so real documents reach tens of MiB. Writers enforce the same
+/// bound so iAi never saves a file it cannot open again.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
+
+pub struct IaiImporter;
+pub struct IaiExporter;
+
+/// One edited page of a saved PDF project, decoded back into a [`Canvas`].
+pub struct IaiProjectPage {
+    pub index: usize,
+    /// The base (page 0) raster layer was byte-for-byte the imported PDF page at
+    /// save time — recorded so overlay export can stay available after a reload.
+    pub base_pristine: bool,
+    pub view: (f32, f32, f32),
+    pub canvas: Canvas,
+}
+
+/// A `.iai` PDF-project file decoded off the source: link + metadata of the
+/// original PDF plus every edited page. Clean pages are re-rendered from the
+/// source on demand, so only edited pages carry pixels here.
+pub struct IaiPdfProject {
+    pub source: PathBuf,
+    pub source_len: Option<u64>,
+    pub source_modified_secs: Option<u64>,
+    pub embedded_pdf: Option<Vec<u8>>,
+    pub page_count: usize,
+    pub selected_pages: Vec<usize>,
+    pub page_names: std::collections::BTreeMap<usize, String>,
+    pub requested_dpi: f32,
+    pub active_page: usize,
+    pub global_edits: Vec<crate::core::document::PdfGlobalEdit>,
+    pub pages: Vec<IaiProjectPage>,
+}
+
+/// A multi-page (Corel/Excel-style) artboard document: one independent canvas per
+/// page, decoded in tab order. Distinct from a PDF project (no source PDF; every
+/// page is a real stored canvas).
+pub struct IaiArtboardDoc {
+    pub pages: Vec<Canvas>,
+    pub active_page: usize,
+    /// The shared master (background) page, when the document has one. Stored
+    /// under the `master/` layer prefix; absent on documents without a master.
+    pub master: Option<Canvas>,
+}
+
+/// Result of decoding a `.iai`: a plain single canvas (v1 / v2 image), a
+/// multi-page PDF project (v2), or a multi-page artboard document (v5). The app
+/// routes each to the matching open path.
+pub enum IaiLoad {
+    Canvas(Canvas),
+    PdfProject(IaiPdfProject),
+    ArtboardDoc(IaiArtboardDoc),
+    FlowTextDocument(crate::core::document::FlowTextBacking),
+}
+
+fn read_manifest<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<serde_json::Value, String> {
+    let mut f = archive
+        .by_name("manifest.json")
+        .map_err(|_| "Missing manifest.json")?;
+    if f.size() > MAX_MANIFEST_BYTES {
+        return Err(manifest_too_large_error());
+    }
+    let mut s = String::new();
+    (&mut f)
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_string(&mut s)
+        .map_err(|e| e.to_string())?;
+    if s.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(manifest_too_large_error());
+    }
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+fn manifest_too_large_error() -> String {
+    format!(
+        "Phần mô tả tài liệu (manifest.json) vượt giới hạn {} MB",
+        MAX_MANIFEST_BYTES / (1024 * 1024)
+    )
+}
+
+/// Write `manifest.json`, refusing (before anything reaches disk) a manifest
+/// that [`read_manifest`] would reject, so a save can never produce a file
+/// that fails to reopen.
+fn write_manifest<W: Write + Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    manifest: &serde_json::Value,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    let text = manifest.to_string();
+    if text.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(manifest_too_large_error());
+    }
+    zip.start_file("manifest.json", options)
+        .map_err(|e| e.to_string())?;
+    zip.write_all(text.as_bytes()).map_err(|e| e.to_string())
+}
+
+fn read_bounded_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut file = archive
+        .by_name(name)
+        .map_err(|_| format!("Missing {name}"))?;
+    if file.size() > max_bytes as u64 {
+        return Err(format!(
+            "{name} exceeds the {} MiB limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    let mut bytes = Vec::with_capacity(file.size() as usize);
+    (&mut file)
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "{name} exceeds the {} MiB limit",
+            max_bytes / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Peek a `.iai` and report whether it is a multi-page PDF project (v2). Best
+/// effort: any read/parse error returns `false` so the caller falls back to the
+/// ordinary single-canvas open path (which surfaces a precise error).
+pub fn is_pdf_project(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    read_manifest(&mut archive)
+        .map(|m| m["kind"].as_str() == Some("pdf_project"))
+        .unwrap_or(false)
+}
+
+/// Peek a `.iai` and report whether it is a multi-page artboard document (v5).
+/// Best effort — any error returns `false`, falling back to the single-canvas
+/// open path.
+pub fn is_artboard_doc(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    read_manifest(&mut archive)
+        .map(|m| m["kind"].as_str() == Some("artboard_doc"))
+        .unwrap_or(false)
+}
+
+/// Peek a `.iai` and report whether it contains a lightweight flowing-text
+/// document rather than raster/artboard canvas content.
+pub fn is_flow_text_doc(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    read_manifest(&mut archive)
+        .map(|m| m["kind"].as_str() == Some("flow_text_document"))
+        .unwrap_or(false)
+}
+
+/// Decode a `.iai` file into either a single canvas or a PDF project.
+pub fn load(path: &Path) -> Result<IaiLoad, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let manifest = read_manifest(&mut archive)?;
+
+    let version = manifest["version"].as_u64().unwrap_or(0);
+    if version > IAI_FORMAT_VERSION {
+        return Err(format!(
+            "This file was created with a newer version of IAI (format version {}).\
+             \nPlease update IAI to open it.",
+            version
+        ));
+    }
+    if version >= 12 && manifest["kind"].as_str() != Some("flow_text_document") {
+        return Err(format!(
+            "Unsupported IAI v{version} document kind; v12 is reserved for Canvas Editor documents"
+        ));
+    }
+
+    if manifest["kind"].as_str() == Some("pdf_project") {
+        return read_pdf_project(&mut archive, &manifest).map(IaiLoad::PdfProject);
+    }
+    if manifest["kind"].as_str() == Some("artboard_doc") {
+        return read_artboard_doc(&mut archive, &manifest).map(IaiLoad::ArtboardDoc);
+    }
+    if manifest["kind"].as_str() == Some("flow_text_document") {
+        if version >= 12 {
+            if manifest["editor"].as_str() != Some("canvas-editor")
+                || manifest["document_entry"].as_str() != Some("document.json")
+            {
+                return Err("Invalid Canvas Editor v12 manifest".to_string());
+            }
+            let bytes = read_bounded_entry(
+                &mut archive,
+                "document.json",
+                crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES,
+            )?;
+            let payload = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Invalid Canvas Editor document.json: {error}"))?;
+            let document = crate::core::document::CanvasEditorDocument::try_new(payload)?;
+            return Ok(IaiLoad::FlowTextDocument(
+                crate::core::document::FlowTextBacking::CanvasEditor(document),
+            ));
+        }
+        let mut document: crate::core::text_document::TextDocument =
+            serde_json::from_value(manifest["document"].clone()).map_err(|e| e.to_string())?;
+        document.migrate_inline_images_to_top_bottom();
+        document.validate()?;
+        return Ok(IaiLoad::FlowTextDocument(
+            crate::core::document::FlowTextBacking::legacy(document),
+        ));
+    }
+    // v1 (and v2 single-image) store the canvas fields at the manifest root, with
+    // layer pixels at the archive root (no prefix).
+    build_canvas_from_meta(&mut archive, &manifest, "").map(IaiLoad::Canvas)
+}
+
+/// Store a flowing-text document in the normal `.iai` ZIP envelope. No canvas,
+/// layer PNG or tile payload is written, so file size scales with text content.
+pub fn write_flow_text_doc(
+    path: &Path,
+    document: &crate::core::text_document::TextDocument,
+) -> Result<(), String> {
+    let mut document = document.clone();
+    document.migrate_inline_images_to_top_bottom();
+    document.validate()?;
+    write_iai_archive(path, |zip| {
+        let manifest = serde_json::json!({
+            "version": LEGACY_FLOW_TEXT_VERSION,
+            "kind": "flow_text_document",
+            "document": &document,
+        });
+        write_manifest(zip, &manifest, deflated_options())
+    })
+}
+
+/// Store the canonical Canvas Editor payload in the v12 `.iai` ZIP envelope.
+/// The payload is a separate bounded entry so the small manifest can be safely
+/// inspected without allocating the complete document.
+pub fn write_canvas_editor_doc(
+    path: &Path,
+    document: &crate::core::document::CanvasEditorDocument,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(document.payload())
+        .map_err(|error| format!("Cannot encode Canvas Editor document: {error}"))?;
+    if bytes.len() > crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES {
+        return Err("Canvas Editor document exceeds the 8 MiB limit".to_string());
+    }
+    write_iai_archive(path, |zip| {
+        let manifest = serde_json::json!({
+            "version": IAI_FORMAT_VERSION,
+            "kind": "flow_text_document",
+            "editor": "canvas-editor",
+            "editor_version": "1.0.2",
+            "document_entry": "document.json",
+        });
+        write_manifest(zip, &manifest, deflated_options())?;
+        zip.start_file("document.json", deflated_options())
+            .map_err(|error| error.to_string())?;
+        zip.write_all(&bytes).map_err(|error| error.to_string())
+    })
+}
+
+/// Rebuild a [`Canvas`] from its manifest metadata object and prefixed layer
+/// entries. `meta` holds width/height/dpi/color_space/author/description/layers;
+/// pixels live at `{prefix}layer_{i}.png` (+ optional `_mask`). Shared by the
+/// single-canvas and per-page project paths.
+fn build_canvas_from_meta<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    meta: &serde_json::Value,
+    prefix: &str,
+) -> Result<Canvas, String> {
+    let w = (meta["width"].as_u64().unwrap_or(800) as u32).max(1);
+    let h = (meta["height"].as_u64().unwrap_or(600) as u32).max(1);
+    let dpi = meta["dpi"].as_f64().unwrap_or(72.0) as f32;
+    let color_space = match meta["color_space"].as_str().unwrap_or("sRGB") {
+        "AdobeRGB" => ColorSpace::AdobeRGB,
+        "DisplayP3" => ColorSpace::DisplayP3,
+        "ProPhoto" => ColorSpace::ProPhoto,
+        _ => ColorSpace::SRGB,
+    };
+
+    let metadata = CanvasMetadata {
+        resolution_ppi: dpi,
+        ..Default::default()
+    };
+    let mut canvas = Canvas::new_blank(w, h);
+    canvas.metadata = metadata;
+    canvas.color_space = color_space;
+    canvas.metadata.author = meta["author"].as_str().unwrap_or("").to_string();
+    canvas.metadata.description = meta["description"].as_str().unwrap_or("").to_string();
+    canvas.metadata.develop_working_space = match meta["develop_working_space"].as_str() {
+        Some("LinearProPhoto") => crate::core::working_color::WorkingColorSpace::LinearProPhoto,
+        Some("ACEScg") => crate::core::working_color::WorkingColorSpace::AcesCg,
+        _ => crate::core::working_color::WorkingColorSpace::LinearSrgb,
+    };
+    canvas.metadata.color_pipeline_version =
+        meta["color_pipeline_version"].as_u64().unwrap_or(1) as u16;
+    canvas.metadata.raw_render_recipe = meta["raw_render_recipe"]
+        .as_str()
+        .and_then(crate::core::camera_profile::RawRenderRecipeVersion::from_name);
+    canvas.metadata.swatches = super::iai_palette::json_to_palette(meta.get("document_swatches"));
+    // Artboards / multi-page container (contract #10). Absent on one-page docs and
+    // older files → empty → the canvas falls back to its single implicit page.
+    canvas.metadata.artboards = json_to_artboards(meta.get("artboards"));
+    canvas.metadata.page_bleed_px = meta["page_bleed"].as_f64().unwrap_or(0.0).max(0.0) as f32;
+    canvas.metadata.page_margin_px = meta["page_margin"].as_f64().unwrap_or(0.0).max(0.0) as f32;
+    // Custom page-tab name (multi-page docs). Absent on single-page / older files.
+    canvas.metadata.page_name = meta["page_name"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    // Master opt-out (multi-page docs). Absent / older files → defaults to on.
+    canvas.metadata.use_master = meta["use_master"].as_bool().unwrap_or(true);
+    // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
+    // 16-bit document in 16-bit mode so its first edit preserves precision
+    // instead of quantizing the masters the 16-bit layer PNGs just restored.
+    if meta["bit_depth"].as_u64() == Some(16) {
+        canvas.bit_depth = crate::core::canvas::BitDepth::Sixteen;
+    }
+
+    canvas.layer_stack.layers.clear();
+
+    let manifest_layers = meta["layers"].as_array();
+    let declared_layer_count = meta["layer_count"]
+        .as_u64()
+        .unwrap_or_else(|| manifest_layers.map_or(1, |layers| layers.len() as u64))
+        as usize;
+    let layer_count = manifest_layers.map_or(declared_layer_count, |layers| {
+        declared_layer_count.min(layers.len())
+    });
+
+    for i in 0..layer_count {
+        let layer_info = &meta["layers"][i];
+        let name = layer_info["name"]
+            .as_str()
+            .unwrap_or(&format!("Layer {}", i))
+            .to_string();
+        let opacity = layer_info["opacity"].as_f64().unwrap_or(1.0) as f32;
+        let visible = layer_info["visible"].as_bool().unwrap_or(true);
+        let locked = layer_info["locked"].as_bool().unwrap_or(false);
+        let blend_mode = parse_blend_mode(layer_info["blend_mode"].as_str().unwrap_or("Normal"));
+        let offset_x = layer_info["offset_x"].as_i64().unwrap_or(0) as i32;
+        let offset_y = layer_info["offset_y"].as_i64().unwrap_or(0) as i32;
+
+        let (pixels, layer_w, layer_h, hdr16) = {
+            let entry_name = format!("{prefix}layer_{}.png", i);
+            match archive.by_name(&entry_name) {
+                Ok(mut f) => {
+                    let mut buf = Vec::new();
+                    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                    let img = image::load_from_memory(&buf).map_err(|e| e.to_string())?;
+                    let (lw, lh) = (img.width().max(1), img.height().max(1));
+                    // A 16-bit PNG payload carries a preserved master; keep it so
+                    // the layer reopens at full precision instead of being
+                    // rebuilt at 8 bits from the mirror.
+                    let hdr16 = matches!(
+                        img,
+                        image::DynamicImage::ImageRgba16(_) | image::DynamicImage::ImageRgb16(_)
+                    )
+                    .then(|| img.to_rgba16().into_raw());
+                    (img.to_rgba8().into_raw(), lw, lh, hdr16)
+                }
+                Err(_) => {
+                    let lw = layer_info["width"].as_u64().unwrap_or(w as u64) as u32;
+                    let lh = layer_info["height"].as_u64().unwrap_or(h as u64) as u32;
+                    let lw = lw.max(1);
+                    let lh = lh.max(1);
+                    let Some(len) = Canvas::guarded_flat_rgba_len(lw, lh) else {
+                        return Err("iAi layer qua lon de tao buffer phang".to_string());
+                    };
+                    (vec![0u8; len], lw, lh, None)
+                }
+            }
+        };
+
+        let mut layer = Layer::from_rgba(i as u32, &name, pixels, layer_w, layer_h);
+        // Restore the 16-bit master when the payload was 16-bit. `from_rgba`
+        // built an 8-bit-only tilemap; swap in one that carries both the master
+        // and its 8-bit mirror.
+        if let Some(px16) = hdr16 {
+            layer.tiles = crate::core::tile::TileMap::from_rgba16(&px16, layer_w, layer_h);
+        }
+        layer.opacity = opacity;
+        layer.visible = visible;
+        layer.locked = locked;
+        layer.blend_mode = blend_mode;
+        layer.offset = (offset_x, offset_y);
+        layer.parent_id = layer_info["parent"].as_u64().map(|p| p as u32);
+        layer.clip_parent_id = layer_info["clip_parent"].as_u64().map(|p| p as u32);
+        layer.page_id =
+            crate::core::page::PageId(layer_info["page"].as_u64().map(|p| p as u32).unwrap_or(0));
+        layer.expanded = layer_info["expanded"].as_bool().unwrap_or(true);
+        // Dynamic-connector binding (absent on older files → None). Anchor targets
+        // were stored as positions, which equal layer ids on load (like clip_parent).
+        if let Some(conn) = layer_info.get("connector").filter(|v| v.is_object()) {
+            use crate::core::connector::{ConnectorAnchor, ConnectorBinding};
+            let anchor = |v: &serde_json::Value| -> Option<ConnectorAnchor> {
+                Some(ConnectorAnchor {
+                    layer_id: v.get("layer")?.as_u64()? as u32,
+                    fx: v["fx"].as_f64().unwrap_or(0.5) as f32,
+                    fy: v["fy"].as_f64().unwrap_or(0.5) as f32,
+                })
+            };
+            let binding = ConnectorBinding {
+                route: conn["route"].as_u64().unwrap_or(0) as u8,
+                start: conn.get("start").and_then(&anchor),
+                end: conn.get("end").and_then(&anchor),
+            };
+            if binding.is_attached() {
+                layer.connector = Some(binding);
+            }
+        }
+        if let Some(adj) = json_to_adjustment(&layer_info["adjustment"]) {
+            layer.layer_type = crate::core::layer::LayerType::Adjustment(adj);
+        } else if layer_info["layer_type"].as_str() == Some("Text") {
+            if let Some(text) = json_to_text_data(&layer_info["text"]) {
+                layer.layer_type = crate::core::layer::LayerType::Text(text);
+            }
+        } else if layer_info["layer_type"].as_str() == Some("Shape") {
+            if let Some(shape) = json_to_shape_data(&layer_info["shape"]) {
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Primitive(shape),
+                );
+            }
+        } else if layer_info["layer_type"].as_str() == Some("Path") {
+            // Model is the source of truth; the baked PNG already loaded above is
+            // the display fallback. A malformed/oversized payload decodes to None,
+            // leaving the layer as the raster it loaded (Mục 5.3).
+            if let Some(obj) = super::iai_vector::json_to_layer_path(&layer_info["path"]) {
+                layer.layer_type = crate::core::layer::LayerType::Vector(
+                    crate::core::vector::object::VectorGeometry::Path(obj),
+                );
+            }
+        } else if layer_info["layer_type"].as_str() == Some("Group") {
+            layer.layer_type = crate::core::layer::LayerType::Group;
+        }
+
+        let mask_entry = format!("{prefix}layer_{}_mask.png", i);
+        if archive.by_name(&mask_entry).is_ok() {
+            let (mask_pixels, mask_w, mask_h) = {
+                let mut f = archive.by_name(&mask_entry).map_err(|e| e.to_string())?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+                let img = image::load_from_memory(&buf).map_err(|e| e.to_string())?;
+                let rgba = img.to_rgba8();
+                let (mw, mh) = rgba.dimensions();
+                (rgba.into_raw(), mw.max(1), mh.max(1))
+            };
+            use crate::core::layer::LayerMask;
+            use crate::core::tile::TileMap;
+            layer.mask = Some(LayerMask {
+                tiles: TileMap::from_rgba(&mask_pixels, mask_w, mask_h),
+                width: mask_w,
+                height: mask_h,
+                // Key added post-v1; older files default to enabled.
+                enabled: layer_info["mask_enabled"].as_bool().unwrap_or(true),
+                inverted: false,
+                // Derived on next clip re-bake for PowerClip content; harmless 0 here.
+                bake_offset: (0, 0),
+                bake_frame_offset: (0, 0),
+            });
+        }
+        layer.portrait =
+            read_portrait(archive, prefix, i, &layer_info["portrait"]).map(std::sync::Arc::new);
+
+        canvas.layer_stack.layers.push(layer);
+    }
+
+    if canvas.layer_stack.layers.is_empty() {
+        canvas
+            .layer_stack
+            .layers
+            .push(Layer::new(0, "Layer 1", w, h));
+    }
+    canvas.layer_stack.repair_next_id();
+    canvas.layer_stack.repair_clip_relations();
+
+    let active_idx = meta["active_layer"].as_u64().unwrap_or(0) as usize;
+    canvas.layer_stack.active_idx =
+        active_idx.min(canvas.layer_stack.layers.len().saturating_sub(1));
+
+    // CMYK document (v3): restore the conversion space and each layer's ink
+    // planes. The layer PNGs already hold the profile projection (mirror), so
+    // no re-projection is needed here.
+    if meta["color_mode"].as_str() == Some("CMYK") {
+        let profile = match meta["cmyk_profile"]["kind"].as_str() {
+            Some("icc") => {
+                let name = meta["cmyk_profile"]["name"]
+                    .as_str()
+                    .unwrap_or("CMYK profile")
+                    .to_string();
+                let entry = format!("{prefix}cmyk_profile.icc");
+                let mut f = archive
+                    .by_name(&entry)
+                    .map_err(|_| "File CMYK thiếu cmyk_profile.icc".to_string())?;
+                let mut data = Vec::new();
+                f.read_to_end(&mut data).map_err(|e| e.to_string())?;
+                crate::core::canvas::CmykProfile::Icc { name, data }
+            }
+            _ => crate::core::canvas::CmykProfile::Naive,
+        };
+        for (i, layer) in canvas.layer_stack.layers.iter_mut().enumerate() {
+            let entry = format!("{prefix}layer_{}_ink.png", i);
+            let Ok(mut f) = archive.by_name(&entry) else {
+                continue;
+            };
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            drop(f);
+            let img = image::load_from_memory(&buf).map_err(|e| e.to_string())?;
+            let ink = img.to_rgba8();
+            let (iw, ih) = ink.dimensions();
+            // The ink PNG must match the layer exactly (same writer); a
+            // mismatch means corruption — leave that layer ink-less rather
+            // than write rows with the wrong stride.
+            if (iw, ih) == (layer.width, layer.height) {
+                layer.tiles.write_ink_region(0, 0, iw, ih, &ink);
+            }
+        }
+        canvas.color_mode = crate::core::canvas::ColorMode::Cmyk(profile);
+    }
+
+    // Saved alpha channels (post-v2 addition; missing key/entries = none).
+    if let Some(alpha_list) = meta["alpha_channels"].as_array() {
+        for (i, info) in alpha_list.iter().enumerate() {
+            let entry_name = format!("{prefix}channel_{}.png", i);
+            let Ok(mut f) = archive.by_name(&entry_name) else {
+                continue;
+            };
+            let mut buf = Vec::new();
+            if f.read_to_end(&mut buf).is_err() {
+                continue;
+            }
+            drop(f);
+            let Ok(img) = image::load_from_memory(&buf) else {
+                continue;
+            };
+            let gray = img.to_luma8();
+            let (cw, ch) = gray.dimensions();
+            if cw == 0 || ch == 0 {
+                continue;
+            }
+            let name = info["name"].as_str().unwrap_or("").to_string();
+            canvas
+                .channels
+                .add_alpha(name, gray.into_raw(), cw.max(1), ch.max(1));
+        }
+    }
+
+    // Path layers: re-derive the raster cache from the restored model so the
+    // model — not the baked PNG fallback — is authoritative on reopen (Muc 3.8,
+    // Buoc 5). No-op when there are no Path layers.
+    canvas.rebuild_path_caches();
+    // PowerClip: the clip relation persists but its mask is derived — re-bake each
+    // content layer's clip from its frame (frames now have their tiles restored).
+    canvas.refresh_clip_masks();
+
+    canvas.flatten_full();
+    Ok(canvas)
+}
+
+fn read_pdf_project<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    manifest: &serde_json::Value,
+) -> Result<IaiPdfProject, String> {
+    let project = &manifest["pdf_project"];
+    let source = PathBuf::from(
+        project["source"]
+            .as_str()
+            .ok_or("PDF project is missing its source path")?,
+    );
+    let page_count = project["page_count"].as_u64().unwrap_or(0) as usize;
+    let requested_dpi = project["requested_dpi"].as_f64().unwrap_or(300.0) as f32;
+    let active_page = project["active_page"].as_u64().unwrap_or(0) as usize;
+    let source_len = project["source_len"].as_u64();
+    let source_modified_secs = project["source_modified"].as_u64();
+    let selected_pages: Vec<usize> = project["selected_pages"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64())
+                .map(|v| v as usize)
+                .collect()
+        })
+        .unwrap_or_else(|| (0..page_count).collect());
+    let page_names = project["page_names"]
+        .as_object()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|(index, name)| {
+                    let index = index.parse::<usize>().ok()?;
+                    let name = name.as_str()?.trim();
+                    ((index < page_count || selected_pages.contains(&index)) && !name.is_empty())
+                        .then(|| (index, name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let parse_target_pages = |operation: &serde_json::Value| {
+        operation["target_pages"]
+            .as_array()
+            .map(|pages| {
+                let mut result = Vec::new();
+                for page in pages.iter().filter_map(|value| value.as_u64()) {
+                    let page = page as usize;
+                    if !result.contains(&page) {
+                        result.push(page);
+                    }
+                }
+                result
+            })
+            .unwrap_or_default()
+    };
+    let parse_clear = |operation: &serde_json::Value| {
+        let rect = operation["rect"].as_array()?;
+        let color = operation["color"].as_array()?;
+        if rect.len() != 4 || color.len() != 4 {
+            return None;
+        }
+        let read_f32 = |index: usize| rect[index].as_f64().map(|v| v as f32);
+        let read_u8 = |index: usize| color[index].as_u64().and_then(|v| u8::try_from(v).ok());
+        let clear = crate::core::document::PdfGlobalClear {
+            x0: read_f32(0)?,
+            y0: read_f32(1)?,
+            x1: read_f32(2)?,
+            y1: read_f32(3)?,
+            color: [read_u8(0)?, read_u8(1)?, read_u8(2)?, read_u8(3)?],
+            target_pages: parse_target_pages(operation),
+        };
+        (clear.x0.is_finite()
+            && clear.y0.is_finite()
+            && clear.x1.is_finite()
+            && clear.y1.is_finite()
+            && clear.x0 >= 0.0
+            && clear.y0 >= 0.0
+            && clear.x1 <= 1.0
+            && clear.y1 <= 1.0
+            && clear.x1 > clear.x0
+            && clear.y1 > clear.y0)
+            .then_some(clear)
+    };
+    let valid_rect = |rect: &[serde_json::Value]| -> Option<(f32, f32, f32, f32)> {
+        if rect.len() != 4 {
+            return None;
+        }
+        let values = [
+            rect[0].as_f64()? as f32,
+            rect[1].as_f64()? as f32,
+            rect[2].as_f64()? as f32,
+            rect[3].as_f64()? as f32,
+        ];
+        (values.iter().all(|value| value.is_finite())
+            && values[0] >= 0.0
+            && values[1] >= 0.0
+            && values[2] <= 1.0
+            && values[3] <= 1.0
+            && values[2] > values[0]
+            && values[3] > values[1])
+            .then_some((values[0], values[1], values[2], values[3]))
+    };
+    let mut global_edits = Vec::new();
+    if let Some(edits) = project["global_edits"].as_array() {
+        for (index, edit) in edits.iter().enumerate() {
+            match edit["kind"].as_str() {
+                Some("clear") => {
+                    if let Some(clear) = parse_clear(edit) {
+                        global_edits.push(crate::core::document::PdfGlobalEdit::Clear(clear));
+                    }
+                }
+                Some(kind @ ("text" | "image")) => {
+                    let Some(rect) = edit["rect"].as_array().and_then(|rect| valid_rect(rect))
+                    else {
+                        continue;
+                    };
+                    let width = edit["width"]
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(0);
+                    let height = edit["height"]
+                        .as_u64()
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(0);
+                    if width == 0
+                        || height == 0
+                        || crate::core::canvas::Canvas::checked_rgba_len(width, height).is_none()
+                    {
+                        continue;
+                    }
+                    let entry = edit["entry"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("global_edit_{index}.png"));
+                    let rgba = match archive.by_name(&entry) {
+                        Ok(mut file) => {
+                            let mut bytes = Vec::new();
+                            file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                            let image = image::load_from_memory(&bytes)
+                                .map_err(|e| e.to_string())?
+                                .to_rgba8();
+                            if image.dimensions() != (width, height) {
+                                continue;
+                            }
+                            image.into_raw()
+                        }
+                        Err(_) => continue,
+                    };
+                    global_edits.push(crate::core::document::PdfGlobalEdit::Stamp(
+                        crate::core::document::PdfGlobalStamp {
+                            x0: rect.0,
+                            y0: rect.1,
+                            x1: rect.2,
+                            y1: rect.3,
+                            width,
+                            height,
+                            rgba,
+                            kind: if kind == "text" {
+                                crate::core::document::PdfGlobalStampKind::Text
+                            } else {
+                                crate::core::document::PdfGlobalStampKind::Image
+                            },
+                            name: edit["name"].as_str().unwrap_or("Layer").to_string(),
+                            source_page: edit["source_page"].as_u64().map(|v| v as usize),
+                            source_layer_id: edit["source_layer_id"].as_u64().map(|v| v as u32),
+                            target_pages: parse_target_pages(edit),
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(clears) = project["global_clears"].as_array() {
+        global_edits.extend(
+            clears
+                .iter()
+                .filter_map(parse_clear)
+                .map(crate::core::document::PdfGlobalEdit::Clear),
+        );
+    }
+
+    let mut pages = Vec::new();
+    if let Some(arr) = manifest["pages"].as_array() {
+        for entry in arr {
+            let index = entry["index"].as_u64().unwrap_or(0) as usize;
+            let base_pristine = entry["base_pristine"].as_bool().unwrap_or(false);
+            let view = {
+                let v = &entry["view"];
+                (
+                    v.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+                    v.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+                    v.get(2).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+                )
+            };
+            let prefix = format!("page_{index}/");
+            let canvas = build_canvas_from_meta(archive, entry, &prefix)?;
+            pages.push(IaiProjectPage {
+                index,
+                base_pristine,
+                view,
+                canvas,
+            });
+        }
+    }
+
+    let embedded_pdf = match archive.by_name("source.pdf") {
+        Ok(mut f) => {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            Some(buf)
+        }
+        Err(_) => None,
+    };
+
+    Ok(IaiPdfProject {
+        source,
+        source_len,
+        source_modified_secs,
+        embedded_pdf,
+        page_count,
+        selected_pages,
+        page_names,
+        requested_dpi,
+        active_page,
+        global_edits,
+        pages,
+    })
+}
+
+/// Decode a multi-page artboard document: one canvas per `pages` entry, with that
+/// page's layers under `page_{i}/` (the same prefix scheme the PDF project uses).
+fn read_artboard_doc<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    manifest: &serde_json::Value,
+) -> Result<IaiArtboardDoc, String> {
+    let entries = manifest["pages"]
+        .as_array()
+        .ok_or("Artboard document is missing its pages")?;
+    let mut pages = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        pages.push(build_canvas_from_meta(
+            archive,
+            entry,
+            &format!("page_{i}/"),
+        )?);
+    }
+    if pages.is_empty() {
+        return Err("Artboard document has no pages".into());
+    }
+    let active_page = (manifest["active_page"].as_u64().unwrap_or(0) as usize).min(pages.len() - 1);
+    // Shared master page, when present (stored under `master/`). Absent on
+    // documents without one, and on older files that predate the feature.
+    let master = manifest
+        .get("master")
+        .filter(|m| m.is_object())
+        .map(|meta| build_canvas_from_meta(archive, meta, "master/"))
+        .transpose()?;
+    Ok(IaiArtboardDoc {
+        pages,
+        active_page,
+        master,
+    })
+}
+
+/// Write a multi-page artboard document: `pages` in tab order, each canvas's
+/// layers stored under `page_{i}/`, `kind: "artboard_doc"` (v5). `active_page` is
+/// the tab to reopen on; the thumbnail is taken from it.
+pub fn write_artboard_doc(
+    path: &Path,
+    pages: &[&Canvas],
+    active_page: usize,
+    master: Option<&Canvas>,
+) -> Result<(), String> {
+    if pages.is_empty() {
+        return Err("An artboard document needs at least one page".into());
+    }
+    let active = active_page.min(pages.len() - 1);
+    write_iai_archive(path, |zip| {
+        let options = deflated_options();
+        let mut pages_meta = Vec::with_capacity(pages.len());
+        for (i, canvas) in pages.iter().enumerate() {
+            let mut meta = canvas_meta_json(canvas);
+            meta["index"] = serde_json::json!(i);
+            pages_meta.push(meta);
+            write_canvas_layers(zip, canvas, &format!("page_{i}/"))?;
+        }
+        let mut manifest = serde_json::json!({
+            "version": 5,
+            "kind": "artboard_doc",
+            "active_page": active,
+            "page_count": pages.len(),
+            "pages": pages_meta,
+        });
+        // The shared master page: its own canvas metadata + layers under `master/`.
+        if let Some(master) = master {
+            manifest["master"] = canvas_meta_json(master);
+            write_canvas_layers(zip, master, "master/")?;
+        }
+        write_manifest(zip, &manifest, options)?;
+        write_thumbnail(zip, pages[active])
+    })
+}
+
+impl Importer for IaiImporter {
+    fn extensions(&self) -> &[&str] {
+        &["iai"]
+    }
+
+    fn import(&self, path: &Path) -> Result<Canvas, String> {
+        match load(path)? {
+            IaiLoad::Canvas(canvas) => Ok(canvas),
+            // An artboard document opened through the plain-image path collapses to
+            // its active page; the app routes projects through their own open path.
+            IaiLoad::ArtboardDoc(mut doc) => {
+                let active = doc.active_page.min(doc.pages.len().saturating_sub(1));
+                Ok(doc.pages.swap_remove(active))
+            }
+            // A project file opened through the plain image path collapses to its
+            // active page; the app routes projects through their own open path.
+            IaiLoad::PdfProject(project) => {
+                let active = project.active_page;
+                let mut pages = project.pages;
+                let idx = pages
+                    .iter()
+                    .position(|p| p.index == active)
+                    .or(if pages.is_empty() { None } else { Some(0) })
+                    .ok_or_else(|| "PDF project has no stored pages to display".to_string())?;
+                Ok(pages.swap_remove(idx).canvas)
+            }
+            IaiLoad::FlowTextDocument(_) => {
+                Err("Tài liệu văn bản không thể nhập thành canvas".to_string())
+            }
+        }
+    }
+}
+
+impl Exporter for IaiExporter {
+    fn extensions(&self) -> &[&str] {
+        &["iai"]
+    }
+
+    fn replaces_atomically(&self) -> bool {
+        true
+    }
+
+    fn export(&self, canvas: &Canvas, path: &Path, _opts: &ExportOptions) -> Result<(), String> {
+        write_iai_archive(path, |zip| {
+            let options = deflated_options();
+            let mut manifest = canvas_meta_json(canvas);
+            // Graduated version so files stay openable by older builds when they
+            // can be: a Path or clipping relation forces v4 (editable model
+            // would be lost on an older resave), else CMYK stamps v3 (ink),
+            // else RGB stays v2.
+            let has_v4_model = canvas.layer_stack.layers.iter().any(|l| {
+                matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                    || l.clip_parent_id.is_some()
+            }) || !canvas.metadata.swatches.is_empty()
+                || !canvas.metadata.artboards.is_empty();
+            manifest["version"] = serde_json::json!(if has_v4_model {
+                4u64
+            } else if canvas.is_cmyk() {
+                3u64
+            } else {
+                2u64
+            });
+
+            write_manifest(zip, &manifest, options)?;
+
+            write_thumbnail(zip, canvas)?;
+            write_canvas_layers(zip, canvas, "")
+        })
+    }
+}
+
+fn deflated_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+}
+
+fn stored_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+}
+
+/// Open a `.iai` temp file, run `body` against the zip writer, then finish,
+/// flush and atomically rename into place. A failure removes the temp file so a
+/// partial write never replaces the user's project.
+fn write_iai_archive(
+    path: &Path,
+    body: impl FnOnce(&mut zip::ZipWriter<std::fs::File>) -> Result<(), String>,
+) -> Result<(), String> {
+    // Not a `.iai` name: autosave recovery adopts every `.iai` in its folder and
+    // sweeps `.iai.tmp` as a dead session's half-written archive.
+    let tmp_path = path.with_extension("iai.tmp");
+    crate::core::atomic_file::write_atomic_through(path, &tmp_path, |tmp| {
+        let file = std::fs::File::create(tmp).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipWriter::new(file);
+        body(&mut zip)?;
+        zip.finish().map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
+/// The per-canvas metadata object (width/height/dpi/color_space/author/
+/// description/layers). Used both at the manifest root (single canvas) and per
+/// page of a PDF project.
+fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
+    let mut layers_json: Vec<serde_json::Value> =
+        Vec::with_capacity(canvas.layer_stack.layers.len());
+    for layer in canvas.layer_stack.layers.iter() {
+        let parent_index: serde_json::Value = layer
+            .parent_id
+            .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
+            .map(|p| serde_json::json!(p as u64))
+            .unwrap_or(serde_json::Value::Null);
+        let clip_parent_index: serde_json::Value = layer
+            .clip_parent_id
+            .and_then(|pid| canvas.layer_stack.layers.iter().position(|l| l.id == pid))
+            .map(|p| serde_json::json!(p as u64))
+            .unwrap_or(serde_json::Value::Null);
+        // Page ownership (contract #10). A page id, not a layer index. Written only
+        // when off the implicit page, so default single-page docs are unchanged.
+        let page_value: serde_json::Value = if layer.page_id != crate::core::page::PageId::IMPLICIT
+        {
+            serde_json::json!(layer.page_id.0)
+        } else {
+            serde_json::Value::Null
+        };
+        let adj_json = if let crate::core::layer::LayerType::Adjustment(ref adj) = layer.layer_type
+        {
+            adjustment_to_json(adj)
+        } else {
+            serde_json::Value::Null
+        };
+        let text_json = if let crate::core::layer::LayerType::Text(ref text) = layer.layer_type {
+            text_to_json(text)
+        } else {
+            serde_json::Value::Null
+        };
+        let shape_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Primitive(ref shape),
+        ) = layer.layer_type
+        {
+            shape_to_json(shape)
+        } else {
+            serde_json::Value::Null
+        };
+        let path_json = if let crate::core::layer::LayerType::Vector(
+            crate::core::vector::object::VectorGeometry::Path(ref obj),
+        ) = layer.layer_type
+        {
+            super::iai_vector::layer_path_to_json(obj)
+        } else {
+            serde_json::Value::Null
+        };
+        // Dynamic-connector binding. Targets are stored as layer POSITIONS (which
+        // equal their ids on load, like `clip_parent`); an anchor whose target is
+        // gone is dropped. Written only for an attached connector, null otherwise.
+        let connector_json = layer
+            .connector
+            .filter(|c| c.is_attached())
+            .map(|c| {
+                let anchor_json = |anchor: Option<crate::core::connector::ConnectorAnchor>| {
+                    match anchor.and_then(|a| {
+                        canvas
+                            .layer_stack
+                            .layers
+                            .iter()
+                            .position(|l| l.id == a.layer_id)
+                            .map(|pos| (pos, a))
+                    }) {
+                        Some((pos, a)) => {
+                            serde_json::json!({ "layer": pos as u64, "fx": a.fx, "fy": a.fy })
+                        }
+                        None => serde_json::Value::Null,
+                    }
+                };
+                serde_json::json!({
+                    "route": c.route,
+                    "start": anchor_json(c.start),
+                    "end": anchor_json(c.end),
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        layers_json.push(serde_json::json!({
+            "name": layer.name,
+            "opacity": layer.opacity,
+            "visible": layer.visible,
+            "locked": layer.locked,
+            "width": layer.width,
+            "height": layer.height,
+            "blend_mode": blend_mode_to_str(layer.blend_mode),
+            "has_mask": layer.mask.is_some(),
+            "mask_enabled": layer.mask.as_ref().is_none_or(|m| m.enabled),
+            "layer_type": layer_type_to_str(&layer.layer_type),
+            "offset_x": layer.offset.0,
+            "offset_y": layer.offset.1,
+            "parent": parent_index,
+            "clip_parent": clip_parent_index,
+            "page": page_value,
+            "expanded": layer.expanded,
+            "adjustment": adj_json,
+            "text": text_json,
+            "shape": shape_json,
+            "path": path_json,
+            "connector": connector_json,
+            "portrait": layer
+                .portrait
+                .as_ref()
+                .map_or(serde_json::Value::Null, |r| {
+                    portrait_to_json(r, &canvas.layer_stack.layers)
+                }),
+        }));
+    }
+
+    // Saved alpha channels (Channels panel). Pixels live at
+    // {prefix}channel_{i}.png; older builds ignore both the key and the
+    // entries (resaving there drops the channels — accepted, no version bump).
+    let alpha_json: Vec<serde_json::Value> = canvas
+        .channels
+        .alpha
+        .iter()
+        .map(|ch| {
+            serde_json::json!({
+                "name": ch.name,
+                "width": ch.width,
+                "height": ch.height,
+            })
+        })
+        .collect();
+
+    // Document bit-depth mode. Persisted so a reopened 16-bit document stays in
+    // 16-bit mode and edits keep preserving the masters that the 16-bit layer
+    // PNGs restore. Older builds ignore this key (they default to 8-bit).
+    let bit_depth = if canvas.bit_depth == crate::core::canvas::BitDepth::Sixteen {
+        16
+    } else {
+        8
+    };
+    let mut meta = serde_json::json!({
+        "width": canvas.width,
+        "height": canvas.height,
+        "dpi": canvas.metadata.resolution_ppi,
+        "color_space": color_space_to_str(canvas.color_space),
+        "bit_depth": bit_depth,
+        "author": canvas.metadata.author,
+        "description": canvas.metadata.description,
+        "develop_working_space": match canvas.metadata.develop_working_space {
+            crate::core::working_color::WorkingColorSpace::LinearSrgb => "LinearSrgb",
+            crate::core::working_color::WorkingColorSpace::AcesCg => "ACEScg",
+            crate::core::working_color::WorkingColorSpace::LinearProPhoto => "LinearProPhoto",
+        },
+        "color_pipeline_version": canvas.metadata.color_pipeline_version,
+        "document_swatches": super::iai_palette::palette_to_json(&canvas.metadata.swatches),
+        "layer_count": canvas.layer_stack.layers.len(),
+        "active_layer": canvas.layer_stack.active_idx,
+        "layers": layers_json,
+        "alpha_channels": alpha_json,
+    });
+
+    // RAW provenance is optional: non-RAW and legacy documents keep their old
+    // manifest shape, while a RAW-derived document remains auditable after the
+    // transient scene master has been committed or the project reopened.
+    if let Some(recipe) = canvas.metadata.raw_render_recipe {
+        meta["raw_render_recipe"] = serde_json::json!(recipe.name());
+    }
+
+    // CMYK (v3): mode tag + conversion space. Ink pixels live at
+    // {prefix}layer_{i}_ink.png; an ICC space's bytes at {prefix}cmyk_profile.icc.
+    if let crate::core::canvas::ColorMode::Cmyk(ref profile) = canvas.color_mode {
+        meta["color_mode"] = serde_json::json!("CMYK");
+        meta["cmyk_profile"] = match profile {
+            crate::core::canvas::CmykProfile::Naive => serde_json::json!({"kind": "naive"}),
+            crate::core::canvas::CmykProfile::Icc { name, .. } => {
+                serde_json::json!({"kind": "icc", "name": name})
+            }
+        };
+    }
+
+    // Artboards / multi-page (contract #10 container). Written ONLY when the
+    // document has explicit artboards, so a single-page document adds no key and
+    // round-trips byte-for-byte; an absent key loads back as the implicit page.
+    if !canvas.metadata.artboards.is_empty() {
+        meta["artboards"] = artboards_to_json(&canvas.metadata.artboards);
+    }
+    // Default page bleed / safe-margin (document units) for the implicit page.
+    // Display-only print guides — written when set, no version bump (an older
+    // build that ignores them just doesn't draw the guides, like alpha channels).
+    if canvas.metadata.page_bleed_px != 0.0 {
+        meta["page_bleed"] = serde_json::json!(canvas.metadata.page_bleed_px);
+    }
+    if canvas.metadata.page_margin_px != 0.0 {
+        meta["page_margin"] = serde_json::json!(canvas.metadata.page_margin_px);
+    }
+    // Custom page-tab name — written only when set, so unnamed pages stay byte-clean.
+    if let Some(name) = canvas
+        .metadata
+        .page_name
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        meta["page_name"] = serde_json::json!(name);
+    }
+    // Master opt-out — written only when a page turns the shared master OFF (the
+    // default is on), so ordinary pages add no key and stay byte-clean.
+    if !canvas.metadata.use_master {
+        meta["use_master"] = serde_json::json!(false);
+    }
+    meta
+}
+
+/// Serialise the document's artboards (contract #10 container) to a JSON array.
+/// Fields mirror [`crate::core::page::Page`]; `bg` is null for a transparent /
+/// paper page.
+fn artboards_to_json(artboards: &[crate::core::page::Page]) -> serde_json::Value {
+    serde_json::Value::Array(
+        artboards
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id.0,
+                    "x": p.origin.x,
+                    "y": p.origin.y,
+                    "w": p.size.0,
+                    "h": p.size.1,
+                    "bleed": p.bleed,
+                    "margin": p.margin,
+                    "bg": p
+                        .background
+                        .map(|c| serde_json::json!(c))
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Parse artboards written by [`artboards_to_json`]. Absent / non-array → empty
+/// (the canvas falls back to its single implicit page). A page with non-finite or
+/// negative geometry is dropped ([`Page::validate`]) so an untrusted file cannot
+/// poison layout maths.
+fn json_to_artboards(value: Option<&serde_json::Value>) -> Vec<crate::core::page::Page> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let background = item
+            .get("bg")
+            .and_then(|v| v.as_array())
+            .filter(|a| a.len() == 4)
+            .map(|a| {
+                [
+                    a[0].as_u64().unwrap_or(0) as u8,
+                    a[1].as_u64().unwrap_or(0) as u8,
+                    a[2].as_u64().unwrap_or(0) as u8,
+                    a[3].as_u64().unwrap_or(255) as u8,
+                ]
+            });
+        let page = crate::core::page::Page {
+            id: crate::core::page::PageId(item["id"].as_u64().unwrap_or(0) as u32),
+            origin: crate::core::geometry::Point::new(
+                item["x"].as_f64().unwrap_or(0.0) as f32,
+                item["y"].as_f64().unwrap_or(0.0) as f32,
+            ),
+            size: (
+                item["w"].as_f64().unwrap_or(0.0) as f32,
+                item["h"].as_f64().unwrap_or(0.0) as f32,
+            ),
+            bleed: item["bleed"].as_f64().unwrap_or(0.0) as f32,
+            margin: item["margin"].as_f64().unwrap_or(0.0) as f32,
+            background,
+        };
+        if page.validate().is_ok() {
+            out.push(page);
+        }
+    }
+    out
+}
+
+fn write_thumbnail(zip: &mut zip::ZipWriter<std::fs::File>, canvas: &Canvas) -> Result<(), String> {
+    let flat_preview = canvas.export_flat();
+    let (thumb, tw, th) = make_thumbnail(&flat_preview, canvas.width, canvas.height, 256);
+    let thumb_png = encode_png(&thumb, tw, th)?;
+    zip.start_file("thumbnail.png", stored_options())
+        .map_err(|e| e.to_string())?;
+    zip.write_all(&thumb_png).map_err(|e| e.to_string())
+}
+
+/// Write a canvas's layer (+ mask) PNGs under `{prefix}layer_{i}.png`.
+fn write_canvas_layers(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    canvas: &Canvas,
+    prefix: &str,
+) -> Result<(), String> {
+    let stored = stored_options();
+    for (i, layer) in canvas.layer_stack.layers.iter().enumerate() {
+        // A layer still carrying a full 16-bit master (RAW / 16-bit import,
+        // untouched by 8-bit edits) is written as a 16-bit RGBA PNG so precision
+        // round-trips. No format-version bump is needed: a 16-bit PNG decodes
+        // fine as 8-bit, so older builds still open the file (they just can't
+        // use the extra precision). Layers without a master stay 8-bit.
+        let png_data = if layer.tiles.has_hdr() {
+            encode_png16(&layer.tiles.flatten16(), layer.width, layer.height)?
+        } else {
+            encode_png(&layer.flatten_tiles(), layer.width, layer.height)?
+        };
+        zip.start_file(format!("{prefix}layer_{}.png", i), stored)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&png_data).map_err(|e| e.to_string())?;
+
+        if let Some(ref mask) = layer.mask {
+            let flat_mask = mask.tiles.flatten();
+            let mut gray_mask = Vec::with_capacity((mask.width as usize) * (mask.height as usize));
+            for px in (0..flat_mask.len()).step_by(4) {
+                gray_mask.push(flat_mask[px]);
+            }
+            let mask_png = encode_gray_png(&gray_mask, mask.width, mask.height)?;
+            zip.start_file(format!("{prefix}layer_{}_mask.png", i), stored)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&mask_png).map_err(|e| e.to_string())?;
+        }
+        if let Some(recipe) = layer
+            .portrait
+            .as_ref()
+            .filter(|r| canvas.layer_stack.layers.iter().any(|l| l.id == r.source))
+        {
+            write_portrait_masks(zip, prefix, i, recipe)?;
+        }
+    }
+
+    // Saved alpha channels (Channels panel), indexed to match the
+    // "alpha_channels" manifest array.
+    for (i, ch) in canvas.channels.alpha.iter().enumerate() {
+        let png = encode_gray_png(&ch.mask, ch.width, ch.height)?;
+        zip.start_file(format!("{prefix}channel_{}.png", i), stored)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&png).map_err(|e| e.to_string())?;
+    }
+
+    // CMYK (v3): each layer's ink planes ride in an RGBA8 PNG carrying C,M,Y,K
+    // in the R,G,B,A slots; the ICC space (when not naive) is stored once.
+    if let crate::core::canvas::ColorMode::Cmyk(ref profile) = canvas.color_mode {
+        for (i, layer) in canvas.layer_stack.layers.iter().enumerate() {
+            let (lw, lh) = (layer.width, layer.height);
+            let Some(len) = Canvas::checked_rgba_len(lw, lh) else {
+                return Err("Layer CMYK quá lớn để lưu ink".to_string());
+            };
+            let mut ink = vec![0u8; len];
+            layer.tiles.extract_ink_region_into(0, 0, lw, lh, &mut ink);
+            let png = encode_png(&ink, lw, lh)?;
+            zip.start_file(format!("{prefix}layer_{}_ink.png", i), stored)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&png).map_err(|e| e.to_string())?;
+        }
+        if let crate::core::canvas::CmykProfile::Icc { data, .. } = profile {
+            zip.start_file(format!("{prefix}cmyk_profile.icc"), stored)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(data).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// One edited page to write into a project archive: its canvas, page index,
+/// whether the base layer is still the pristine PDF render, and its saved view.
+pub struct IaiProjectPageOut<'a> {
+    pub index: usize,
+    pub base_pristine: bool,
+    pub view: (f32, f32, f32),
+    pub canvas: &'a Canvas,
+}
+
+/// Project-level link + metadata written alongside the edited pages.
+pub struct IaiProjectMeta {
+    pub source: PathBuf,
+    pub source_len: Option<u64>,
+    pub source_modified_secs: Option<u64>,
+    pub page_count: usize,
+    pub selected_pages: Vec<usize>,
+    pub page_names: std::collections::BTreeMap<usize, String>,
+    pub requested_dpi: f32,
+    pub active_page: usize,
+    pub global_edits: Vec<crate::core::document::PdfGlobalEdit>,
+}
+
+/// Write a multi-page PDF project `.iai` (format v2) atomically. Stores the link
+/// to the original PDF plus every edited page's layers; clean pages are omitted
+/// (re-rendered from the source on open).
+pub fn save_pdf_project(
+    path: &Path,
+    meta: &IaiProjectMeta,
+    pages: &[IaiProjectPageOut],
+    source_pdf: Option<&[u8]>,
+) -> Result<(), String> {
+    write_iai_archive(path, |zip| {
+        let pages_json: Vec<serde_json::Value> = pages
+            .iter()
+            .map(|page| {
+                let mut entry = canvas_meta_json(page.canvas);
+                entry["index"] = serde_json::json!(page.index);
+                entry["base_pristine"] = serde_json::json!(page.base_pristine);
+                entry["view"] = serde_json::json!([page.view.0, page.view.1, page.view.2]);
+                entry
+            })
+            .collect();
+
+        // Graduated version (mirrors the single-canvas path): a Path or clipping
+        // relation on any page forces v4, else CMYK ink needs v3, else stay v2.
+        let has_v4_model = pages.iter().any(|p| {
+            !p.canvas.metadata.swatches.is_empty()
+                || p.canvas.layer_stack.layers.iter().any(|l| {
+                    matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
+                        || l.clip_parent_id.is_some()
+                })
+        });
+        let has_inserted_pages = meta
+            .selected_pages
+            .iter()
+            .any(|&index| index >= meta.page_count);
+        let has_global_stamps = meta
+            .global_edits
+            .iter()
+            .any(|edit| matches!(edit, crate::core::document::PdfGlobalEdit::Stamp(_)));
+        let has_scoped_global_edits = meta.global_edits.iter().any(|edit| edit.is_scoped());
+        let version = if has_global_stamps || has_scoped_global_edits {
+            10u64
+        } else if has_inserted_pages {
+            8u64
+        } else if !meta.page_names.is_empty() {
+            7u64
+        } else if !meta.global_edits.is_empty() {
+            6u64
+        } else if has_v4_model {
+            4u64
+        } else if pages.iter().any(|p| p.canvas.is_cmyk()) {
+            3u64
+        } else {
+            2u64
+        };
+        let global_edits: Vec<serde_json::Value> = meta
+            .global_edits
+            .iter()
+            .enumerate()
+            .map(|(index, edit)| match edit {
+                crate::core::document::PdfGlobalEdit::Clear(clear) => serde_json::json!({
+                    "kind": "clear", "rect": [clear.x0, clear.y0, clear.x1, clear.y1], "color": clear.color,
+                    "target_pages": clear.target_pages,
+                }),
+                crate::core::document::PdfGlobalEdit::Stamp(stamp) => serde_json::json!({
+                    "kind": match stamp.kind { crate::core::document::PdfGlobalStampKind::Text => "text", crate::core::document::PdfGlobalStampKind::Image => "image" },
+                    "rect": [stamp.x0, stamp.y0, stamp.x1, stamp.y1],
+                    "width": stamp.width, "height": stamp.height,
+                    "name": stamp.name, "source_page": stamp.source_page,
+                    "source_layer_id": stamp.source_layer_id,
+                    "target_pages": stamp.target_pages,
+                    "entry": format!("global_edit_{index}.png"),
+                }),
+            })
+            .collect();
+        // Keep clear-only projects readable by v6-v9 builds. A stamp forces v10,
+        // so older builds reject it instead of silently dropping repeated art.
+        let global_clears: Vec<serde_json::Value> = meta
+            .global_edits
+            .iter()
+            .filter_map(|edit| match edit {
+                crate::core::document::PdfGlobalEdit::Clear(clear)
+                    if clear.target_pages.is_empty() =>
+                {
+                    Some(serde_json::json!({
+                        "rect": [clear.x0, clear.y0, clear.x1, clear.y1], "color": clear.color,
+                    }))
+                }
+                crate::core::document::PdfGlobalEdit::Clear(_)
+                | crate::core::document::PdfGlobalEdit::Stamp(_) => None,
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "version": version,
+            "kind": "pdf_project",
+            "pdf_project": {
+                "source": meta.source.to_string_lossy(),
+                "source_len": meta.source_len,
+                "source_modified": meta.source_modified_secs,
+                "page_count": meta.page_count,
+                "selected_pages": meta.selected_pages,
+                "page_names": meta.page_names,
+                "requested_dpi": meta.requested_dpi,
+                "active_page": meta.active_page,
+                "global_edits": global_edits,
+                "global_clears": global_clears,
+                "embedded": source_pdf.is_some(),
+            },
+            "pages": pages_json,
+        });
+
+        write_manifest(zip, &manifest, deflated_options())?;
+
+        if let Some(bytes) = source_pdf {
+            zip.start_file("source.pdf", stored_options())
+                .map_err(|e| e.to_string())?;
+            zip.write_all(bytes).map_err(|e| e.to_string())?;
+        }
+
+        for (index, edit) in meta.global_edits.iter().enumerate() {
+            let crate::core::document::PdfGlobalEdit::Stamp(stamp) = edit else {
+                continue;
+            };
+            let png = encode_png(&stamp.rgba, stamp.width, stamp.height)?;
+            zip.start_file(format!("global_edit_{index}.png"), stored_options())
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&png).map_err(|e| e.to_string())?;
+        }
+
+        // Thumbnail from the active page when it is stored, else the first page.
+        if let Some(page) = pages
+            .iter()
+            .find(|p| p.index == meta.active_page)
+            .or_else(|| pages.first())
+        {
+            write_thumbnail(zip, page.canvas)?;
+        }
+
+        for page in pages {
+            let prefix = format!("page_{}/", page.index);
+            write_canvas_layers(zip, page.canvas, &prefix)?;
+        }
+        Ok(())
+    })
+}
+
+/// Bound on one recipe mask entry (a sanity check, like the manifest's).
+const MAX_PORTRAIT_MASK_BYTES: usize = 512 * 1024 * 1024;
+
+fn portrait_entry(prefix: &str, layer: usize, what: &str) -> String {
+    format!("{prefix}layer_{layer}_portrait_{what}.png")
+}
+
+/// A "Chân dung" layer's recipe, so Chỉnh chân dung can reopen it after a
+/// reload. The photo it was made from is stored as its position (its id on
+/// load); the selection and painted masks ride in gray PNG entries next to
+/// the layer. Older builds ignore both. `Null` when the photo is gone.
+fn portrait_to_json(
+    recipe: &crate::core::portrait_recipe::PortraitRecipe,
+    layers: &[Layer],
+) -> serde_json::Value {
+    let Some(source) = layers.iter().position(|l| l.id == recipe.source) else {
+        return serde_json::Value::Null;
+    };
+    let region = |r: crate::core::portrait_recipe::Region| serde_json::json!([r.x, r.y, r.w, r.h]);
+    let faces: Vec<serde_json::Value> = recipe
+        .faces
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "centre": f.centre,
+                "extent": f.extent,
+                "enabled": f.enabled,
+                "skin": f.skin.as_ref().map(|m| region(m.region)),
+                "hair": f.hair.as_ref().map(|m| region(m.region)),
+                "brows": f.brows.as_ref().map(|m| region(m.region)),
+                "clothes": f.clothes.as_ref().map(|m| region(m.region)),
+                "neck": f.neck.as_ref().map(|m| region(m.region)),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "source": source as u64,
+        "source_size": [recipe.source_size.0, recipe.source_size.1],
+        "settings": serde_json::to_value(recipe.settings).unwrap_or(serde_json::Value::Null),
+        "clip": recipe.clip.as_ref().map(|c| region(c.region)),
+        "faces": faces,
+        "made": recipe.made,
+    })
+}
+
+fn write_portrait_masks(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    prefix: &str,
+    layer: usize,
+    recipe: &crate::core::portrait_recipe::PortraitRecipe,
+) -> Result<(), String> {
+    let mut masks: Vec<(String, &[u8], crate::core::portrait_recipe::Region)> = Vec::new();
+    if let Some(clip) = &recipe.clip {
+        masks.push(("clip".to_string(), &clip.mask, clip.region));
+    }
+    for (f, face) in recipe.faces.iter().enumerate() {
+        for (what, mask) in [
+            ("skin", &face.skin),
+            ("hair", &face.hair),
+            ("brows", &face.brows),
+            ("clothes", &face.clothes),
+            ("neck", &face.neck),
+        ] {
+            if let Some(m) = mask {
+                masks.push((format!("{f}_{what}"), &m.mask, m.region));
+            }
+        }
+    }
+    for (what, mask, region) in masks {
+        let png = encode_gray_png(mask, region.w, region.h)?;
+        zip.start_file(portrait_entry(prefix, layer, &what), stored_options())
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&png).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The recipe [`portrait_to_json`] wrote for layer `layer`; `None` when
+/// absent or damaged (the layer then opens as plain pixels).
+fn read_portrait<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    prefix: &str,
+    layer: usize,
+    v: &serde_json::Value,
+) -> Option<crate::core::portrait_recipe::PortraitRecipe> {
+    use crate::core::portrait_recipe::{Clip, PortraitRecipe, Region, SavedFace, SavedMask};
+    if !v.is_object() {
+        return None;
+    }
+    let region = |v: &serde_json::Value| -> Option<Region> {
+        let a = v.as_array().filter(|a| a.len() == 4)?;
+        let n = |k: usize| a[k].as_u64().and_then(|n| u32::try_from(n).ok());
+        Some(Region {
+            x: n(0)?,
+            y: n(1)?,
+            w: n(2)?,
+            h: n(3)?,
+        })
+    };
+    let mut mask = |what: &str, r: Region| -> Option<Vec<u8>> {
+        let bytes = read_bounded_entry(
+            archive,
+            &portrait_entry(prefix, layer, what),
+            MAX_PORTRAIT_MASK_BYTES,
+        )
+        .ok()?;
+        let gray = image::load_from_memory(&bytes).ok()?.to_luma8();
+        (gray.dimensions() == (r.w, r.h)).then(|| gray.into_raw())
+    };
+    let size = v["source_size"].as_array().filter(|a| a.len() == 2)?;
+    let clip = match region(&v["clip"]) {
+        Some(r) => Some(Clip {
+            region: r,
+            mask: mask("clip", r)?,
+        }),
+        None => None,
+    };
+    let mut faces = Vec::new();
+    for (f, face) in v["faces"].as_array()?.iter().enumerate() {
+        let centre = face["centre"].as_array().filter(|a| a.len() == 2)?;
+        let mut saved = |what: &str| {
+            let r = region(&face[what])?;
+            Some(SavedMask {
+                region: r,
+                mask: mask(&format!("{f}_{what}"), r)?,
+            })
+        };
+        faces.push(SavedFace {
+            centre: [centre[0].as_f64()? as f32, centre[1].as_f64()? as f32],
+            extent: face["extent"].as_f64()? as f32,
+            enabled: face["enabled"].as_bool().unwrap_or(true),
+            skin: saved("skin"),
+            hair: saved("hair"),
+            brows: saved("brows"),
+            clothes: saved("clothes"),
+            neck: saved("neck"),
+        });
+    }
+    Some(PortraitRecipe {
+        source: v["source"].as_u64()? as u32,
+        source_size: (size[0].as_u64()? as u32, size[1].as_u64()? as u32),
+        settings: crate::core::portrait_recipe::PortraitSettings::from_saved(
+            v["settings"].clone(),
+        )?,
+        clip,
+        faces,
+        made: v["made"].as_u64(),
+    })
+}
+
+fn encode_png(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer.write_image_data(pixels).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+/// Encode 16-bit RGBA as a PNG, preserving a layer's 16-bit master so `.iai`
+/// round-trips precision. PNG stores 16-bit samples big-endian.
+fn encode_png16(px16: &[u16], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        let mut be = Vec::with_capacity(px16.len() * 2);
+        for &s in px16 {
+            be.extend_from_slice(&s.to_be_bytes());
+        }
+        writer.write_image_data(&be).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+fn encode_gray_png(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, w, h);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer.write_image_data(pixels).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
+fn make_thumbnail(pixels: &[u8], w: u32, h: u32, size: u32) -> (Vec<u8>, u32, u32) {
+    if pixels.is_empty() {
+        return (vec![255u8; (size * size * 4) as usize], size, size);
+    }
+    let scale = (size as f32 / w as f32)
+        .min(size as f32 / h as f32)
+        .min(1.0);
+    let tw = (w as f32 * scale) as u32;
+    let th = (h as f32 * scale) as u32;
+    if tw == 0 || th == 0 {
+        return (vec![255u8; (size * size * 4) as usize], size, size);
+    }
+
+    let mut thumb = vec![0u8; (tw * th * 4) as usize];
+    for y in 0..th {
+        for x in 0..tw {
+            let sx = (x as f32 / scale) as u32;
+            let sy = (y as f32 / scale) as u32;
+            let si = ((sy * w + sx) * 4) as usize;
+            let di = ((y * tw + x) * 4) as usize;
+            if si + 3 < pixels.len() && di + 3 < thumb.len() {
+                thumb[di..di + 4].copy_from_slice(&pixels[si..si + 4]);
+            }
+        }
+    }
+    (thumb, tw, th)
+}
+
+fn parse_blend_mode(s: &str) -> BlendMode {
+    match s {
+        "Multiply" => BlendMode::Multiply,
+        "Screen" => BlendMode::Screen,
+        "Overlay" => BlendMode::Overlay,
+        "Darken" => BlendMode::Darken,
+        "Lighten" => BlendMode::Lighten,
+        "ColorDodge" => BlendMode::ColorDodge,
+        "ColorBurn" => BlendMode::ColorBurn,
+        "HardLight" => BlendMode::HardLight,
+        "SoftLight" => BlendMode::SoftLight,
+        "LinearLight" => BlendMode::LinearLight,
+        "Difference" => BlendMode::Difference,
+        "Exclusion" => BlendMode::Exclusion,
+        "Hue" => BlendMode::Hue,
+        "Saturation" => BlendMode::Saturation,
+        "Color" => BlendMode::Color,
+        "Luminosity" => BlendMode::Luminosity,
+        _ => BlendMode::Normal,
+    }
+}
+
+fn blend_mode_to_str(mode: BlendMode) -> &'static str {
+    match mode {
+        BlendMode::Normal => "Normal",
+        BlendMode::Dissolve => "Dissolve",
+        BlendMode::Multiply => "Multiply",
+        BlendMode::Screen => "Screen",
+        BlendMode::Overlay => "Overlay",
+        BlendMode::Darken => "Darken",
+        BlendMode::Lighten => "Lighten",
+        BlendMode::ColorDodge => "ColorDodge",
+        BlendMode::ColorBurn => "ColorBurn",
+        BlendMode::HardLight => "HardLight",
+        BlendMode::SoftLight => "SoftLight",
+        BlendMode::LinearLight => "LinearLight",
+        BlendMode::Difference => "Difference",
+        BlendMode::Exclusion => "Exclusion",
+        BlendMode::Hue => "Hue",
+        BlendMode::Saturation => "Saturation",
+        BlendMode::Color => "Color",
+        BlendMode::Luminosity => "Luminosity",
+    }
+}
+
+fn layer_type_to_str(lt: &LayerType) -> &'static str {
+    match lt {
+        LayerType::Raster => "Raster",
+        LayerType::Adjustment(_) => "Adjustment",
+        LayerType::Group => "Group",
+        LayerType::Text(_) => "Text",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_)) => "Path",
+        LayerType::SmartObject => "SmartObject",
+    }
+}
+
+fn color_space_to_str(cs: crate::core::canvas::ColorSpace) -> &'static str {
+    match cs {
+        crate::core::canvas::ColorSpace::SRGB => "sRGB",
+        crate::core::canvas::ColorSpace::AdobeRGB => "AdobeRGB",
+        crate::core::canvas::ColorSpace::DisplayP3 => "DisplayP3",
+        crate::core::canvas::ColorSpace::ProPhoto => "ProPhoto",
+        crate::core::canvas::ColorSpace::LinearRGB => "LinearRGB",
+    }
+}
+
+fn text_to_json(td: &crate::core::text::TextData) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "content": &td.content,
+        "font_px": td.font_px,
+        "color": td.color,
+        "font_family": td.font_family.storage_name(),
+        "align": text_align_to_str(td.align),
+        "line_height": td.line_height,
+        "bold": td.bold,
+        "italic": td.italic,
+        "underline": td.underline,
+        "tracking_px": td.tracking_px,
+        "opacity": td.opacity,
+        "stretch_x": td.stretch_x,
+        "rotation_deg": td.rotation_deg,
+        "flip_x": td.flip_x,
+        "flip_y": td.flip_y,
+    });
+    // Per-character styles, run-length encoded to stay compact for uniform
+    // text (the common case serializes nothing).
+    if !td.glyph_styles.is_empty() {
+        let mut runs = Vec::new();
+        let mut i = 0usize;
+        while i < td.glyph_styles.len() {
+            let s = td.glyph_styles[i].clone();
+            let mut j = i + 1;
+            while j < td.glyph_styles.len()
+                && td.glyph_styles.get(j).is_some_and(|style| style == &s)
+            {
+                j += 1;
+            }
+            runs.push(serde_json::json!({
+                "n": j - i,
+                "color": s.color,
+                "font_px": s.font_px,
+                "font_family": s.font_family.storage_name(),
+                "bold": s.bold,
+                "italic": s.italic,
+                "underline": s.underline,
+            }));
+            i = j;
+        }
+        obj["glyph_runs"] = serde_json::Value::Array(runs);
+    }
+    obj
+}
+
+fn shape_to_json(sd: &crate::core::shape::ShapeData) -> serde_json::Value {
+    serde_json::json!({
+        "kind": sd.kind.to_u8(),
+        "x0": sd.x0,
+        "y0": sd.y0,
+        "x1": sd.x1,
+        "y1": sd.y1,
+        "corner_radius": sd.corner_radius,
+        "corner_type": sd.corner_type.to_u8(),
+        "sides": sd.sides,
+        "star_inner": sd.star_inner,
+        "style": super::iai_vector::style_to_json(&sd.style),
+        // Legacy mirrors keep old readers useful for solid shapes. New readers
+        // use `style`, which preserves gradient/dash/CMYK/overprint exactly.
+        "fill": sd.fill_enabled(),
+        "fill_color": sd.fill_color(),
+        "stroke_width": sd.stroke_width(),
+        "stroke_color": sd.stroke_color(),
+    })
+}
+
+fn json_to_shape_data(v: &serde_json::Value) -> Option<crate::core::shape::ShapeData> {
+    use crate::core::shape::{ShapeData, ShapeKind};
+    if !v.is_object() {
+        return None;
+    }
+    let f = |k: &str| v[k].as_f64().map(|n| n as f32);
+    let color = |k: &str| -> Option<[u8; 4]> {
+        let a = v[k].as_array()?;
+        if a.len() != 4 {
+            return None;
+        }
+        Some([
+            a[0].as_u64()? as u8,
+            a[1].as_u64()? as u8,
+            a[2].as_u64()? as u8,
+            a[3].as_u64()? as u8,
+        ])
+    };
+    let legacy_fill = v["fill"].as_bool().unwrap_or(true);
+    let legacy_fill_color = color("fill_color").unwrap_or([0, 0, 0, 255]);
+    let legacy_stroke_width = f("stroke_width").unwrap_or(0.0);
+    let legacy_stroke_color = color("stroke_color").unwrap_or([0, 0, 0, 255]);
+    let style = v
+        .get("style")
+        .and_then(super::iai_vector::json_to_style)
+        .unwrap_or_else(|| {
+            crate::core::vector::style::VectorStyle::from_shape_fields(
+                legacy_fill,
+                legacy_fill_color,
+                legacy_stroke_width,
+                legacy_stroke_color,
+            )
+        });
+    Some(ShapeData {
+        kind: ShapeKind::from_u8(v["kind"].as_u64().unwrap_or(0) as u8),
+        x0: f("x0")?,
+        y0: f("y0")?,
+        x1: f("x1")?,
+        y1: f("y1")?,
+        corner_radius: f("corner_radius").unwrap_or(0.0),
+        corner_type: crate::core::vector::from_shape::RectCorner::from_u8(
+            v["corner_type"].as_u64().unwrap_or(0) as u8,
+        ),
+        sides: v["sides"].as_u64().unwrap_or(5) as u32,
+        star_inner: f("star_inner").unwrap_or(0.5),
+        style,
+    })
+}
+
+fn json_to_text_data(v: &serde_json::Value) -> Option<crate::core::text::TextData> {
+    if !v.is_object() {
+        return None;
+    }
+    let content = v["content"].as_str()?.to_string();
+    let font_px = v["font_px"].as_f64().unwrap_or(48.0) as f32;
+    let color = json_to_rgba(&v["color"]).unwrap_or([0, 0, 0, 255]);
+    let font_family = crate::core::text::TextFontFamily::from_storage_name(
+        v["font_family"].as_str().unwrap_or("SegoeUi"),
+    );
+    let align = json_to_text_align(v["align"].as_str().unwrap_or("Left"));
+    let line_height = v["line_height"].as_f64().unwrap_or(1.2) as f32;
+    let bold = v["bold"].as_bool().unwrap_or(false);
+    let italic = v["italic"].as_bool().unwrap_or(false);
+    let underline = v["underline"].as_bool().unwrap_or(false);
+    let tracking_px = v["tracking_px"].as_f64().unwrap_or(0.0) as f32;
+    let opacity = v["opacity"].as_f64().unwrap_or(1.0) as f32;
+    let stretch_x = v["stretch_x"].as_f64().unwrap_or(1.0) as f32;
+    let rotation_deg = v["rotation_deg"].as_f64().unwrap_or(0.0) as f32;
+    let flip_x = v["flip_x"].as_bool().unwrap_or(false);
+    let flip_y = v["flip_y"].as_bool().unwrap_or(false);
+    let mut glyph_styles = Vec::new();
+    if let Some(runs) = v["glyph_runs"].as_array() {
+        for run in runs {
+            let n = run["n"].as_u64().unwrap_or(0) as usize;
+            let rc = json_to_rgba(&run["color"]).unwrap_or(color);
+            let rpx = run["font_px"].as_f64().unwrap_or(font_px as f64) as f32;
+            let rfamily = run["font_family"]
+                .as_str()
+                .map(crate::core::text::TextFontFamily::from_storage_name)
+                .unwrap_or_else(|| font_family.clone());
+            let rbold = run["bold"].as_bool().unwrap_or(bold);
+            let ritalic = run["italic"].as_bool().unwrap_or(italic);
+            let runderline = run["underline"].as_bool().unwrap_or(underline);
+            for _ in 0..n {
+                glyph_styles.push(crate::core::text::GlyphStyle {
+                    color: rc,
+                    font_px: rpx,
+                    font_family: rfamily.clone(),
+                    bold: rbold,
+                    italic: ritalic,
+                    underline: runderline,
+                });
+            }
+        }
+        // Guard against a corrupt run table that doesn't match the content.
+        if glyph_styles.len() != content.chars().count() {
+            glyph_styles.clear();
+        }
+    }
+    Some(crate::core::text::TextData {
+        content,
+        font_px,
+        color,
+        font_family,
+        align,
+        line_height,
+        bold,
+        italic,
+        underline,
+        tracking_px,
+        opacity,
+        stretch_x,
+        rotation_deg,
+        flip_x,
+        flip_y,
+        glyph_styles,
+    })
+}
+
+fn text_align_to_str(align: crate::core::text::TextAlign) -> &'static str {
+    match align {
+        crate::core::text::TextAlign::Left => "Left",
+        crate::core::text::TextAlign::Center => "Center",
+        crate::core::text::TextAlign::Right => "Right",
+    }
+}
+
+fn json_to_text_align(s: &str) -> crate::core::text::TextAlign {
+    match s {
+        "Center" => crate::core::text::TextAlign::Center,
+        "Right" => crate::core::text::TextAlign::Right,
+        _ => crate::core::text::TextAlign::Left,
+    }
+}
+
+fn json_to_rgba(v: &serde_json::Value) -> Option<[u8; 4]> {
+    let arr = v.as_array()?;
+    if arr.len() != 4 {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for (i, channel) in arr.iter().enumerate() {
+        out[i] = channel.as_u64().unwrap_or(0).min(255) as u8;
+    }
+    Some(out)
+}
+
+fn adjustment_to_json(adj: &crate::core::layer::AdjustmentType) -> serde_json::Value {
+    use crate::core::layer::AdjustmentType as A;
+    match adj {
+        A::BrightnessContrast {
+            brightness,
+            contrast,
+        } => serde_json::json!({
+            "type": "BrightnessContrast", "brightness": brightness, "contrast": contrast
+        }),
+        A::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+        } => serde_json::json!({
+            "type": "HueSaturation", "hue": hue, "saturation": saturation, "lightness": lightness
+        }),
+        A::Levels { channels } => {
+            // Legacy keys carry the master channel so v≤2 builds keep reading
+            // these files; r/g/b are written only when non-identity.
+            let ch_json = |ch: &crate::core::layer::LevelsParams| {
+                serde_json::json!({
+                    "in_black": ch.in_black, "in_white": ch.in_white, "gamma": ch.gamma,
+                    "out_black": ch.out_black, "out_white": ch.out_white
+                })
+            };
+            let mut obj = serde_json::json!({
+                "type": "Levels",
+                "in_black": channels[0].in_black, "in_white": channels[0].in_white,
+                "gamma": channels[0].gamma,
+                "out_black": channels[0].out_black, "out_white": channels[0].out_white
+            });
+            for (key, ch) in [
+                ("r", &channels[1]),
+                ("g", &channels[2]),
+                ("b", &channels[3]),
+            ] {
+                if !ch.is_identity() {
+                    obj[key] = ch_json(ch);
+                }
+            }
+            obj
+        }
+        A::Curves { channels } => {
+            // Legacy "points" carries the master curve; per-channel curves are
+            // written only when non-identity.
+            let pts_json = |pts: &[(f32, f32)]| {
+                serde_json::json!(pts.iter().map(|(x, y)| [x, y]).collect::<Vec<_>>())
+            };
+            let mut obj = serde_json::json!({
+                "type": "Curves",
+                "points": pts_json(&channels[0])
+            });
+            for (key, ch) in [
+                ("points_r", &channels[1]),
+                ("points_g", &channels[2]),
+                ("points_b", &channels[3]),
+            ] {
+                if !crate::core::layer::curve_is_identity(ch) {
+                    obj[key] = pts_json(ch);
+                }
+            }
+            obj
+        }
+        A::ColorBalance {
+            shadows,
+            midtones,
+            highlights,
+            preserve_luminosity,
+        } => serde_json::json!({
+            "type": "ColorBalance",
+            "shadows": shadows, "midtones": midtones, "highlights": highlights,
+            "preserve_luminosity": preserve_luminosity
+        }),
+        A::Vibrance {
+            vibrance,
+            saturation,
+        } => serde_json::json!({
+            "type": "Vibrance", "vibrance": vibrance, "saturation": saturation
+        }),
+        A::Exposure {
+            exposure,
+            offset,
+            gamma,
+        } => serde_json::json!({
+            "type": "Exposure", "exposure": exposure, "offset": offset, "gamma": gamma
+        }),
+        A::Invert => serde_json::json!({ "type": "Invert" }),
+        A::Threshold { value } => serde_json::json!({ "type": "Threshold", "value": value }),
+        A::Posterize { levels } => serde_json::json!({ "type": "Posterize", "levels": levels }),
+        A::BlackAndWhite { r, y, g, c, b, m } => serde_json::json!({
+            "type": "BlackAndWhite", "r": r, "y": y, "g": g, "c": c, "b": b, "m": m
+        }),
+        A::PhotoFilter {
+            color,
+            density,
+            luminosity,
+        } => serde_json::json!({
+            "type": "PhotoFilter",
+            "color": color, "density": density, "luminosity": luminosity
+        }),
+        A::GradientMap {
+            stops,
+            reverse,
+            dither,
+        } => {
+            let stops_json: Vec<serde_json::Value> = stops
+                .iter()
+                .map(|(p, c)| serde_json::json!({ "pos": p, "color": [c[0], c[1], c[2]] }))
+                .collect();
+            serde_json::json!({
+                "type": "GradientMap",
+                "stops": stops_json,
+                "reverse": reverse,
+                "dither": dither
+            })
+        }
+        A::Desaturate => serde_json::json!({ "type": "Desaturate" }),
+        A::ChannelMixer {
+            red,
+            green,
+            blue,
+            monochrome,
+        } => serde_json::json!({
+            "type": "ChannelMixer",
+            "red": red, "green": green, "blue": blue, "monochrome": monochrome
+        }),
+    }
+}
+
+fn json_to_adjustment(v: &serde_json::Value) -> Option<crate::core::layer::AdjustmentType> {
+    use crate::core::layer::AdjustmentType as A;
+    let t = v["type"].as_str()?;
+    let f32v = |key: &str| v[key].as_f64().unwrap_or(0.0) as f32;
+    let u8v = |key: &str| v[key].as_u64().unwrap_or(0) as u8;
+    let boolv = |key: &str| v[key].as_bool().unwrap_or(false);
+    let arr3 = |key: &str| -> [f32; 3] {
+        let a = &v[key];
+        let g = |i: usize| a.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+        [g(0), g(1), g(2)]
+    };
+    Some(match t {
+        "BrightnessContrast" => A::BrightnessContrast {
+            brightness: f32v("brightness"),
+            contrast: f32v("contrast"),
+        },
+        "HueSaturation" => A::HueSaturation {
+            hue: f32v("hue"),
+            saturation: f32v("saturation"),
+            lightness: f32v("lightness"),
+        },
+        "Levels" => {
+            use crate::core::layer::LevelsParams;
+            let parse_ch = |val: &serde_json::Value| LevelsParams {
+                in_black: val["in_black"].as_u64().unwrap_or(0) as u8,
+                in_white: val["in_white"].as_u64().unwrap_or(255) as u8,
+                gamma: val["gamma"].as_f64().unwrap_or(1.0) as f32,
+                out_black: val["out_black"].as_u64().unwrap_or(0) as u8,
+                out_white: val["out_white"].as_u64().unwrap_or(255) as u8,
+            };
+            // Legacy keys are the master channel; "r"/"g"/"b" objects are
+            // optional (absent = identity, incl. every v≤2 file).
+            let mut channels = [LevelsParams::default(); 4];
+            channels[0] = parse_ch(v);
+            for (i, key) in [(1usize, "r"), (2, "g"), (3, "b")] {
+                if v[key].is_object() {
+                    channels[i] = parse_ch(&v[key]);
+                }
+            }
+            A::Levels { channels }
+        }
+        "Curves" => {
+            let parse_pts = |val: &serde_json::Value| -> Option<Vec<(f32, f32)>> {
+                val.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| {
+                            Some((p.get(0)?.as_f64()? as f32, p.get(1)?.as_f64()? as f32))
+                        })
+                        .collect()
+                })
+            };
+            // Legacy "points" is the master curve; "points_r/g/b" are optional
+            // (absent = identity, incl. every v≤2 file).
+            let mut channels: [Vec<(f32, f32)>; 4] =
+                std::array::from_fn(|_| crate::core::layer::identity_curve());
+            channels[0] = parse_pts(&v["points"]).unwrap_or_default();
+            for (i, key) in [(1usize, "points_r"), (2, "points_g"), (3, "points_b")] {
+                if let Some(pts) = parse_pts(&v[key]) {
+                    channels[i] = pts;
+                }
+            }
+            A::Curves { channels }
+        }
+        "ColorBalance" => A::ColorBalance {
+            shadows: arr3("shadows"),
+            midtones: arr3("midtones"),
+            highlights: arr3("highlights"),
+            preserve_luminosity: boolv("preserve_luminosity"),
+        },
+        "Vibrance" => A::Vibrance {
+            vibrance: f32v("vibrance"),
+            saturation: f32v("saturation"),
+        },
+        "Exposure" => A::Exposure {
+            exposure: f32v("exposure"),
+            offset: f32v("offset"),
+            gamma: f32v("gamma"),
+        },
+        "Invert" => A::Invert,
+        "Threshold" => A::Threshold {
+            value: u8v("value"),
+        },
+        "Posterize" => A::Posterize {
+            levels: u8v("levels"),
+        },
+        "BlackAndWhite" => A::BlackAndWhite {
+            r: f32v("r"),
+            y: f32v("y"),
+            g: f32v("g"),
+            c: f32v("c"),
+            b: f32v("b"),
+            m: f32v("m"),
+        },
+        "PhotoFilter" => {
+            let color_arr = &v["color"];
+            let cc = |i: usize| color_arr.get(i).and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+            let color = [cc(0), cc(1), cc(2)];
+            A::PhotoFilter {
+                color,
+                density: f32v("density"),
+                luminosity: boolv("luminosity"),
+            }
+        }
+        "GradientMap" => {
+            // Backward compat: pre-2026-06 files only stored `reverse` and meant a
+            // black→white ramp; default the stops when absent / malformed.
+            let stops = v["stops"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| {
+                            let p = s["pos"].as_f64()? as f32;
+                            let c = &s["color"];
+                            let cc =
+                                |i: usize| c.get(i).and_then(|x| x.as_u64()).unwrap_or(0) as u8;
+                            Some((p, [cc(0), cc(1), cc(2)]))
+                        })
+                        .collect::<Vec<(f32, [u8; 3])>>()
+                })
+                .filter(|s| s.len() >= 2)
+                .unwrap_or_else(|| vec![(0.0, [0, 0, 0]), (1.0, [255, 255, 255])]);
+            A::GradientMap {
+                stops,
+                reverse: boolv("reverse"),
+                dither: boolv("dither"),
+            }
+        }
+        "Desaturate" => A::Desaturate,
+        "ChannelMixer" => A::ChannelMixer {
+            red: arr3("red"),
+            green: arr3("green"),
+            blue: arr3("blue"),
+            monochrome: boolv("monochrome"),
+        },
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::layer::AdjustmentType as A;
+    use serde_json::json;
+
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "iai-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn solid(color: [u8; 4], w: u32, h: u32) -> Canvas {
+        Canvas::from_rgba(
+            color
+                .into_iter()
+                .cycle()
+                .take((w * h * 4) as usize)
+                .collect(),
+            w,
+            h,
+        )
+    }
+
+    fn minimal_pdf() -> Vec<u8> {
+        b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n".to_vec()
+    }
+
+    #[test]
+    fn flow_text_document_round_trips_without_canvas_payloads() {
+        let dir = tmp_dir("flow-text");
+        let path = dir.join("van-ban.iai");
+        let mut document = crate::core::text_document::TextDocument::from_plain_text(
+            "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\nĐộc lập – Tự do – Hạnh phúc",
+        );
+        document.paragraphs[0].style.align = crate::core::text_document::ParagraphAlign::Center;
+        let mut image = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Left,
+        );
+        image.wrap = crate::core::text_document::ImageWrap::TopBottom;
+        document
+            .paragraphs
+            .insert(1, crate::core::text_document::Paragraph::image(image));
+        document.page.margins.left_mm = 32.0;
+        document.page.margins.right_mm = 18.0;
+
+        write_flow_text_doc(&path, &document).expect("write flowing text");
+        assert!(is_flow_text_doc(&path));
+        assert!(!is_artboard_doc(&path));
+        assert!(!is_pdf_project(&path));
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen flowing text") else {
+            panic!("expected flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::Legacy(reopened) = reopened else {
+            panic!("expected legacy flowing-text backing");
+        };
+        assert_eq!(reopened.as_ref(), &document);
+
+        let file = std::fs::File::open(&path).expect("open zip");
+        let mut archive = zip::ZipArchive::new(file).expect("read zip");
+        assert_eq!(archive.len(), 1, "text files must not carry raster pages");
+        assert_eq!(archive.by_index(0).unwrap().name(), "manifest.json");
+        let manifest = read_manifest(&mut archive).expect("read legacy manifest");
+        assert_eq!(manifest["version"], LEGACY_FLOW_TEXT_VERSION);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flow_text_v10_migrates_standalone_inline_image_to_top_bottom() {
+        let dir = tmp_dir("flow-text-v10-inline-image");
+        let path = dir.join("legacy.iai");
+        let block = crate::core::text_document::ImageBlock::inline(
+            vec![1, 2, 3],
+            20,
+            10,
+            15.0,
+            crate::core::text_document::ParagraphAlign::Center,
+        );
+        let document = crate::core::text_document::TextDocument {
+            paragraphs: vec![crate::core::text_document::Paragraph::image(block.clone())],
+            ..crate::core::text_document::TextDocument::default()
+        };
+        let file = std::fs::File::create(&path).expect("create legacy file");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("manifest.json", deflated_options())
+            .expect("start manifest");
+        let manifest = serde_json::json!({
+            "version": 10,
+            "kind": "flow_text_document",
+            "document": document,
+        });
+        zip.write_all(manifest.to_string().as_bytes())
+            .expect("write manifest");
+        zip.finish().expect("finish legacy file");
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("load legacy document") else {
+            panic!("expected flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::Legacy(reopened) = reopened else {
+            panic!("expected legacy flowing-text backing");
+        };
+        let migrated = reopened.paragraphs[0]
+            .image
+            .as_ref()
+            .expect("top-and-bottom image block");
+        assert_eq!(migrated.data, block.data);
+        assert_eq!(
+            migrated.wrap,
+            crate::core::text_document::ImageWrap::TopBottom
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn canvas_editor_v12_round_trip_preserves_unknown_fields() {
+        let dir = tmp_dir("canvas-editor-v12");
+        let path = dir.join("canvas-editor.iai");
+        let payload = serde_json::json!({
+            "header": [],
+            "main": [{
+                "value": "Tiếng Việt — Nguyễn Thị Thu",
+                "size": 16,
+                "future_inline_field": { "kept": true }
+            }],
+            "footer": [],
+            "future_root_field": [1, 2, { "nested": "preserved" }]
+        });
+        let document = crate::core::document::CanvasEditorDocument::try_new(payload.clone())
+            .expect("valid Canvas Editor payload");
+
+        write_canvas_editor_doc(&path, &document).expect("write v12 document");
+
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen v12 document") else {
+            panic!("expected flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::CanvasEditor(reopened) = reopened else {
+            panic!("expected Canvas Editor backing");
+        };
+        assert_eq!(reopened.payload(), &payload);
+
+        let file = std::fs::File::open(&path).expect("open v12 zip");
+        let mut archive = zip::ZipArchive::new(file).expect("read v12 zip");
+        assert_eq!(archive.len(), 2);
+        let manifest = read_manifest(&mut archive).expect("read v12 manifest");
+        assert_eq!(manifest["version"], 12);
+        assert_eq!(manifest["document_entry"], "document.json");
+        drop(archive);
+
+        let replacement_payload = serde_json::json!({
+            "main": [{ "value": "Đã lưu đè an toàn" }],
+            "future_root_field": { "revision": 2 }
+        });
+        let replacement =
+            crate::core::document::CanvasEditorDocument::try_new(replacement_payload.clone())
+                .expect("valid replacement payload");
+        write_canvas_editor_doc(&path, &replacement).expect("atomically replace v12 document");
+        let IaiLoad::FlowTextDocument(reopened) = load(&path).expect("reopen replaced v12") else {
+            panic!("expected replaced flowing-text document");
+        };
+        let crate::core::document::FlowTextBacking::CanvasEditor(reopened) = reopened else {
+            panic!("expected replaced Canvas Editor backing");
+        };
+        assert_eq!(reopened.payload(), &replacement_payload);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn canvas_editor_v12_rejects_invalid_or_oversized_payloads() {
+        assert!(crate::core::document::CanvasEditorDocument::try_new(
+            serde_json::json!({ "main": "not-an-array" })
+        )
+        .is_err());
+
+        let oversized = "x".repeat(crate::core::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES);
+        assert!(crate::core::document::CanvasEditorDocument::try_new(
+            serde_json::json!({ "main": [{ "value": oversized }] })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn alpha_channels_round_trip_through_iai() {
+        let dir = tmp_dir("alpha-channels");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([10, 20, 30, 255], 8, 8);
+        let mut mask = vec![0u8; 64];
+        mask[9] = 255;
+        mask[10] = 128;
+        canvas
+            .channels
+            .add_alpha("Cut line".into(), mask.clone(), 8, 8);
+        canvas
+            .channels
+            .add_alpha(String::new(), vec![255u8; 64], 8, 8);
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+
+        assert_eq!(loaded.channels.alpha.len(), 2);
+        assert_eq!(loaded.channels.alpha[0].name, "Cut line");
+        assert_eq!(loaded.channels.alpha[0].mask, mask);
+        assert_eq!(loaded.channels.alpha[1].name, "Alpha 2");
+        assert_eq!(loaded.channels.alpha[1].mask, vec![255u8; 64]);
+        assert_eq!(
+            (
+                loaded.channels.alpha[0].width,
+                loaded.channels.alpha[0].height
+            ),
+            (8, 8)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn raw_render_recipe_provenance_round_trips_without_changing_non_raw_manifests() {
+        use crate::core::camera_profile::RawRenderRecipeVersion;
+
+        let dir = tmp_dir("raw-recipe-provenance");
+        let raw_path = dir.join("raw-derived.iai");
+        let plain_path = dir.join("plain.iai");
+
+        let mut raw_canvas = solid([10, 20, 30, 255], 8, 8);
+        raw_canvas.metadata.raw_render_recipe = Some(RawRenderRecipeVersion::NaturalV3);
+        IaiExporter
+            .export(&raw_canvas, &raw_path, &ExportOptions::default())
+            .expect("export RAW-derived project");
+
+        let raw_manifest = {
+            let file = std::fs::File::open(&raw_path).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            read_manifest(&mut archive).unwrap()
+        };
+        assert_eq!(raw_manifest["raw_render_recipe"], "natural-v3");
+        let IaiLoad::Canvas(reopened) = load(&raw_path).expect("reopen RAW-derived project") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            reopened.metadata.raw_render_recipe,
+            Some(RawRenderRecipeVersion::NaturalV3)
+        );
+
+        let plain_canvas = solid([30, 20, 10, 255], 8, 8);
+        IaiExporter
+            .export(&plain_canvas, &plain_path, &ExportOptions::default())
+            .expect("export non-RAW project");
+        let plain_manifest = {
+            let file = std::fs::File::open(&plain_path).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            read_manifest(&mut archive).unwrap()
+        };
+        assert!(
+            plain_manifest.get("raw_render_recipe").is_none(),
+            "non-RAW projects should retain their old manifest shape"
+        );
+        let IaiLoad::Canvas(reopened_plain) = load(&plain_path).expect("reopen non-RAW project")
+        else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(reopened_plain.metadata.raw_render_recipe, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hdr_layer_round_trips_16bit_master() {
+        use crate::core::tile::TileMap;
+        let dir = tmp_dir("hdr-16bit");
+        let path = dir.join("doc.iai");
+
+        // Values chosen so an 8-bit round-trip cannot reproduce them: 300 is not
+        // any `v*257`, and 40000 / 12345 are mid-codes the 8-bit mirror loses.
+        let (w, h) = (8u32, 8u32);
+        let mut px16 = vec![0u16; (w * h * 4) as usize];
+        for p in 0..(w * h) as usize {
+            px16[p * 4] = 300;
+            px16[p * 4 + 1] = 40000;
+            px16[p * 4 + 2] = 12345;
+            px16[p * 4 + 3] = 65535;
+        }
+        let mut canvas = solid([1, 1, 1, 255], w, h);
+        canvas.bit_depth = crate::core::canvas::BitDepth::Sixteen;
+        canvas.layer_stack.layers[0].tiles = TileMap::from_rgba16(&px16, w, h);
+        assert!(
+            canvas.layer_stack.layers[0].tiles.has_hdr(),
+            "test setup: layer should carry a 16-bit master"
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+
+        assert!(
+            loaded.layer_stack.layers[0].tiles.has_hdr(),
+            "16-bit master lost on .iai round-trip"
+        );
+        assert_eq!(
+            loaded.layer_stack.layers[0].tiles.get_pixel16(3, 3),
+            (300, 40000, 12345, 65535),
+            "16-bit values not preserved bit-exact"
+        );
+        // The 16-bit mode flag must round-trip too, so the first edit after
+        // reopening keeps preserving the masters instead of quantizing them.
+        assert_eq!(
+            loaded.bit_depth,
+            crate::core::canvas::BitDepth::Sixteen,
+            "bit_depth mode not restored on reopen"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn develop2_commit_save_reopen_and_png_export_are_settled_identical() {
+        use crate::core::canvas::BitDepth;
+        use crate::core::develop::{
+            DevelopSettings, LocalAdjustment, LocalMaskShape, LocalSettings,
+        };
+        use crate::core::develop_scene::{apply_scene_to_tilemap, SceneSource};
+        use crate::formats::png::PngExporter;
+
+        let dir = tmp_dir("develop2-end-to-end");
+        let project_path = dir.join("developed.iai");
+        let png_path = dir.join("developed.png");
+        let (w, h) = (40u32, 28u32);
+        let mut scene = SceneSource::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let xf = x as f32 / (w - 1) as f32;
+                let yf = y as f32 / (h - 1) as f32;
+                let grain = 0.008 * ((x * 17 + y * 11) as f32).sin();
+                scene.set_rgb(
+                    x,
+                    y,
+                    [
+                        0.025 + 0.46 * xf + grain,
+                        0.018 + 0.27 * yf,
+                        0.035 + 0.16 * xf * yf,
+                    ],
+                );
+            }
+        }
+        let mut settings = DevelopSettings {
+            exposure: 7.0,
+            contrast: 14.0,
+            shadows: 18.0,
+            temperature: 8.0,
+            tint: -4.0,
+            vibrance: 16.0,
+            sharpening: 42.0,
+            sharpen_detail: 38.0,
+            noise_reduction: 9.0,
+            vignette: 11.0,
+            ..Default::default()
+        };
+        settings.locals.push(LocalAdjustment {
+            shape: LocalMaskShape::Radial {
+                cx: 0.42,
+                cy: 0.55,
+                rx: 0.28,
+                ry: 0.36,
+                feather: 0.6,
+                invert: false,
+            },
+            settings: LocalSettings {
+                exposure: 12.0,
+                saturation: 9.0,
+                ..Default::default()
+            },
+        });
+
+        // This is the exact settled/commit path used after the interactive
+        // preview refines. It remains the reference through save and export.
+        let settled = apply_scene_to_tilemap(&scene, &settings, None);
+        let expected = settled.flatten16();
+        let mut canvas = solid([0, 0, 0, 255], w, h);
+        canvas.bit_depth = BitDepth::Sixteen;
+        canvas.metadata.develop_working_space = scene.color_pipeline.working;
+        canvas.metadata.color_pipeline_version = 2;
+        canvas.layer_stack.layers[0].tiles = settled;
+
+        IaiExporter
+            .export(&canvas, &project_path, &ExportOptions::default())
+            .expect("save Develop3 project");
+        let IaiLoad::Canvas(reopened) = load(&project_path).expect("reopen Develop3 project")
+        else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(reopened.bit_depth, BitDepth::Sixteen);
+        assert_eq!(reopened.layer_stack.layers[0].tiles.flatten16(), expected);
+
+        PngExporter
+            .export(&reopened, &png_path, &ExportOptions::default())
+            .expect("export settled PNG");
+        let exported = image::open(&png_path)
+            .expect("decode exported PNG")
+            .to_rgba16()
+            .into_raw();
+        assert_eq!(
+            exported,
+            reopened
+                .export_flat16_samples()
+                .expect("16-bit flattened export"),
+            "settled preview/commit must survive save, reopen, and export exactly"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn eight_bit_layer_stays_eight_bit() {
+        // A layer without a master must NOT be promoted on save; the payload
+        // stays an 8-bit PNG and reopens master-less.
+        let dir = tmp_dir("ldr-8bit");
+        let path = dir.join("doc.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        assert!(!canvas.layer_stack.layers[0].tiles.has_hdr());
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(
+            !loaded.layer_stack.layers[0].tiles.has_hdr(),
+            "8-bit layer gained a master it never had"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cmyk_document_round_trips_ink_and_stamps_v3() {
+        let dir = tmp_dir("cmyk-v3");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([200, 40, 90, 255], 16, 16);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("convert to CMYK");
+
+        // Ink must be the naive encoding of the original RGB.
+        let want = crate::core::cms::naive_rgb_to_cmyk([200, 40, 90]);
+        let mut ink = [0u8; 4];
+        canvas.layer_stack.layers[0]
+            .tiles
+            .extract_ink_region_into(3, 3, 1, 1, &mut ink);
+        assert_eq!(ink, want, "ink not encoded before save");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        // The on-disk manifest must be v3 with a CMYK mode tag.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert_eq!(manifest["version"].as_u64(), Some(3));
+        assert_eq!(manifest["color_mode"].as_str(), Some("CMYK"));
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "loaded doc lost its CMYK mode");
+        let mut ink2 = [0u8; 4];
+        loaded.layer_stack.layers[0]
+            .tiles
+            .extract_ink_region_into(3, 3, 1, 1, &mut ink2);
+        assert_eq!(ink2, want, "ink not restored on load");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rgb_document_stays_v2_for_old_builds() {
+        let dir = tmp_dir("rgb-v2");
+        let path = dir.join("doc.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert_eq!(manifest["version"].as_u64(), Some(2));
+        assert!(manifest.get("color_mode").is_none_or(|v| v.is_null()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn document_palette_round_trips_rgb_and_cmyk_and_stamps_v4() {
+        use crate::core::palette::DocumentSwatch;
+        use crate::core::vector::color::ColorValue;
+
+        let dir = tmp_dir("palette-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 8, 8);
+        canvas.metadata.swatches = vec![
+            DocumentSwatch::new("Brand Red", ColorValue::rgb(1.0, 0.1, 0.2)),
+            DocumentSwatch::new("Pure K", ColorValue::cmyk(0.0, 0.0, 0.0, 1.0)),
+        ];
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4),
+            "palette is persistent production data and must not be silently stripped by old builds"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.metadata.swatches, canvas.metadata.swatches);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboards_round_trip_and_stamp_v4() {
+        use crate::core::geometry::Point;
+        use crate::core::page::{Page, PageId};
+        // GUI can't build a second artboard until a later slice, so the multi-page
+        // .iai round-trip is proven here at code level (Artboard plan, trap #7).
+        let dir = tmp_dir("artboards-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 32, 24);
+        canvas.metadata.artboards = vec![
+            Page::implicit(32, 24),
+            Page {
+                id: PageId(1),
+                origin: Point::new(40.0, 0.0),
+                size: (32.0, 24.0),
+                bleed: 3.0,
+                margin: 5.0,
+                background: Some([250, 248, 240, 255]),
+            },
+        ];
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert_eq!(
+            manifest["version"].as_u64(),
+            Some(4),
+            "artboards are production data old builds must not silently strip"
+        );
+        assert!(
+            manifest.get("artboards").is_some_and(|v| v.is_array()),
+            "artboards envelope written"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.metadata.artboards, canvas.metadata.artboards);
+        assert!(loaded.has_explicit_artboards());
+        assert_eq!(loaded.artboard_count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_page_document_writes_no_artboards_envelope() {
+        let dir = tmp_dir("artboards-implicit");
+        let path = dir.join("doc.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        assert!(!canvas.has_explicit_artboards());
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let manifest = read_manifest(&mut zip).unwrap();
+        assert!(
+            manifest.get("artboards").is_none(),
+            "a one-page doc adds no artboards key (stays byte-identical)"
+        );
+        assert!(
+            manifest.get("page_bleed").is_none() && manifest.get("page_margin").is_none(),
+            "no page bleed/margin set → no keys written"
+        );
+        assert_eq!(
+            manifest["version"].as_u64(),
+            Some(2),
+            "no artboards must not bump the version"
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(!loaded.has_explicit_artboards());
+        assert_eq!(loaded.artboard_count(), 1);
+        assert_eq!(
+            loaded.effective_artboards()[0].rect(),
+            crate::core::geometry::Rect::new(0.0, 0.0, 8.0, 8.0)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn page_bleed_and_margin_round_trip() {
+        let dir = tmp_dir("page-setup");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 16, 16);
+        canvas.metadata.page_bleed_px = 8.5;
+        canvas.metadata.page_margin_px = 12.0;
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!((loaded.metadata.page_bleed_px - 8.5).abs() < 1e-4);
+        assert!((loaded.metadata.page_margin_px - 12.0).abs() < 1e-4);
+        // The implicit page picks the defaults up, so the sheet draws them.
+        assert!((loaded.effective_artboards()[0].bleed - 8.5).abs() < 1e-4);
+        assert!((loaded.effective_artboards()[0].margin - 12.0).abs() < 1e-4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboard_doc_round_trips_all_pages() {
+        // A multi-page (Corel/Excel-style) document: every page is stored and
+        // restored, and the active page is remembered.
+        let dir = tmp_dir("artboard-doc");
+        let path = dir.join("doc.iai");
+        let mut p0 = solid([200, 40, 40, 255], 12, 10);
+        p0.metadata.page_name = Some("Bìa".to_string());
+        let p1 = solid([40, 60, 200, 255], 12, 10);
+        write_artboard_doc(&path, &[&p0, &p1], 1, None).expect("write artboard doc");
+
+        let IaiLoad::ArtboardDoc(doc) = load(&path).expect("load") else {
+            panic!("expected an artboard document");
+        };
+        assert_eq!(doc.pages.len(), 2);
+        assert_eq!(doc.active_page, 1);
+        assert!(doc.master.is_none(), "no master written → none loaded");
+        assert_eq!(
+            doc.pages[0].metadata.page_name.as_deref(),
+            Some("Bìa"),
+            "custom page name round-trips"
+        );
+        assert_eq!(
+            doc.pages[1].metadata.page_name, None,
+            "an unnamed page stays unnamed"
+        );
+        assert!(
+            doc.pages[0]
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[0] > 150 && px[2] < 90),
+            "page 0 restores its red pixels"
+        );
+        assert!(
+            doc.pages[1]
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[2] > 150 && px[0] < 90),
+            "page 1 restores its blue pixels"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn artboard_doc_round_trips_the_master_and_per_page_opt_out() {
+        // A multi-page document with a shared master page, where page 1 opts out.
+        let dir = tmp_dir("artboard-master");
+        let path = dir.join("doc.iai");
+        let p0 = solid([255, 255, 255, 255], 8, 8);
+        let mut p1 = solid([255, 255, 255, 255], 8, 8);
+        p1.metadata.use_master = false; // this page hides the master
+        let mut master = solid([10, 200, 30, 255], 8, 8);
+        master.metadata.page_name = Some("Trang nền".to_string());
+
+        write_artboard_doc(&path, &[&p0, &p1], 0, Some(&master)).expect("write");
+
+        let IaiLoad::ArtboardDoc(doc) = load(&path).expect("load") else {
+            panic!("expected an artboard document");
+        };
+        let master = doc.master.expect("master round-trips");
+        assert_eq!(master.metadata.page_name.as_deref(), Some("Trang nền"));
+        assert!(
+            master
+                .export_flat()
+                .chunks_exact(4)
+                .all(|px| px[1] > 150 && px[0] < 90),
+            "master restores its green pixels"
+        );
+        assert!(
+            doc.pages[0].metadata.use_master,
+            "page 0 keeps the master (default)"
+        );
+        assert!(
+            !doc.pages[1].metadata.use_master,
+            "page 1's opt-out round-trips"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn portrait_recipe_round_trips_with_its_masks() {
+        use crate::core::portrait_recipe::{
+            Clip, PortraitRecipe, PortraitSettings, Region, SavedFace, SavedMask,
+        };
+
+        let dir = tmp_dir("portrait-recipe");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([200, 160, 140, 255], 40, 30);
+        let photo = canvas.layer_stack.layers[0].id;
+        let idx = canvas.layer_stack.add_layer(40, 30);
+        let region = |x, y, w, h| Region { x, y, w, h };
+        let ramp = |n: usize| (0..n).map(|v| (v * 7 % 256) as u8).collect::<Vec<u8>>();
+        let settings = PortraitSettings {
+            hair_brightness: 35.0,
+            hair_tint: 20.0,
+            ..PortraitSettings::default()
+        };
+        let retouched = &mut canvas.layer_stack.layers[idx];
+        retouched.tiles.set_pixel(3, 4, 10, 20, 30, 255);
+        let made = retouched.tiles.content_hash();
+        retouched.portrait = Some(std::sync::Arc::new(PortraitRecipe {
+            made: Some(made),
+            source: photo,
+            source_size: (40, 30),
+            settings,
+            clip: Some(Clip {
+                region: region(2, 3, 20, 10),
+                mask: ramp(200),
+            }),
+            faces: vec![
+                SavedFace {
+                    centre: [12.5, 9.0],
+                    extent: 8.0,
+                    enabled: false,
+                    skin: Some(SavedMask {
+                        region: region(1, 1, 9, 7),
+                        mask: ramp(63),
+                    }),
+                    hair: None,
+                    brows: Some(SavedMask {
+                        region: region(4, 2, 8, 3),
+                        mask: ramp(24),
+                    }),
+                    clothes: Some(SavedMask {
+                        region: region(0, 12, 30, 18),
+                        mask: ramp(540),
+                    }),
+                    neck: Some(SavedMask {
+                        region: region(1, 1, 9, 7),
+                        mask: ramp(63).into_iter().rev().collect(),
+                    }),
+                },
+                SavedFace {
+                    centre: [30.0, 9.0],
+                    extent: 6.0,
+                    enabled: true,
+                    skin: None,
+                    hair: Some(SavedMask {
+                        region: region(20, 0, 15, 12),
+                        mask: ramp(180),
+                    }),
+                    brows: None,
+                    clothes: None,
+                    neck: None,
+                },
+            ],
+        }));
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.layer_stack.layers[0].portrait.is_none());
+        let back = loaded.layer_stack.layers[1]
+            .portrait
+            .clone()
+            .expect("recipe round-trips");
+        assert_eq!(back.source, loaded.layer_stack.layers[0].id);
+        assert_eq!(back.source_size, (40, 30));
+        // The layer opened again is still what the recipe made.
+        assert_eq!(
+            back.made,
+            Some(loaded.layer_stack.layers[1].tiles.content_hash())
+        );
+        assert_eq!(back.made, Some(made));
+        assert_eq!(back.settings, settings);
+        let clip = back.clip.as_ref().expect("selection kept");
+        assert_eq!(
+            (clip.region, clip.mask.clone()),
+            (region(2, 3, 20, 10), ramp(200))
+        );
+        assert_eq!(back.faces.len(), 2);
+        let (a, b) = (&back.faces[0], &back.faces[1]);
+        assert_eq!((a.centre, a.extent, a.enabled), ([12.5, 9.0], 8.0, false));
+        let skin = a.skin.as_ref().expect("skin mask");
+        assert_eq!(
+            (skin.region, skin.mask.clone()),
+            (region(1, 1, 9, 7), ramp(63))
+        );
+        assert!(a.hair.is_none() && b.skin.is_none() && b.brows.is_none());
+        let brows = a.brows.as_ref().expect("brow mask");
+        assert_eq!(
+            (brows.region, brows.mask.clone()),
+            (region(4, 2, 8, 3), ramp(24))
+        );
+        assert_eq!(b.hair.as_ref().map(|m| m.mask.clone()), Some(ramp(180)));
+        let clothes = a.clothes.as_ref().expect("clothes mask");
+        assert_eq!(
+            (clothes.region, clothes.mask.clone()),
+            (region(0, 12, 30, 18), ramp(540))
+        );
+        assert!(b.clothes.is_none());
+        let neck = a.neck.as_ref().expect("neck mask");
+        assert_eq!(
+            (neck.region, neck.mask.clone()),
+            (region(1, 1, 9, 7), ramp(63).into_iter().rev().collect())
+        );
+        assert!(b.neck.is_none());
+
+        // Without its photo the recipe is dropped, the pixels stay.
+        canvas.layer_stack.layers.remove(0);
+        canvas.layer_stack.active_idx = 0;
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.layer_stack.layers[0].portrait.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn connector_binding_round_trips() {
+        use crate::core::connector::{ConnectorAnchor, ConnectorBinding};
+        use crate::core::vector::affine::AffineTransform;
+        use crate::core::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+        use crate::core::vector::object::VectorObjectData;
+        use crate::core::vector::style::VectorStyle;
+
+        let dir = tmp_dir("connector");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 60, 60);
+        // Two opaque boxes to link.
+        let mut add_box = |ox: i32, oy: i32| -> u32 {
+            let idx = canvas.layer_stack.add_layer(60, 60);
+            let l = &mut canvas.layer_stack.layers[idx];
+            l.tiles = crate::core::tile::TileMap::from_rgba(&vec![255u8; 10 * 10 * 4], 10, 10);
+            l.width = 10;
+            l.height = 10;
+            l.offset = (ox, oy);
+            l.id
+        };
+        let a = add_box(5, 5);
+        let b = add_box(40, 40);
+        // A connector Path layer bound to both.
+        let idx = canvas.layer_stack.add_layer(60, 60);
+        let obj = VectorObjectData::new(
+            elbow_connector_path(10.0, 10.0, 45.0, 45.0, ConnectorRoute::ElbowHv),
+            VectorStyle::default(),
+            AffineTransform::IDENTITY,
+        );
+        crate::core::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[idx],
+            obj,
+        );
+        canvas.layer_stack.layers[idx].connector = Some(ConnectorBinding {
+            start: Some(ConnectorAnchor {
+                layer_id: a,
+                fx: 0.25,
+                fy: 0.75,
+            }),
+            end: Some(ConnectorAnchor {
+                layer_id: b,
+                fx: 0.5,
+                fy: 0.5,
+            }),
+            route: 1,
+        });
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+
+        let conn = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.connector.is_some())
+            .expect("connector layer round-trips")
+            .connector
+            .unwrap();
+        assert_eq!(conn.route, 1, "route preserved");
+        let start = conn.start.expect("start anchor");
+        let end = conn.end.expect("end anchor");
+        assert!((start.fx - 0.25).abs() < 1e-4 && (start.fy - 0.75).abs() < 1e-4);
+        assert!((end.fx - 0.5).abs() < 1e-4);
+        // On load, layer ids equal positions; the anchors point at the two boxes.
+        let a_pos = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == start.layer_id)
+            .expect("start target present");
+        let b_pos = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == end.layer_id)
+            .expect("end target present");
+        assert!(a_pos < b_pos, "anchors resolve to distinct earlier layers");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Path layer persistence (Bước 4 / T4.3) ──
+    use crate::core::vector::affine::AffineTransform;
+    use crate::core::vector::color::ColorValue;
+    use crate::core::vector::object::VectorObjectData;
+    use crate::core::vector::path::{Contour, FillRule, Node, PathData};
+    use crate::core::vector::style::{Paint, StrokeStyle, VectorStyle};
+
+    fn sample_path_object() -> VectorObjectData {
+        use crate::core::geometry::Point;
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::with_handles(
+                        Point::new(40.0, 0.0),
+                        Point::new(30.0, -6.0),
+                        Point::new(50.0, 6.0),
+                        crate::core::vector::path::NodeKind::Smooth,
+                    ),
+                    Node::sharp(Point::new(40.0, 40.0)),
+                    Node::sharp(Point::new(0.0, 40.0)),
+                ],
+                true,
+            )],
+            FillRule::EvenOdd,
+        );
+        let mut style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.4, 1.0));
+        style.stroke_style = StrokeStyle {
+            width: 2.5,
+            ..StrokeStyle::default()
+        };
+        style.opacity = 0.9;
+        VectorObjectData::new(path, style, AffineTransform::translate(20.0, 15.0))
+    }
+
+    fn loaded_path_model(canvas: &Canvas) -> VectorObjectData {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find_map(|l| match &l.layer_type {
+                LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(o)) => {
+                    Some(o.clone())
+                }
+                _ => None,
+            })
+            .expect("a Path layer survived the round-trip")
+    }
+
+    #[test]
+    fn path_layer_round_trips_and_stamps_v4() {
+        let dir = tmp_dir("path-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+
+        // Manifest is stamped v4 because a Path layer is present.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            obj,
+            "geometry/style/transform must round-trip"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn path_layer_round_trips_on_cmyk() {
+        let dir = tmp_dir("path-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+        let obj = sample_path_object();
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Path 1",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost");
+        // The model (incl. the CMYK fill colour) is the source of truth and must
+        // survive verbatim even though the baked fallback is a mirror.
+        assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detailed_vector_document_over_one_mib_manifest_reopens() {
+        // Vector paths live in manifest.json (~140 bytes per node), so a
+        // detailed drawing easily passes 1 MiB; it must still reopen.
+        use crate::core::geometry::Point;
+        let dir = tmp_dir("path-large-manifest");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        let nodes: Vec<Node> = (0..12_000)
+            .map(|i| {
+                let t = i as f32 * 0.013;
+                let (x, y) = (40.0 + 35.0 * t.cos(), 40.0 + 35.0 * t.sin());
+                Node::with_handles(
+                    Point::new(x, y),
+                    Point::new(x - 0.123, y - 0.456),
+                    Point::new(x + 0.123, y + 0.456),
+                    crate::core::vector::path::NodeKind::Smooth,
+                )
+            })
+            .collect();
+        let obj = VectorObjectData::new(
+            PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero),
+            VectorStyle::filled(ColorValue::rgb(0.2, 0.3, 0.4)),
+            AffineTransform::translate(0.0, 0.0),
+        );
+        canvas
+            .execute(
+                Box::new(crate::core::command_vector::CreatePathLayer::new(
+                    obj.clone(),
+                    "Detailed path",
+                )),
+                crate::core::gateway::ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let manifest_bytes = {
+            let f = std::fs::File::open(&path).unwrap();
+            let mut zip = zip::ZipArchive::new(f).unwrap();
+            let size = zip.by_name("manifest.json").unwrap().size();
+            size
+        };
+        assert!(manifest_bytes > 1024 * 1024, "manifest = {manifest_bytes}");
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("large manifest must reopen") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded_path_model(&loaded), obj);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── M1 end-to-end (Mục 14 / cổng Foundation Freeze) ──
+    // Drive the whole thin slice through the gateway — Pen→Path commit, Node
+    // edit, Fill/Outline, then Transform — and prove the FINAL model survives a
+    // .iai round-trip AND that PDF export represents it correctly (native vector
+    // on RGB; raster fallback on CMYK, which M1 explicitly allows).
+
+    fn path_layer_id(canvas: &Canvas) -> u32 {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| {
+                matches!(
+                    l.layer_type,
+                    LayerType::Vector(crate::core::vector::object::VectorGeometry::Path(_))
+                )
+            })
+            .map(|l| l.id)
+            .expect("a Path layer exists")
+    }
+
+    #[test]
+    fn m1_end_to_end_rgb_edit_chain_roundtrips_and_emits_pdf_vector() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-rgb");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+
+        // 1) Pen → Path commit.
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        // 2) Node edit: replace geometry (equivalent to move + insert a node).
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 0.0)),
+                    Node::sharp(Point::new(60.0, 60.0)),
+                    Node::sharp(Point::new(30.0, 45.0)), // inserted node
+                    Node::sharp(Point::new(0.0, 60.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // 3) Fill/Outline: opaque red fill, thin blue outline.
+        let mut final_style = VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0));
+        final_style.stroke = Paint::Solid(ColorValue::rgb(0.0, 0.0, 1.0));
+        final_style.stroke_style = StrokeStyle {
+            width: 1.5,
+            ..StrokeStyle::default()
+        };
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+
+        // 4) Transform: move (no node baking).
+        let final_xf = AffineTransform::translate(8.0, 4.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom.clone(), final_style, final_xf);
+        assert_eq!(
+            loaded_path_model(&canvas),
+            expected,
+            "live model after the M1 edit chain"
+        );
+
+        // Undo/redo integrity through the gateway: last step is the transform.
+        assert!(canvas.can_undo());
+        canvas.undo().expect("undo transform");
+        assert_eq!(
+            loaded_path_model(&canvas).transform,
+            AffineTransform::translate(20.0, 15.0),
+            "undo reverts only the transform to the pre-step value"
+        );
+        canvas.redo().expect("redo transform");
+        assert_eq!(loaded_path_model(&canvas).transform, final_xf);
+
+        // Round-trip the FINAL model through .iai.
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "final geometry/style/transform round-trips"
+        );
+
+        // PDF: an eligible top RGB Path becomes a native vector over the raster.
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert_eq!(sel.objects.len(), 1, "RGB Path promoted to a PDF vector");
+        match sel.objects[0].fill.expect("red fill present") {
+            crate::core::print::PdfPaintColor::Rgb([r, g, b]) => assert!(
+                (r - 1.0).abs() < 1e-3 && g.abs() < 1e-3 && b.abs() < 1e-3,
+                "promoted fill colour is red"
+            ),
+            other => panic!("expected an sRGB fill, got {other:?}"),
+        }
+        assert!(!sel.promoted_layer_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn m1_end_to_end_cmyk_roundtrips_and_pdf_uses_native_vectors() {
+        use crate::core::command_vector::{
+            ChangeVectorStyle, ChangeVectorTransform, CreatePathLayer, ReplacePathGeometry,
+        };
+        use crate::core::gateway::ChangeKind;
+        use crate::core::geometry::Point;
+
+        let dir = tmp_dir("m1-cmyk");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 80, 80);
+        canvas
+            .convert_to_cmyk(crate::core::canvas::CmykProfile::Naive)
+            .expect("to CMYK");
+
+        canvas
+            .execute(
+                Box::new(CreatePathLayer::new(sample_path_object(), "Path 1")),
+                ChangeKind::LayerStructure,
+            )
+            .expect("create path");
+        let id = path_layer_id(&canvas);
+
+        let edited_geom = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 0.0)),
+                    Node::sharp(Point::new(50.0, 50.0)),
+                    Node::sharp(Point::new(0.0, 50.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        canvas
+            .execute(
+                Box::new(ReplacePathGeometry::new(id, edited_geom.clone())),
+                ChangeKind::LayerPixels,
+            )
+            .expect("edit geometry");
+
+        // Pure-K fill: proves CMYK ink survives verbatim (no RGB round-trip).
+        let final_style = VectorStyle::filled(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0));
+        canvas
+            .execute(
+                Box::new(ChangeVectorStyle::new(id, final_style)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("style");
+        let final_xf = AffineTransform::translate(6.0, 3.0);
+        canvas
+            .execute(
+                Box::new(ChangeVectorTransform::new(id, final_xf)),
+                ChangeKind::LayerPixels,
+            )
+            .expect("transform");
+
+        let expected = VectorObjectData::new(edited_geom, final_style, final_xf);
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert!(loaded.is_cmyk(), "CMYK mode lost on round-trip");
+        assert_eq!(
+            loaded_path_model(&loaded),
+            expected,
+            "CMYK model (incl. pure-K fill) round-trips verbatim"
+        );
+
+        // The top CMYK Path is promoted to a native DeviceCMYK vector; the pure-K
+        // fill survives verbatim (no RGB round-trip) all the way to the PDF colour.
+        let sel = crate::core::print::collect_pdf_vectors(&loaded);
+        assert_eq!(
+            sel.objects.len(),
+            1,
+            "CMYK Path promoted to a native vector"
+        );
+        match sel.objects[0].fill {
+            Some(crate::core::print::PdfPaintColor::Cmyk([c, m, y, k])) => assert!(
+                c == 0.0 && m == 0.0 && y == 0.0 && k >= 0.999,
+                "pure K stays pure K, got {c},{m},{y},{k}"
+            ),
+            other => panic!("expected a DeviceCMYK fill, got {other:?}"),
+        }
+        assert!(!sel.promoted_layer_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn layer_page_id_round_trips_through_iai() {
+        // Contract #10: a layer's page ownership persists. MVP keeps everything on
+        // the implicit page; this drives a non-implicit id to prove the schema slot
+        // carries it, so multi-page later is additive.
+        let dir = tmp_dir("page-id");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([10, 20, 30, 255], 8, 8);
+        let idx = canvas.layer_stack.add_layer(8, 8);
+        canvas.layer_stack.layers[idx].page_id = crate::core::page::PageId(2);
+        assert_eq!(
+            canvas.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(loaded.layer_stack.layers.len(), 2);
+        assert_eq!(
+            loaded.layer_stack.layers[0].page_id,
+            crate::core::page::PageId::IMPLICIT,
+            "implicit-page layer stays implicit"
+        );
+        assert_eq!(
+            loaded.layer_stack.layers[idx].page_id,
+            crate::core::page::PageId(2),
+            "non-implicit page id must round-trip"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn powerclip_relation_round_trips_separately_from_group_parent() {
+        let dir = tmp_dir("powerclip-v4");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 48, 48);
+        let frame_idx = canvas.layer_stack.add_layer(48, 48);
+        let frame_id = canvas.layer_stack.layers[frame_idx].id;
+        let child_id = canvas
+            .layer_stack
+            .create_clipped_pixel_child(frame_id, 48, 48)
+            .expect("create clipped child");
+        assert_eq!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|layer| layer.id == child_id)
+                .unwrap()
+                .parent_id,
+            None
+        );
+
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(4)
+        );
+
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let child = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Pixel Paint inside")
+            .expect("clipped child");
+        let loaded_frame = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|layer| Some(layer.id) == child.clip_parent_id)
+            .expect("clip frame");
+        assert_ne!(child.id, loaded_frame.id);
+        assert_eq!(child.parent_id, None, "clip is not group membership");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newer_version_is_rejected() {
+        let dir = tmp_dir("newer-ver");
+        let path = dir.join("doc.iai");
+        // Hand-write a minimal archive claiming a version beyond this build.
+        write_iai_archive(&path, |zip| {
+            zip.start_file("manifest.json", stored_options())
+                .map_err(|e| e.to_string())?;
+            let m =
+                serde_json::json!({ "version": IAI_FORMAT_VERSION + 1, "width": 4, "height": 4 });
+            zip.write_all(m.to_string().as_bytes())
+                .map_err(|e| e.to_string())
+        })
+        .expect("write");
+        assert!(load(&path).is_err(), "a newer-version file must be refused");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn text_rotation_round_trips_json() {
+        let mut td = crate::core::text::TextData {
+            content: "Turn".to_string(),
+            font_px: 32.0,
+            font_family: crate::core::text::TextFontFamily::SystemFace {
+                family: "Example Sans".to_string(),
+                style: "SemiBold Italic".to_string(),
+            },
+            rotation_deg: 37.5,
+            stretch_x: 1.75,
+            flip_x: true,
+            flip_y: true,
+            ..crate::core::text::TextData::default()
+        };
+        td.glyph_styles = vec![
+            crate::core::text::GlyphStyle {
+                color: [220, 10, 20, 255],
+                font_px: 32.0,
+                font_family: td.font_family.clone(),
+                bold: true,
+                italic: false,
+                underline: true,
+            };
+            td.content.chars().count()
+        ];
+
+        let json = text_to_json(&td);
+        let restored = json_to_text_data(&json).expect("text json restores");
+
+        assert!((restored.rotation_deg - 37.5).abs() < 0.001);
+        assert_eq!(restored.font_family, td.font_family);
+        assert!((restored.stretch_x - 1.75).abs() < 0.001);
+        assert!(restored.flip_x);
+        assert!(restored.flip_y);
+        assert_eq!(restored.glyph_styles, td.glyph_styles);
+    }
+
+    #[test]
+    fn shape_data_round_trips_json() {
+        let (mut sd, _) = crate::core::shape::ShapeData::from_canvas_span(
+            crate::core::shape::ShapeKind::Rectangle,
+            10.0,
+            20.0,
+            110.0,
+            80.0,
+            12.0,
+            true,
+            [200, 30, 40, 255],
+            4.0,
+            [0, 0, 0, 255],
+        );
+        sd.style.fill = crate::core::vector::style::Paint::Gradient(
+            crate::core::vector::style::Gradient::two_color(
+                crate::core::vector::style::GradientKind::Radial,
+                crate::core::vector::color::ColorValue::cmyk(0.1, 0.2, 0.3, 0.4),
+                crate::core::vector::color::ColorValue::rgba(0.8, 0.2, 0.1, 0.6),
+                crate::core::vector::affine::AffineTransform {
+                    a: 80.0,
+                    d: 60.0,
+                    e: 10.0,
+                    f: 5.0,
+                    ..crate::core::vector::affine::AffineTransform::IDENTITY
+                },
+            ),
+        );
+        let json = shape_to_json(&sd);
+        let restored = json_to_shape_data(&json).expect("shape json restores");
+        assert_eq!(restored, sd);
+    }
+
+    #[test]
+    fn embedded_pdf_round_trips() {
+        let dir = tmp_dir("embedded-project");
+        let path = dir.join("doc.iai");
+        let source = dir.join("original.pdf");
+        let pdf_bytes = minimal_pdf();
+        let page = solid([90, 140, 210, 255], 4, 4);
+        let meta = IaiProjectMeta {
+            source: source.clone(),
+            source_len: Some(pdf_bytes.len() as u64),
+            source_modified_secs: Some(999),
+            page_count: 1,
+            selected_pages: vec![0],
+            page_names: std::collections::BTreeMap::new(),
+            requested_dpi: 144.0,
+            active_page: 0,
+            global_edits: Vec::new(),
+        };
+        let pages = vec![IaiProjectPageOut {
+            index: 0,
+            base_pristine: true,
+            view: (1.0, 0.0, 0.0),
+            canvas: &page,
+        }];
+
+        save_pdf_project(&path, &meta, &pages, Some(&pdf_bytes)).unwrap();
+
+        assert!(is_pdf_project(&path));
+        match load(&path).unwrap() {
+            IaiLoad::PdfProject(project) => {
+                assert_eq!(project.source, source);
+                assert_eq!(project.embedded_pdf, Some(pdf_bytes));
+                assert_eq!(project.pages.len(), 1);
+                assert_eq!(project.pages[0].index, 0);
+            }
+            _ => panic!("expected a PDF project"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_only_project_still_loads() {
+        let dir = tmp_dir("link-only-project");
+        let path = dir.join("doc.iai");
+        let source = dir.join("original.pdf");
+        let page = solid([30, 200, 90, 255], 5, 3);
+        let meta = IaiProjectMeta {
+            source: source.clone(),
+            source_len: None,
+            source_modified_secs: None,
+            page_count: 2,
+            selected_pages: vec![0, 1],
+            page_names: std::collections::BTreeMap::new(),
+            requested_dpi: 300.0,
+            active_page: 0,
+            global_edits: Vec::new(),
+        };
+        let pages = vec![IaiProjectPageOut {
+            index: 0,
+            base_pristine: false,
+            view: (1.25, 2.0, 3.0),
+            canvas: &page,
+        }];
+
+        save_pdf_project(&path, &meta, &pages, None).unwrap();
+
+        match load(&path).unwrap() {
+            IaiLoad::PdfProject(project) => {
+                assert_eq!(project.source, source);
+                assert!(project.embedded_pdf.is_none());
+                assert_eq!(project.pages.len(), 1);
+                assert_eq!(
+                    (
+                        project.pages[0].canvas.width,
+                        project.pages[0].canvas.height
+                    ),
+                    (5, 3)
+                );
+            }
+            _ => panic!("expected a PDF project"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inserted_pdf_page_round_trips_as_materialized_v8_page() {
+        let dir = tmp_dir("inserted-page-project");
+        let path = dir.join("doc.iai");
+        let inserted = solid([245, 245, 245, 255], 7, 9);
+        let meta = IaiProjectMeta {
+            source: dir.join("original.pdf"),
+            source_len: None,
+            source_modified_secs: None,
+            page_count: 1,
+            selected_pages: vec![0, 1],
+            page_names: [(1, "Ảnh chèn".to_string())].into_iter().collect(),
+            requested_dpi: 144.0,
+            active_page: 1,
+            global_edits: Vec::new(),
+        };
+        save_pdf_project(
+            &path,
+            &meta,
+            &[IaiProjectPageOut {
+                index: 1,
+                base_pristine: false,
+                view: (1.0, 0.0, 0.0),
+                canvas: &inserted,
+            }],
+            None,
+        )
+        .unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        assert_eq!(
+            read_manifest(&mut zip).unwrap()["version"].as_u64(),
+            Some(8)
+        );
+        drop(zip);
+        let IaiLoad::PdfProject(project) = load(&path).unwrap() else {
+            panic!("expected PDF project");
+        };
+        assert_eq!(project.selected_pages, vec![0, 1]);
+        assert_eq!(project.active_page, 1);
+        assert_eq!(
+            project.page_names.get(&1).map(String::as_str),
+            Some("Ảnh chèn")
+        );
+        assert_eq!(project.pages.len(), 1);
+        assert_eq!(project.pages[0].index, 1);
+        assert_eq!(
+            (
+                project.pages[0].canvas.width,
+                project.pages[0].canvas.height
+            ),
+            (7, 9)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pdf_project_round_trips_metadata_and_edited_pages() {
+        let dir = tmp_dir("project-roundtrip");
+        let path = dir.join("doc.iai");
+        let source = dir.join("original.pdf");
+
+        let page0 = solid([200, 30, 30, 255], 4, 4);
+        let page2 = solid([30, 30, 200, 255], 6, 5);
+        let meta = IaiProjectMeta {
+            source: source.clone(),
+            source_len: Some(123),
+            source_modified_secs: Some(456),
+            page_count: 5,
+            selected_pages: vec![0, 2, 4],
+            page_names: [(2, "Trang minh họa".to_string())].into_iter().collect(),
+            requested_dpi: 300.0,
+            active_page: 2,
+            global_edits: vec![
+                crate::core::document::PdfGlobalEdit::Clear(
+                    crate::core::document::PdfGlobalClear {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 0.2,
+                        y1: 0.25,
+                        color: [255, 255, 255, 255],
+                        target_pages: vec![2, 4],
+                    },
+                ),
+                crate::core::document::PdfGlobalEdit::Stamp(
+                    crate::core::document::PdfGlobalStamp {
+                        x0: 0.25,
+                        y0: 0.5,
+                        x1: 0.75,
+                        y1: 0.75,
+                        width: 2,
+                        height: 1,
+                        rgba: vec![255, 0, 0, 255, 0, 0, 255, 128],
+                        kind: crate::core::document::PdfGlobalStampKind::Image,
+                        name: "Dấu ảnh".to_string(),
+                        source_page: Some(2),
+                        source_layer_id: Some(7),
+                        target_pages: vec![2, 4],
+                    },
+                ),
+            ],
+        };
+        let pages = vec![
+            IaiProjectPageOut {
+                index: 0,
+                base_pristine: true,
+                view: (1.5, 10.0, 20.0),
+                canvas: &page0,
+            },
+            IaiProjectPageOut {
+                index: 2,
+                base_pristine: false,
+                view: (2.0, -5.0, 7.0),
+                canvas: &page2,
+            },
+        ];
+        save_pdf_project(&path, &meta, &pages, None).unwrap();
+
+        assert!(is_pdf_project(&path));
+
+        match load(&path).unwrap() {
+            IaiLoad::PdfProject(project) => {
+                assert_eq!(project.source, source);
+                assert_eq!(project.source_len, Some(123));
+                assert_eq!(project.source_modified_secs, Some(456));
+                assert!(project.embedded_pdf.is_none());
+                assert_eq!(project.page_count, 5);
+                assert_eq!(project.selected_pages, vec![0, 2, 4]);
+                assert_eq!(project.page_names, meta.page_names);
+                assert_eq!(project.requested_dpi, 300.0);
+                assert_eq!(project.active_page, 2);
+                assert_eq!(project.global_edits, meta.global_edits);
+                assert_eq!(project.pages.len(), 2);
+
+                let p0 = project.pages.iter().find(|p| p.index == 0).unwrap();
+                assert!(p0.base_pristine);
+                assert_eq!(p0.view, (1.5, 10.0, 20.0));
+                assert_eq!((p0.canvas.width, p0.canvas.height), (4, 4));
+
+                let p2 = project.pages.iter().find(|p| p.index == 2).unwrap();
+                assert!(!p2.base_pristine);
+                assert_eq!(p2.view, (2.0, -5.0, 7.0));
+                assert_eq!((p2.canvas.width, p2.canvas.height), (6, 5));
+                assert!(p2
+                    .canvas
+                    .export_flat()
+                    .chunks_exact(4)
+                    .all(|px| px[2] > 180 && px[0] < 60));
+            }
+            _ => panic!("expected a PDF project"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_canvas_iai_is_not_reported_as_a_project() {
+        let dir = tmp_dir("single-canvas");
+        let path = dir.join("image.iai");
+        let canvas = solid([10, 20, 30, 255], 8, 8);
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .unwrap();
+
+        assert!(!is_pdf_project(&path));
+        match load(&path).unwrap() {
+            IaiLoad::Canvas(loaded) => assert_eq!((loaded.width, loaded.height), (8, 8)),
+            _ => panic!("expected a single canvas"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn color_balance_empty_arrays_dont_panic() {
+        let v = json!({ "type": "ColorBalance", "shadows": [], "midtones": [1.0],
+                        "highlights": [0.1, 0.2, 0.3], "preserve_luminosity": true });
+        let adj = json_to_adjustment(&v).expect("should parse");
+        match adj {
+            A::ColorBalance {
+                shadows,
+                midtones,
+                highlights,
+                ..
+            } => {
+                assert_eq!(shadows, [0.0, 0.0, 0.0]);
+                assert_eq!(midtones, [1.0, 0.0, 0.0]);
+                assert_eq!(highlights, [0.1, 0.2, 0.3]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn curves_malformed_points_dont_panic() {
+        let v = json!({ "type": "Curves", "points": [[0.0, 0.0], [], [1.0], [0.5, 0.7]] });
+        let adj = json_to_adjustment(&v).expect("should parse");
+        match adj {
+            A::Curves { channels } => {
+                assert_eq!(channels[0], vec![(0.0, 0.0), (0.5, 0.7)]);
+                for ch in &channels[1..] {
+                    assert_eq!(*ch, crate::core::layer::identity_curve());
+                }
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn levels_legacy_json_loads_as_master_only() {
+        // v≤2 files have no "r"/"g"/"b" keys — they must load with identity
+        // per-channel params and the legacy fields as master.
+        let v = json!({ "type": "Levels", "in_black": 10, "in_white": 200,
+                        "gamma": 1.5, "out_black": 5, "out_white": 250 });
+        let adj = json_to_adjustment(&v).expect("should parse");
+        match adj {
+            A::Levels { channels } => {
+                assert_eq!(
+                    (channels[0].in_black, channels[0].in_white),
+                    (10, 200),
+                    "legacy keys become master"
+                );
+                assert!((channels[0].gamma - 1.5).abs() < 1e-6);
+                assert_eq!((channels[0].out_black, channels[0].out_white), (5, 250));
+                for ch in &channels[1..] {
+                    assert!(ch.is_identity(), "absent per-channel keys = identity");
+                }
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn levels_per_channel_round_trips_and_omits_identity() {
+        use crate::core::layer::LevelsParams;
+        let mut channels = [LevelsParams::default(); 4];
+        channels[0].gamma = 1.2;
+        channels[1].in_black = 20; // red non-identity
+        channels[3].out_white = 240; // blue non-identity
+        let adj = A::Levels { channels };
+
+        let j = adjustment_to_json(&adj);
+        assert!(j["r"].is_object(), "non-identity red must be written");
+        assert!(j["g"].is_null(), "identity green must be omitted");
+        assert!(j["b"].is_object(), "non-identity blue must be written");
+
+        let back = json_to_adjustment(&j).expect("should parse");
+        assert_eq!(adj, back);
+    }
+
+    #[test]
+    fn curves_per_channel_round_trips_and_omits_identity() {
+        let mut channels: [Vec<(f32, f32)>; 4] =
+            std::array::from_fn(|_| crate::core::layer::identity_curve());
+        channels[0] = vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)];
+        channels[2] = vec![(0.0, 0.1), (1.0, 0.9)]; // green non-identity
+        let adj = A::Curves { channels };
+
+        let j = adjustment_to_json(&adj);
+        assert!(j["points_r"].is_null(), "identity red must be omitted");
+        assert!(
+            j["points_g"].is_array(),
+            "non-identity green must be written"
+        );
+        assert!(j["points_b"].is_null(), "identity blue must be omitted");
+
+        let back = json_to_adjustment(&j).expect("should parse");
+        assert_eq!(adj, back);
+    }
+
+    #[test]
+    fn photo_filter_short_color_doesnt_panic() {
+        let v =
+            json!({ "type": "PhotoFilter", "color": [200], "density": 0.25, "luminosity": true });
+        let adj = json_to_adjustment(&v).expect("should parse");
+        match adj {
+            A::PhotoFilter { color, .. } => assert_eq!(color, [200, 0, 0]),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn gradient_map_round_trips() {
+        let adj = A::GradientMap {
+            stops: vec![
+                (0.0, [10, 20, 30]),
+                (0.5, [120, 130, 140]),
+                (1.0, [240, 250, 255]),
+            ],
+            reverse: true,
+            dither: true,
+        };
+        let back = json_to_adjustment(&adjustment_to_json(&adj)).expect("should parse");
+        assert_eq!(adj, back);
+    }
+
+    #[test]
+    fn gradient_map_legacy_reverse_only_defaults_stops() {
+        // Pre-2026-06 files only stored `reverse`; loader must fill black→white.
+        let v = json!({ "type": "GradientMap", "reverse": false });
+        let adj = json_to_adjustment(&v).expect("should parse");
+        match adj {
+            A::GradientMap {
+                stops,
+                reverse,
+                dither,
+            } => {
+                assert_eq!(stops, vec![(0.0, [0, 0, 0]), (1.0, [255, 255, 255])]);
+                assert!(!reverse);
+                assert!(!dither);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}

@@ -1,0 +1,2852 @@
+//! Per-frame UiData snapshot for the egui layer: collect_ui_data plus the
+//! print/clone/layer/mask thumbnail builders it uses. Split out of
+//! actions.rs (phase 3).
+
+use crate::app::doc_thumbs::tiles_content_key;
+use crate::app::state::App;
+use crate::ui::{
+    ChannelsViewModel, ChromeViewModel, DevelopViewModel, DialogViewModel, DocumentViewModel,
+    LayerViewModel, PrintViewModel, SelectionViewModel, ToolViewModel, TransformOverlayData,
+    UiData,
+};
+
+const PRINT_PREVIEW_MAX_DIM: u32 = 768;
+const PANEL_THUMB: usize = 64;
+const CHANNEL_THUMB: usize = PANEL_THUMB;
+
+fn develop_pipeline_diagnostic(
+    scene: Option<&crate::core::develop_scene::SceneSource>,
+    persisted_raw_recipe: Option<crate::core::camera_profile::RawRenderRecipeVersion>,
+) -> Option<String> {
+    use crate::core::camera_profile::resolver::SelectedProfileProvenance;
+    use crate::core::develop_scene::BaseLook;
+    use crate::core::working_color::OutputColorSpace;
+
+    let scene = match scene {
+        Some(scene) => scene,
+        None => {
+            return persisted_raw_recipe
+                .map(|recipe| format!("RAW recipe: {} (saved provenance)", recipe.name()));
+        }
+    };
+    let source = match scene.look {
+        BaseLook::Raw => "RAW scene",
+        BaseLook::Identity => "display-referred raster",
+    };
+    let output = match scene.color_pipeline.output {
+        OutputColorSpace::Srgb => "sRGB",
+        OutputColorSpace::DisplayP3 => "Display P3",
+    };
+    let mut lines = vec![
+        format!("Source: {source}"),
+        format!(
+            "Working/output: {} -> {} (pipeline v{})",
+            scene.color_pipeline.working.name(),
+            output,
+            scene.color_pipeline.algorithm_version
+        ),
+    ];
+
+    if let Some(characterization) = scene.camera_profile.as_ref() {
+        lines.push(format!(
+            "RAW recipe: {} | JPEG match: {:?}",
+            characterization.raw_render_recipe.name(),
+            characterization.jpeg_match
+        ));
+        let selected = match &characterization.resolution.selected {
+            SelectedProfileProvenance::Dcp {
+                tier,
+                profile_name,
+                locator,
+                ..
+            } => format!(
+                "DCP ({tier:?}): {}",
+                profile_name.as_deref().unwrap_or(locator)
+            ),
+            SelectedProfileProvenance::SceneIcc { tier, locator, .. } => {
+                format!("Scene ICC ({tier:?}): {locator}")
+            }
+            SelectedProfileProvenance::DecoderMatrix { backend, reason } => {
+                format!("Decoder matrix ({backend:?}): {reason:?}")
+            }
+        };
+        lines.push(format!("Camera profile: {selected}"));
+    } else if let Some(recipe) = persisted_raw_recipe {
+        lines.push(format!("RAW recipe: {} (saved provenance)", recipe.name()));
+    }
+    Some(lines.join("\n"))
+}
+
+fn bilinear_rgba_sample<F>(x: f32, y: f32, mut sample: F) -> [u8; 4]
+where
+    F: FnMut(i32, i32) -> [u8; 4],
+{
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+
+    let c00 = sample(x0, y0);
+    let c10 = sample(x0 + 1, y0);
+    let c01 = sample(x0, y0 + 1);
+    let c11 = sample(x0 + 1, y0 + 1);
+
+    let weights = [
+        (1.0 - tx) * (1.0 - ty),
+        tx * (1.0 - ty),
+        (1.0 - tx) * ty,
+        tx * ty,
+    ];
+    let colors = [c00, c10, c01, c11];
+    let mut alpha = 0.0_f32;
+    let mut premul = [0.0_f32; 3];
+    for (color, weight) in colors.iter().zip(weights) {
+        let a = color[3] as f32 / 255.0;
+        alpha += a * weight;
+        premul[0] += color[0] as f32 * a * weight;
+        premul[1] += color[1] as f32 * a * weight;
+        premul[2] += color[2] as f32 * a * weight;
+    }
+
+    if alpha <= f32::EPSILON {
+        return [0, 0, 0, 0];
+    }
+
+    [
+        (premul[0] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premul[1] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premul[2] / alpha).round().clamp(0.0, 255.0) as u8,
+        (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Premultiply an sRGB-encoded colour for egui on this app's sRGB (linear-
+/// light) swapchain. egui decodes the texel and blends in linear light, so a
+/// gamma-space premultiply (egui's default) darkens every soft edge — the dark
+/// halo the Clone preview used to show. Premultiplying in linear light makes
+/// the blend come out right.
+pub(in crate::app) fn premultiply_for_linear_target(rgb: [u8; 3], alpha: f32) -> [u8; 4] {
+    let a = alpha.clamp(0.0, 1.0);
+    if a >= 0.999 {
+        return [rgb[0], rgb[1], rgb[2], 255];
+    }
+    let enc = |v: u8| {
+        egui::ecolor::gamma_u8_from_linear_f32(egui::ecolor::linear_f32_from_gamma_u8(v) * a)
+    };
+    [
+        enc(rgb[0]),
+        enc(rgb[1]),
+        enc(rgb[2]),
+        (a * 255.0).round() as u8,
+    ]
+}
+
+impl App {
+    fn build_print_preview_thumbnail(&mut self) -> Option<std::sync::Arc<egui::ColorImage>> {
+        if !self.shell.ui.show_print_dialog {
+            return None;
+        }
+
+        let doc_id = self.docs.active().id.0;
+        let canvas = &self.docs.active().canvas;
+        let layer_revision = canvas.layer_revision;
+        let (w, h) = (canvas.width, canvas.height);
+
+        if self.shell.ui_data_cache.print_preview_doc_id == doc_id
+            && self.shell.ui_data_cache.print_preview_layer_revision == layer_revision
+            && self.shell.ui_data_cache.print_preview_w == w
+            && self.shell.ui_data_cache.print_preview_h == h
+        {
+            return self.shell.ui_data_cache.print_preview_image.clone();
+        }
+
+        if w == 0 || h == 0 {
+            return None;
+        }
+
+        let longest = w.max(h);
+        let scale = (longest as f32 / PRINT_PREVIEW_MAX_DIM as f32).max(1.0);
+        let thumb_w = ((w as f32 / scale).ceil() as u32).max(1);
+        let thumb_h = ((h as f32 / scale).ceil() as u32).max(1);
+        let mut out = vec![255_u8; (thumb_w * thumb_h * 4) as usize];
+
+        // Nearest-sample onto white from one source row per thumbnail row. Small
+        // canvases read the cached flat pixels; past the flat-buffer cap each
+        // sampled row is composited on demand (Viewport Streaming), so the print
+        // dialog previews any size.
+        let mut sample_rows: Box<dyn FnMut(u32) -> Option<Vec<u8>> + '_> =
+            if crate::core::canvas::Canvas::fits_flat_buffer(w, h) {
+                let expected_len = crate::core::canvas::Canvas::checked_rgba_len(w, h)?;
+                let canvas = &mut self.docs.active_mut().canvas;
+                canvas.ensure_pixels();
+                if canvas.pixels_stale || canvas.pixels.len() < expected_len {
+                    return None;
+                }
+                let pixels = &canvas.pixels;
+                Box::new(move |sy: u32| {
+                    let start = ((sy * w) * 4) as usize;
+                    Some(pixels[start..start + (w * 4) as usize].to_vec())
+                })
+            } else {
+                let mut stack = self.docs.active().canvas.layer_stack.clone();
+                Box::new(move |sy: u32| {
+                    let band = stack.flatten_band(w, h, sy, 1);
+                    (band.len() >= (w * 4) as usize).then_some(band)
+                })
+            };
+
+        for ty in 0..thumb_h {
+            let sy = (((ty as f32 + 0.5) * h as f32 / thumb_h as f32).floor() as u32).min(h - 1);
+            let row = sample_rows(sy)?;
+            for tx in 0..thumb_w {
+                let sx =
+                    (((tx as f32 + 0.5) * w as f32 / thumb_w as f32).floor() as u32).min(w - 1);
+                let src = (sx * 4) as usize;
+                let dst = ((ty * thumb_w + tx) * 4) as usize;
+                let a = row[src + 3] as u16;
+                let inv = 255 - a;
+                out[dst] = ((row[src] as u16 * a + 255 * inv) / 255) as u8;
+                out[dst + 1] = ((row[src + 1] as u16 * a + 255 * inv) / 255) as u8;
+                out[dst + 2] = ((row[src + 2] as u16 * a + 255 * inv) / 255) as u8;
+                out[dst + 3] = 255;
+            }
+        }
+        drop(sample_rows);
+
+        let image = std::sync::Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+            [thumb_w as usize, thumb_h as usize],
+            &out,
+        ));
+        self.shell.ui_data_cache.print_preview_doc_id = doc_id;
+        self.shell.ui_data_cache.print_preview_layer_revision = layer_revision;
+        self.shell.ui_data_cache.print_preview_w = w;
+        self.shell.ui_data_cache.print_preview_h = h;
+        self.shell.ui_data_cache.print_preview_image = Some(image.clone());
+        Some(image)
+    }
+
+    /// Clone / Repair preview: exactly what one dab at the cursor would leave
+    /// on the canvas, built on the canvas pixel grid (the stroke copies whole
+    /// source pixels, so no resampling blur or half-pixel shift). Hidden while
+    /// Alt picks a source, while resizing, over panels and during a stroke —
+    /// the canvas itself shows the live result then.
+    fn build_clone_source_thumbnail(
+        &mut self,
+    ) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
+        if !matches!(
+            self.edit.tools.active_id(),
+            crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
+        ) {
+            return None;
+        }
+        if self.edit.input.alt_held
+            || self.edit.input.alt_right_dragging
+            || self.edit.input.was_over_ui
+            || self.edit.input.painting
+        {
+            return None;
+        }
+
+        let zoom = self.edit.view.zoom.max(0.0001);
+        let cx = (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom;
+        let cy = (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom;
+        let (radius, hardness, opacity, sample_merged, (off_x, off_y)) = {
+            let tool = self.edit.tools.clone_like();
+            (
+                (tool.size * 0.5).max(0.5),
+                tool.hardness,
+                tool.opacity.clamp(0.0, 1.0),
+                tool.sample_merged,
+                tool.preview_offset(cx, cy)?,
+            )
+        };
+        let display_lut = self.shell.display_lut.clone();
+
+        let canvas = &mut self.docs.active_mut().canvas;
+        let (w, h) = (canvas.width as i32, canvas.height as i32);
+        if cx < 0.0 || cy < 0.0 || cx >= w as f32 || cy >= h as f32 {
+            return None;
+        }
+        if canvas.layer_stack.layers.is_empty()
+            || !matches!(
+                canvas.channels.view,
+                crate::core::channels::ChannelView::Composite
+            )
+        {
+            return None;
+        }
+        {
+            let layer = canvas.active_layer();
+            if layer.paint_target != crate::core::layer::PaintTarget::Pixels
+                || layer.get_paint_tiles().is_none()
+            {
+                return None;
+            }
+        }
+
+        // Dab footprint in canvas pixels, clipped to the page.
+        let fx0 = ((cx - radius).floor() as i32).max(0);
+        let fy0 = ((cy - radius).floor() as i32).max(0);
+        let fx1 = ((cx + radius).ceil() as i32).min(w);
+        let fy1 = ((cy + radius).ceil() as i32).min(h);
+        if fx1 <= fx0 || fy1 <= fy0 {
+            return None;
+        }
+        // Canvas pixels per texel: 1 (exact) unless the tip is huge or the
+        // view is zoomed out far enough that a texel would be sub-pixel.
+        let max_side = crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE as i32;
+        let span = (fx1 - fx0).max(fy1 - fy0);
+        let texel = ((span + max_side - 1) / max_side)
+            .max((1.0 / zoom).floor() as i32)
+            .max(1);
+        let tw = ((fx1 - fx0 + texel - 1) / texel) as usize;
+        let th = ((fy1 - fy0 + texel - 1) / texel) as usize;
+        let taps: Vec<(i32, i32)> = if texel == 1 {
+            vec![(0, 0)]
+        } else {
+            let (a, b) = (texel / 4, texel * 3 / 4);
+            vec![(a, a), (b, a), (a, b), (b, b)]
+        };
+
+        canvas.ensure_pixels();
+        let canvas = &*canvas;
+        // The display composite, when it is current: the preview then shows
+        // the dab over everything visible, exactly as the canvas will.
+        let flat = (!canvas.pixels_stale && canvas.pixels.len() == (w * h * 4) as usize)
+            .then_some(canvas.pixels.as_slice());
+        let layer = canvas.active_layer();
+        let tiles = layer.get_paint_tiles()?;
+        let (lox, loy) = layer.offset;
+        let layer_px = |x: i32, y: i32| -> [u8; 4] {
+            let (lx, ly) = (x - lox, y - loy);
+            if lx < 0 || ly < 0 {
+                return [0; 4];
+            }
+            let (r, g, b, a) = tiles.get_pixel(lx as u32, ly as u32);
+            [r, g, b, a]
+        };
+        let flat_px = |buf: &[u8], x: i32, y: i32| -> [u8; 4] {
+            if x < 0 || y < 0 || x >= w || y >= h {
+                return [0; 4];
+            }
+            let i = ((y * w + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        let selection = &canvas.selection;
+        let r2 = radius * radius;
+
+        let mut out = vec![0_u8; tw * th * 4];
+        for ty in 0..th {
+            for tx in 0..tw {
+                let bx = fx0 + tx as i32 * texel;
+                let by = fy0 + ty as i32 * texel;
+                // Premultiplied RGB + alpha, averaged over the texel's taps.
+                let mut acc = [0.0_f32; 4];
+                for &(dx, dy) in &taps {
+                    let (px, py) = (bx + dx, by + dy);
+                    if px >= fx1 || py >= fy1 {
+                        continue;
+                    }
+                    let ex = px as f32 + 0.5 - cx;
+                    let ey = py as f32 + 0.5 - cy;
+                    let d2 = ex * ex + ey * ey;
+                    if d2 > r2 {
+                        continue;
+                    }
+                    let mut a =
+                        crate::tools::brush::soft_round_alpha(d2, radius, hardness) * opacity;
+                    if selection.active {
+                        a *= selection.sample(px as u32, py as u32);
+                    }
+                    let (sx, sy) = (px - off_x, py - off_y);
+                    let s = match flat {
+                        Some(buf) if sample_merged => flat_px(buf, sx, sy),
+                        _ => layer_px(sx, sy),
+                    };
+                    let d = match flat {
+                        Some(buf) => flat_px(buf, px, py),
+                        None => layer_px(px, py),
+                    };
+                    // Same source-over as the stroke.
+                    let eff = a * s[3] as f32 / 255.0;
+                    let dw = d[3] as f32 / 255.0 * (1.0 - eff);
+                    let out_a = eff + dw;
+                    if out_a < 0.001 {
+                        continue;
+                    }
+                    for c in 0..3 {
+                        acc[c] += s[c] as f32 * eff + d[c] as f32 * dw;
+                    }
+                    acc[3] += out_a;
+                }
+                if acc[3] <= 0.0 {
+                    continue;
+                }
+                let alpha = acc[3] / taps.len() as f32;
+                let mut rgb = [0_u8; 3];
+                for c in 0..3 {
+                    rgb[c] = (acc[c] / acc[3]).round().clamp(0.0, 255.0) as u8;
+                }
+                // Match the colour-managed canvas (document → monitor / proof).
+                if let Some(lut) = display_lut.as_deref() {
+                    rgb = crate::core::cms::sample_lut_rgb(
+                        lut,
+                        crate::core::cms::PROOF_LUT_SIZE,
+                        rgb,
+                    );
+                }
+                let i = (ty * tw + tx) * 4;
+                out[i..i + 4].copy_from_slice(&premultiply_for_linear_target(rgb, alpha));
+            }
+        }
+
+        Some(std::sync::Arc::new(crate::ui::CloneSourcePreview {
+            width: tw,
+            height: th,
+            pixels: out,
+            canvas_x0: fx0,
+            canvas_y0: fy0,
+            texel: texel as u32,
+        }))
+    }
+
+    /// Smart Repair stroke being painted, shown like a spot-healing stroke: a
+    /// translucent dark wash over exactly the pixels that heal on release.
+    pub(in crate::app) fn build_repair_stroke_overlay(
+        &self,
+    ) -> Option<std::sync::Arc<crate::ui::CloneSourcePreview>> {
+        if self.edit.tools.active_id() != crate::tools::ToolId::Repair {
+            return None;
+        }
+        let tool = self.edit.tools.clone_like();
+        let (bx0, by0, bx1, by1) = tool.smart_stroke_bounds()?;
+        let canvas = &self.docs.active().canvas;
+        let (w, h) = (canvas.width as i32, canvas.height as i32);
+        let (fx0, fy0) = (bx0.max(0), by0.max(0));
+        let (fx1, fy1) = (bx1.min(w), by1.min(h));
+        if fx1 <= fx0 || fy1 <= fy0 {
+            return None;
+        }
+        let zoom = self.edit.view.zoom.max(0.0001);
+        let max_side = crate::ui::CLONE_SOURCE_PREVIEW_MAX_SIZE as i32;
+        let span = (fx1 - fx0).max(fy1 - fy0);
+        let texel = ((span + max_side - 1) / max_side)
+            .max((1.0 / zoom).floor() as i32)
+            .max(1);
+        let tw = ((fx1 - fx0 + texel - 1) / texel) as usize;
+        let th = ((fy1 - fy0 + texel - 1) / texel) as usize;
+        let wash = premultiply_for_linear_target([0, 0, 0], 0.45);
+        let mut out = vec![0_u8; tw * th * 4];
+        for ty in 0..th {
+            let py = (fy0 + ty as i32 * texel + texel / 2).min(fy1 - 1);
+            for tx in 0..tw {
+                let px = (fx0 + tx as i32 * texel + texel / 2).min(fx1 - 1);
+                if tool.smart_stroke_covers(px, py) {
+                    let i = (ty * tw + tx) * 4;
+                    out[i..i + 4].copy_from_slice(&wash);
+                }
+            }
+        }
+        Some(std::sync::Arc::new(crate::ui::CloneSourcePreview {
+            width: tw,
+            height: th,
+            pixels: out,
+            canvas_x0: fx0,
+            canvas_y0: fy0,
+            texel: texel as u32,
+        }))
+    }
+
+    /// Layers-panel thumbnails from a per-layer cache keyed by layer id and a
+    /// content key (tile revisions + size). Only layers whose pixels changed
+    /// are resampled, so selecting a row, toggling an eye, scrubbing opacity or
+    /// painting one layer no longer rebuilds every thumbnail in the document.
+    fn refresh_layer_thumbnails(&mut self) {
+        use std::sync::Arc;
+        let doc = self.docs.active();
+        let layers = &doc.canvas.layer_stack.layers;
+        let cache = &mut self.shell.ui_data_cache;
+        if cache.layer_thumb_cache_doc != doc.id.0 {
+            cache.layer_thumb_cache.clear();
+            cache.layer_mask_thumb_cache.clear();
+            cache.layer_thumb_cache_doc = doc.id.0;
+        }
+        let empty: Arc<Vec<u8>> = Arc::new(Vec::new());
+        let mut thumbs = Vec::with_capacity(layers.len());
+        let mut keys = Vec::with_capacity(layers.len());
+        let mut mask_thumbs = Vec::with_capacity(layers.len());
+        let mut mask_keys = Vec::with_capacity(layers.len());
+        for layer in layers {
+            // Group / adjustment / text rows draw a glyph, not the pixels.
+            let draws_pixels = !matches!(
+                layer.layer_type,
+                crate::core::layer::LayerType::Group
+                    | crate::core::layer::LayerType::Adjustment(_)
+                    | crate::core::layer::LayerType::Text(_)
+            );
+            let (key, thumb) = if draws_pixels {
+                let key = tiles_content_key(&layer.tiles, layer.width, layer.height, 0);
+                cached_thumbnail(&mut cache.layer_thumb_cache, layer.id, key, || {
+                    build_layer_thumbnail_rgba(layer)
+                })
+            } else {
+                (0, empty.clone())
+            };
+            thumbs.push(thumb);
+            keys.push(key);
+
+            // A clipped layer's mask is the managed clip; the panel hides it.
+            let (mask_key, mask_thumb) = match layer.mask.as_ref() {
+                Some(mask) if layer.clip_parent_id.is_none() => {
+                    let key = tiles_content_key(
+                        &mask.tiles,
+                        mask.width,
+                        mask.height,
+                        mask.inverted as u64,
+                    );
+                    cached_thumbnail(&mut cache.layer_mask_thumb_cache, layer.id, key, || {
+                        build_layer_mask_thumbnail_rgba(layer)
+                    })
+                }
+                _ => (0, empty.clone()),
+            };
+            mask_thumbs.push(mask_thumb);
+            mask_keys.push(mask_key);
+        }
+        let live: std::collections::HashSet<u32> = layers.iter().map(|l| l.id).collect();
+        cache.layer_thumb_cache.retain(|id, _| live.contains(id));
+        cache
+            .layer_mask_thumb_cache
+            .retain(|id, _| live.contains(id));
+        cache.layer_thumbnails = Arc::new(thumbs);
+        cache.layer_thumb_keys = Arc::new(keys);
+        cache.layer_mask_thumbnails = Arc::new(mask_thumbs);
+        cache.layer_mask_thumb_keys = Arc::new(mask_keys);
+    }
+
+    pub fn collect_ui_data(&mut self) -> UiData {
+        self.docs.note_current_file_drift();
+        self.poll_printer_settings();
+        self.poll_printer_refresh();
+
+        // Welcome screen: recent files + their thumbnails (uploads ready
+        // thumbnails and requests missing ones on the main egui context). Only
+        // while the welcome screen shows, so the editor path pays nothing.
+        let welcome_recent = if self.shell.ui.show_welcome {
+            self.welcome_recent_view()
+        } else {
+            Vec::new()
+        };
+
+        // Library grid: the chosen folder's images + their thumbnails. Built only
+        // while the Library browser shows, so the editor path pays nothing.
+        let library = if self.shell.ui.show_library {
+            self.library_grid_view()
+        } else {
+            crate::ui::LibraryViewModel::default()
+        };
+
+        let scroll_layers_to_active = self.reveal_active_layer();
+        let (doc_id, layer_rev) = self.refresh_layer_caches();
+        self.refresh_channel_thumbnails(doc_id, layer_rev);
+
+        let brush = self.brush_option_values();
+        let clone_source_thumbnail = self.build_clone_source_thumbnail();
+        let repair_stroke_overlay = self.build_repair_stroke_overlay().or_else(|| {
+            let job = self.jobs.repair_ai.as_ref()?;
+            (self.docs.active().id.0 == job.doc_id)
+                .then(|| job.overlay.clone())
+                .flatten()
+        });
+        let clone_source_marker = self.clone_source_marker();
+        let print_preview_image = self.build_print_preview_thumbnail();
+        self.shell
+            .ui_data_cache
+            .doc_thumbs
+            .poll(&self.win.egui_ctx, &self.docs.documents);
+        let doc_thumbs = std::sync::Arc::new(
+            self.docs
+                .documents
+                .iter()
+                .map(|doc| self.shell.ui_data_cache.doc_thumbs.get(doc.id))
+                .collect::<Vec<_>>(),
+        );
+        // A flowing-text document has no pixel preview (None).
+        let doc_dims = std::sync::Arc::new(
+            self.docs
+                .documents
+                .iter()
+                .map(|doc| (!doc.is_flow_text()).then_some((doc.canvas.width, doc.canvas.height)))
+                .collect::<Vec<_>>(),
+        );
+        let doc_ai_busy = self.doc_ai_busy();
+        let selected_arrow_settings = self.active_arrow_settings();
+        let mut dialogs = self.dialog_view_model();
+        self.fill_retouch_view(&mut dialogs);
+
+        UiData {
+            doc: self.document_view_model(doc_thumbs, doc_dims, doc_ai_busy),
+            layers: self.layer_view_model(scroll_layers_to_active),
+            tool: self.tool_view_model(
+                brush,
+                clone_source_thumbnail,
+                repair_stroke_overlay,
+                clone_source_marker,
+                selected_arrow_settings,
+            ),
+            sel: self.selection_view_model(),
+            develop: self.develop_view_model(),
+            print: self.print_view_model(print_preview_image),
+            dialogs,
+            chrome: self.chrome_view_model(),
+            channels: self.channels_view_model(),
+            #[cfg(feature = "pro")]
+            ai: self.ai_view_model(),
+            welcome: crate::ui::WelcomeViewModel {
+                recent: welcome_recent,
+            },
+            library,
+            settings: self.shell.settings.clone(),
+            keymap: self.shell.keymap.clone(),
+            shortcut_capture: self.shell.ui.shortcut_capture,
+            shortcut_captured: self.shell.ui.shortcut_captured,
+        }
+    }
+
+    /// Expands the folders above a newly active layer. True on the frame the
+    /// Layers panel should scroll to it.
+    fn reveal_active_layer(&mut self) -> bool {
+        // Reveal the active layer in the Layers panel when the selection changes:
+        // expand its collapsed ancestor folders and flag a scroll-to-active for
+        // this frame. Detected centrally so every selection path (panel click,
+        // canvas auto-select, scripted) triggers it. Keyed on the layer id (not
+        // index) so a reorder that shifts indices doesn't spuriously re-reveal.
+        let (doc_id_reveal, active_id, active_idx_reveal) = {
+            let d = self.docs.active();
+            let ls = &d.canvas.layer_stack;
+            (
+                d.id.0,
+                ls.layers.get(ls.active_idx).map(|l| l.id),
+                ls.active_idx,
+            )
+        };
+        let reveal_key = active_id.map(|id| (doc_id_reveal, id));
+        if reveal_key.is_some() && reveal_key != self.shell.ui_data_cache.reveal_last_active {
+            self.shell.ui_data_cache.reveal_last_active = reveal_key;
+            if self
+                .docs
+                .active_mut()
+                .canvas
+                .layer_stack
+                .expand_collapsed_ancestors(active_idx_reveal)
+            {
+                // The row was hidden under a collapsed folder; bump so the
+                // layer-cache block below rebuilds with it expanded/visible.
+                self.docs.active_mut().canvas.layer_revision += 1;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Brings the cached history list and per-layer rows in line with the
+    /// active document. Returns its id and layer revision for the caches that
+    /// key on them.
+    fn refresh_layer_caches(&mut self) -> (u32, u64) {
+        // The command history bumps its own revision on every stack mutation,
+        // so this key can't go stale (the old hand-bumped canvas counter was
+        // missed by several push sites — crop among them — freezing the panel).
+        let history_rev = self.docs.active().canvas.history_revision();
+        let layer_rev = self.docs.active().canvas.layer_revision;
+        let doc_id = self.docs.active().id.0;
+        // While a stroke is live the painted layer's thumbnail follows it; the
+        // per-layer cache keeps every other layer's thumbnail untouched.
+        let force_layer_thumb_refresh = self.docs.active().canvas.pending_stroke.is_some();
+
+        let canvas_gen = self.docs.active().canvas.layer_revision >> 32;
+        if self.shell.ui_data_cache.history_revision != history_rev
+            || self.shell.ui_data_cache.ui_cache_doc_id != doc_id
+            || self.shell.ui_data_cache.history_canvas_gen != canvas_gen
+        {
+            self.shell.ui_data_cache.history_entries =
+                std::sync::Arc::new(self.docs.active().canvas.history_entries());
+            self.shell.ui_data_cache.history_revision = history_rev;
+            self.shell.ui_data_cache.history_canvas_gen = canvas_gen;
+        }
+
+        let layer_meta_stale = self.shell.ui_data_cache.layer_revision != layer_rev
+            || self.shell.ui_data_cache.ui_cache_doc_id != doc_id;
+        if layer_meta_stale || force_layer_thumb_refresh {
+            self.refresh_layer_thumbnails();
+        }
+        if layer_meta_stale {
+            let layers = &self.docs.active().canvas.layer_stack.layers;
+            self.shell.ui_data_cache.layer_names =
+                std::sync::Arc::new(layers.iter().map(|l| l.name.clone()).collect());
+            self.shell.ui_data_cache.layer_visibles =
+                std::sync::Arc::new(layers.iter().map(|l| l.visible).collect());
+            self.shell.ui_data_cache.layer_opacities =
+                std::sync::Arc::new(layers.iter().map(|l| l.opacity).collect());
+            self.shell.ui_data_cache.layer_blend_modes =
+                std::sync::Arc::new(layers.iter().map(|l| l.blend_mode).collect());
+            self.shell.ui_data_cache.layer_locked =
+                std::sync::Arc::new(layers.iter().map(|l| l.locked).collect());
+            // A clipped layer's mask IS the managed clip — hide it from the panel
+            // so it reads as a plain linked layer (Photoshop shows no mask there).
+            self.shell.ui_data_cache.layer_has_mask = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| l.mask.is_some() && l.clip_parent_id.is_none())
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_is_clipped =
+                std::sync::Arc::new(layers.iter().map(|l| l.clip_parent_id.is_some()).collect());
+            {
+                let base_ids: std::collections::HashSet<u32> =
+                    layers.iter().filter_map(|l| l.clip_parent_id).collect();
+                self.shell.ui_data_cache.layer_is_clip_base =
+                    std::sync::Arc::new(layers.iter().map(|l| base_ids.contains(&l.id)).collect());
+            }
+            self.shell.ui_data_cache.layer_mask_enabled = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| l.mask.as_ref().map(|m| m.enabled).unwrap_or(false))
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_paint_targets =
+                std::sync::Arc::new(layers.iter().map(|l| l.paint_target).collect());
+            self.shell.ui_data_cache.layer_mask_linked =
+                std::sync::Arc::new(layers.iter().map(|l| l.mask_linked).collect());
+            self.shell.ui_data_cache.layer_types = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|layer| layer_ui_type(&layer.layer_type).to_string())
+                    .collect(),
+            );
+            // Without the Pro part a retouch layer is a layer like any other.
+            self.shell.ui_data_cache.layer_is_portrait = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| cfg!(feature = "pro") && l.portrait.is_some())
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_is_background =
+                std::sync::Arc::new(layers.iter().map(|l| l.is_background).collect());
+            self.shell.ui_data_cache.layer_lock_alpha =
+                std::sync::Arc::new(layers.iter().map(|l| l.lock_alpha).collect());
+            self.shell.ui_data_cache.layer_selected =
+                std::sync::Arc::new(layers.iter().map(|l| l.selected).collect());
+            let ls = &self.docs.active().canvas.layer_stack;
+            self.shell.ui_data_cache.layer_depths =
+                std::sync::Arc::new((0..ls.layers.len()).map(|i| ls.depth_of(i)).collect());
+            self.shell.ui_data_cache.layer_expanded =
+                std::sync::Arc::new(ls.layers.iter().map(|l| l.expanded).collect());
+            self.shell.ui_data_cache.layer_collapsed_hidden = std::sync::Arc::new(
+                (0..ls.layers.len())
+                    .map(|i| ls.is_collapsed_hidden(i))
+                    .collect(),
+            );
+            self.shell.ui_data_cache.layer_revision = layer_rev;
+            self.shell.ui_data_cache.ui_cache_doc_id = doc_id;
+        }
+
+        // The panel draws the active row as selected; make the model agree.
+        self.docs
+            .active_mut()
+            .canvas
+            .layer_stack
+            .normalize_selection();
+        // Selection is lightweight UI state, not layer image data. Keep it in
+        // lockstep with the model every frame instead of relying exclusively on
+        // `layer_revision`: several undoable/model operations restore or adjust
+        // `Layer::selected` without changing pixels. A stale cache could leave
+        // two rows highlighted while Ctrl+E saw a different real selection.
+        let selection_cache_is_current = {
+            let layers = &self.docs.active().canvas.layer_stack.layers;
+            let cached = self.shell.ui_data_cache.layer_selected.as_ref();
+            cached.len() == layers.len()
+                && cached
+                    .iter()
+                    .zip(layers.iter())
+                    .all(|(selected, layer)| *selected == layer.selected)
+        };
+        if !selection_cache_is_current {
+            self.shell.ui_data_cache.layer_selected = std::sync::Arc::new(
+                self.docs
+                    .active()
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .map(|layer| layer.selected)
+                    .collect(),
+            );
+        }
+        (doc_id, layer_rev)
+    }
+
+    fn refresh_channel_thumbnails(&mut self, doc_id: u32, layer_rev: u64) {
+        // Channels panel thumbnails. The colour plates sample the flat
+        // composite buffer, which may need a full CPU flatten — so they only
+        // rebuild while the panel is open, at most every few hundred ms, and
+        // never during an in-flight stroke (revision is bumped on commit).
+        // Docs past the flat-buffer cap get no colour plates (rows still work).
+        if self.shell.ui.show_channels_panel {
+            const CHANNEL_THUMB_MIN_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(600);
+            let doc_changed = self.shell.ui_data_cache.channel_thumbs_doc_id != doc_id;
+            let needs_color =
+                doc_changed || self.shell.ui_data_cache.channel_thumbs_layer_revision != layer_rev;
+            let throttled = !doc_changed
+                && self
+                    .shell
+                    .ui_data_cache
+                    .channel_thumbs_built_at
+                    .is_some_and(|t| t.elapsed() < CHANNEL_THUMB_MIN_INTERVAL);
+            if needs_color && !throttled {
+                let canvas = &mut self.docs.active_mut().canvas;
+                canvas.ensure_pixels();
+                let (w, h) = (canvas.width, canvas.height);
+                if !canvas.pixels_stale
+                    && crate::core::canvas::Canvas::checked_rgba_len(w, h)
+                        .is_some_and(|len| canvas.pixels.len() >= len)
+                {
+                    self.shell.ui_data_cache.channel_thumbnails =
+                        std::sync::Arc::new(if canvas.is_cmyk() {
+                            build_channel_thumbnails_cmyk(canvas)
+                        } else {
+                            build_channel_thumbnails_rgba(&canvas.pixels, w, h)
+                        });
+                } else if doc_changed {
+                    self.shell.ui_data_cache.channel_thumbnails = std::sync::Arc::new(Vec::new());
+                }
+                self.shell.ui_data_cache.channel_thumbs_layer_revision = layer_rev;
+                self.shell.ui_data_cache.channel_thumbs_built_at = Some(std::time::Instant::now());
+            }
+
+            let channels = &self.docs.active().canvas.channels;
+            let alpha_key = channels.alpha.iter().enumerate().fold(0u64, |acc, (i, a)| {
+                acc.rotate_left(9) ^ ((a.id as u64) << 24) ^ a.revision ^ (i as u64)
+            }) ^ ((channels.alpha.len() as u64) << 48);
+            if doc_changed || self.shell.ui_data_cache.channel_thumbs_alpha_key != alpha_key {
+                self.shell.ui_data_cache.alpha_thumbnails = std::sync::Arc::new(
+                    channels
+                        .alpha
+                        .iter()
+                        .map(build_alpha_thumbnail_rgba)
+                        .collect(),
+                );
+                self.shell.ui_data_cache.alpha_channel_names = std::sync::Arc::new(
+                    channels
+                        .alpha
+                        .iter()
+                        .map(|a| (a.id, a.name.clone()))
+                        .collect(),
+                );
+                self.shell.ui_data_cache.channel_thumbs_alpha_key = alpha_key;
+            }
+            self.shell.ui_data_cache.channel_thumbs_doc_id = doc_id;
+        }
+    }
+
+    /// Size, hardness, opacity, spacing, flow, smoothing and preset of the
+    /// Eraser while it is active, of the Brush otherwise.
+    fn brush_option_values(&self) -> (f32, f32, f32, f32, f32, f32, usize) {
+        if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
+            let e = self.edit.tools.eraser();
+            (
+                e.size,
+                e.hardness,
+                e.opacity,
+                e.spacing,
+                e.flow,
+                e.smoothing,
+                e.preset_idx,
+            )
+        } else {
+            let b = self.edit.tools.brush();
+            (
+                b.settings.size,
+                b.settings.hardness,
+                b.settings.opacity,
+                b.settings.spacing,
+                b.settings.flow,
+                b.settings.smoothing,
+                b.preset_idx,
+            )
+        }
+    }
+
+    /// Canvas point being sampled during a Clone / Repair stroke.
+    fn clone_source_marker(&self) -> Option<(f32, f32)> {
+        if matches!(
+            self.edit.tools.active_id(),
+            crate::tools::ToolId::Clone | crate::tools::ToolId::Repair
+        ) && self.edit.input.painting
+        {
+            let zoom = self.edit.view.zoom.max(0.0001);
+            self.edit.tools.clone_like().stroke_source_center(
+                (self.edit.input.mouse_x - self.edit.view.offset_x) / zoom,
+                (self.edit.input.mouse_y - self.edit.view.offset_y) / zoom,
+            )
+        } else {
+            None
+        }
+    }
+
+    /// The active document as the UI sees it, plus the tab strip.
+    fn document_view_model(
+        &self,
+        doc_thumbs: std::sync::Arc<Vec<Option<(egui::TextureId, egui::Vec2)>>>,
+        doc_dims: std::sync::Arc<Vec<Option<(u32, u32)>>>,
+        doc_ai_busy: std::sync::Arc<Vec<Option<crate::ui::DocAiBusy>>>,
+    ) -> DocumentViewModel {
+        DocumentViewModel {
+            id: self.docs.active().id,
+            kind: self.docs.active().kind,
+            flow_text: self
+                .docs
+                .active()
+                .flow_text
+                .as_ref()
+                .and_then(|text| text.document_arc().map(|document| (text, document)))
+                .map(|(text, document)| crate::ui::FlowTextViewModel {
+                    document,
+                    revision: text.revision(),
+                    active_page: text.active_page(),
+                    page_count: text.page_count(),
+                }),
+            canvas_w: self.docs.active().canvas.width,
+            canvas_h: self.docs.active().canvas.height,
+            canvas_dpi: self.docs.active().canvas.metadata.resolution_ppi,
+            canvas_unit: self.shell.canvas_unit,
+            doc_profile_name: {
+                let p = &self.docs.active().canvas.icc_profile;
+                if p.name.is_empty() {
+                    "sRGB IEC61966-2.1".to_string()
+                } else {
+                    p.name.clone()
+                }
+            },
+            canvas_bit_depth: match self.docs.active().canvas.bit_depth {
+                crate::core::canvas::BitDepth::Sixteen => 16,
+                _ => 8,
+            },
+            is_cmyk: self.docs.active().canvas.is_cmyk(),
+            cmyk_profile_name: match &self.docs.active().canvas.color_mode {
+                crate::core::canvas::ColorMode::Cmyk(p) => p.display_name().to_string(),
+                crate::core::canvas::ColorMode::Rgb => String::new(),
+            },
+            export_embed_icc: self.shell.ui.export_embed_icc,
+            export_resize_enabled: self.shell.ui.export_resize_enabled,
+            export_resize_long_edge: self.shell.ui.export_resize_long_edge,
+            export_output_sharpen: self.shell.ui.export_output_sharpen,
+            export_pdf_marks: self.shell.ui.export_pdf_marks,
+            swatches: std::sync::Arc::new(self.docs.active().canvas.metadata.swatches.clone()),
+            zoom: self.edit.view.zoom,
+            offset_x: self.edit.view.offset_x,
+            offset_y: self.edit.view.offset_y,
+            undo_count: self.docs.active().canvas.undo_count(),
+            redo_count: self.docs.active().canvas.redo_count(),
+            history_entries: self.shell.ui_data_cache.history_entries.clone(),
+            current_file: self
+                .docs
+                .current_file
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string()),
+            is_modified: self.is_modified() || {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_active_is_dirty()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            },
+            has_doc: !self.has_only_welcome_placeholder(),
+            doc_ids: std::sync::Arc::new(self.docs.documents.iter().map(|doc| doc.id).collect()),
+            active_artboard: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .map(|doc| {
+                    doc.flow_text.as_ref().map_or_else(
+                        || doc.active_artboard.min(doc.page_count().saturating_sub(1)),
+                        |text| text.active_page(),
+                    )
+                })
+                .unwrap_or(0),
+            page_count: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .map_or(1, |doc| doc.page_count()),
+            page_names: std::sync::Arc::new(
+                self.docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .map_or_else(|| vec!["Trang 1".to_string()], |doc| doc.page_names()),
+            ),
+            has_master: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .is_some_and(|doc| doc.has_master()),
+            editing_master: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .is_some_and(|doc| doc.editing_master),
+            active_uses_master: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .is_some_and(|doc| doc.has_master() && doc.active_master_backdrop().is_some()),
+            page_uses_master: std::sync::Arc::new(
+                self.docs
+                    .documents
+                    .get(self.docs.active_doc_idx)
+                    .filter(|doc| doc.has_master())
+                    .map(|doc| {
+                        (0..doc.page_count())
+                            .map(|i| doc.master_backdrop_for(i).is_some())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ),
+            pdf_nav: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .and_then(|doc| {
+                    let page = doc.pdf_page.as_ref()?;
+                    let (index, count) =
+                        doc.pdf_document
+                            .as_ref()
+                            .map_or((page.index, page.count), |pdf| {
+                                (
+                                    pdf.selected_pages
+                                        .iter()
+                                        .position(|&index| index == pdf.active_page)
+                                        .unwrap_or(0),
+                                    pdf.selected_pages.len(),
+                                )
+                            });
+                    let (global_clear_count, global_clear_redo_count) =
+                        doc.pdf_document.as_ref().map_or((0, 0), |pdf| {
+                            (pdf.global_edits.len(), pdf.global_edits_redo.len())
+                        });
+                    Some(crate::ui::PdfNavData {
+                        index,
+                        count,
+                        page_names: std::sync::Arc::new(
+                            doc.pdf_document
+                                .as_ref()
+                                .map_or_else(Vec::new, |pdf| pdf.display_names()),
+                        ),
+                        global_clear_count,
+                        global_clear_redo_count,
+                        source_name: page
+                            .source
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("PDF")
+                            .to_string(),
+                    })
+                }),
+            doc_count: self.docs.documents.len(),
+            active_doc_idx: self.docs.active_doc_idx,
+            doc_titles: std::sync::Arc::new(crate::core::document::disambiguated_tab_titles(
+                &self.docs.documents,
+            )),
+            doc_modified: std::sync::Arc::new(
+                self.docs
+                    .documents
+                    .iter()
+                    .map(|d| {
+                        d.is_modified() || {
+                            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                            {
+                                self.document_webview_document_is_dirty(d.id)
+                            }
+                            #[cfg(not(all(
+                                target_os = "windows",
+                                feature = "canvas-editor-webview"
+                            )))]
+                            {
+                                false
+                            }
+                        }
+                    })
+                    .collect(),
+            ),
+            doc_ai_busy,
+            doc_thumbs,
+            doc_dims,
+        }
+    }
+
+    /// The layer panel, from the rows `refresh_layer_caches` keeps.
+    fn layer_view_model(&self, scroll_layers_to_active: bool) -> LayerViewModel {
+        LayerViewModel {
+            layer_count: self.docs.active().canvas.layer_stack.layers.len(),
+            active_layer_idx: self.docs.active().canvas.layer_stack.active_idx,
+            layer_names: self.shell.ui_data_cache.layer_names.clone(),
+            layer_visibles: self.shell.ui_data_cache.layer_visibles.clone(),
+            layer_opacities: self.shell.ui_data_cache.layer_opacities.clone(),
+            layer_blend_modes: self.shell.ui_data_cache.layer_blend_modes.clone(),
+            layer_locked: self.shell.ui_data_cache.layer_locked.clone(),
+            layer_has_mask: self.shell.ui_data_cache.layer_has_mask.clone(),
+            layer_mask_enabled: self.shell.ui_data_cache.layer_mask_enabled.clone(),
+            layer_paint_targets: self.shell.ui_data_cache.layer_paint_targets.clone(),
+            layer_mask_linked: self.shell.ui_data_cache.layer_mask_linked.clone(),
+            layer_types: self.shell.ui_data_cache.layer_types.clone(),
+            layer_is_portrait: self.shell.ui_data_cache.layer_is_portrait.clone(),
+            layer_is_background: self.shell.ui_data_cache.layer_is_background.clone(),
+            layer_lock_alpha: self.shell.ui_data_cache.layer_lock_alpha.clone(),
+            layer_selected: self.shell.ui_data_cache.layer_selected.clone(),
+            layer_is_clipped: self.shell.ui_data_cache.layer_is_clipped.clone(),
+            layer_is_clip_base: self.shell.ui_data_cache.layer_is_clip_base.clone(),
+            powerclip_editing: self.powerclip_editing_contents(),
+            layer_thumbnails: self.shell.ui_data_cache.layer_thumbnails.clone(),
+            layer_mask_thumbnails: self.shell.ui_data_cache.layer_mask_thumbnails.clone(),
+            layer_thumb_keys: self.shell.ui_data_cache.layer_thumb_keys.clone(),
+            layer_mask_thumb_keys: self.shell.ui_data_cache.layer_mask_thumb_keys.clone(),
+            layer_depths: self.shell.ui_data_cache.layer_depths.clone(),
+            layer_expanded: self.shell.ui_data_cache.layer_expanded.clone(),
+            layer_collapsed_hidden: self.shell.ui_data_cache.layer_collapsed_hidden.clone(),
+            scroll_layers_to_active,
+        }
+    }
+
+    /// The options bar and on-canvas overlays of every tool.
+    fn tool_view_model(
+        &mut self,
+        brush: (f32, f32, f32, f32, f32, f32, usize),
+        clone_source_thumbnail: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
+        repair_stroke_overlay: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
+        clone_source_marker: Option<(f32, f32)>,
+        selected_arrow_settings: Option<(f32, u8, u8)>,
+    ) -> ToolViewModel {
+        let (
+            brush_size,
+            brush_hardness,
+            brush_opacity,
+            brush_spacing,
+            brush_flow,
+            brush_smoothing,
+            brush_preset_idx,
+        ) = brush;
+        ToolViewModel {
+            active_tool: self.edit.tools.active_id(),
+            tool_group_preferences: std::sync::Arc::new(self.edit.tools.group_preferences()),
+            text_editing: self.edit.text_edit.is_some(),
+            text_buffer: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.buffer.clone())
+                .unwrap_or_default(),
+            text_overlay_pos: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| {
+                    (
+                        s.origin.0 as f32 * self.edit.view.zoom + self.edit.view.offset_x,
+                        s.origin.1 as f32 * self.edit.view.zoom + self.edit.view.offset_y,
+                    )
+                })
+                .unwrap_or((0.0, 0.0)),
+            text_overlay_origin: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.origin)
+                .unwrap_or((0, 0)),
+            text_font_px: self.edit.text_font_px,
+            text_font_family: self.edit.text_font_family.clone(),
+            text_color: self.edit.text_color,
+            text_align: self.edit.text_align,
+            text_bold: self.edit.text_bold,
+            text_italic: self.edit.text_italic,
+            text_underline: self.edit.text_underline,
+            text_line_height: self.edit.text_line_height,
+            text_tracking_px: self.edit.text_tracking_px,
+            text_opacity: self.edit.text_opacity,
+            text_rotation_deg: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.rotation_deg)
+                .unwrap_or(0.0),
+            text_stretch_x: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.stretch_x)
+                .unwrap_or(1.0),
+            text_flip_x: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.flip_x)
+                .unwrap_or(false),
+            text_flip_y: self
+                .edit
+                .text_edit
+                .as_ref()
+                .map(|s| s.flip_y)
+                .unwrap_or(false),
+            text_glyph_styles: std::sync::Arc::new(
+                self.edit
+                    .text_edit
+                    .as_ref()
+                    .map(|s| s.glyph_styles.clone())
+                    .unwrap_or_default(),
+            ),
+            text_selection: self
+                .edit
+                .text_edit
+                .as_ref()
+                .and_then(|s| s.selection.as_ref().cloned()),
+            text_caret: self.edit.text_edit.as_ref().and_then(|s| s.caret),
+            text_focus_pending: self.edit.text_focus_pending,
+            text_font_available: crate::core::text::font_available(),
+            text_font_registered: self
+                .edit
+                .text_fonts_registered
+                .contains(&self.edit.text_font_family.egui_family_name()),
+            brush_size,
+            brush_hardness,
+            brush_opacity,
+            brush_spacing,
+            brush_smoothing,
+            brush_flow,
+            brush_preset_idx,
+            brush_popup_pos: self.edit.brush_popup_pos,
+            brush_color: self.edit.tools.brush().settings.color,
+            brush_ink: self.ink_split_of(self.edit.tools.brush().settings.color),
+            bg_color: self.edit.bg_color,
+            crop_mode: self.edit.tools.crop().mode as u8,
+            crop_ratio_w: self.edit.tools.crop().ratio_w,
+            crop_ratio_h: self.edit.tools.crop().ratio_h,
+            crop_overlay: {
+                use crate::tools::crop::CropOverlay;
+                match self.edit.tools.crop().overlay {
+                    CropOverlay::None => 0,
+                    CropOverlay::RuleOfThirds => 1,
+                    CropOverlay::Grid => 2,
+                    CropOverlay::GoldenRatio => 3,
+                    _ => 0,
+                }
+            },
+            crop_unit: self.edit.tools.crop().unit as u8,
+            crop_dpi: self.edit.tools.crop().dpi,
+            crop_w_display: {
+                let c = self.edit.tools.crop();
+                if c.mode == crate::tools::crop::CropMode::FixedSize {
+                    c.fixed_w
+                } else if c.has_selection() {
+                    let w_px = (c.crop_x1 - c.crop_x0).abs();
+                    crate::core::units::from_pixels(
+                        w_px,
+                        c.unit,
+                        c.dpi,
+                        self.docs.active().canvas.width as f32,
+                    )
+                } else {
+                    0.0
+                }
+            },
+            crop_h_display: {
+                let c = self.edit.tools.crop();
+                if c.mode == crate::tools::crop::CropMode::FixedSize {
+                    c.fixed_h
+                } else if c.has_selection() {
+                    let h_px = (c.crop_y1 - c.crop_y0).abs();
+                    crate::core::units::from_pixels(
+                        h_px,
+                        c.unit,
+                        c.dpi,
+                        self.docs.active().canvas.height as f32,
+                    )
+                } else {
+                    0.0
+                }
+            },
+            fill_tolerance: self.edit.tools.fill().tolerance,
+            fill_contiguous: self.edit.tools.fill().contiguous,
+            fill_anti_alias: self.edit.tools.fill().anti_alias,
+            fill_all_layers: self.edit.tools.fill().sample_merged,
+            gradient_mode: self.active_gradient_mode(),
+            gradient_type: self.active_gradient_ui_type(),
+            gradient_opacity: self.edit.tools.gradient().opacity,
+            gradient_reverse: self.edit.tools.gradient().reverse,
+            gradient_dither: self.edit.tools.gradient().dither,
+            gradient_stops: self.active_gradient_ui_stops(),
+            show_gradient_editor: self.shell.ui.show_gradient_editor,
+            eyedropper_sample: self.edit.tools.eyedropper().sample_size as u8,
+            eyedropper_sample_merged: self.edit.tools.eyedropper().sample_merged,
+            eyedropper_picked_color: self.edit.tools.eyedropper().picked_color,
+            eyedropper_picked_colors: self.edit.tools.eyedropper().picked_colors.clone(),
+            move_auto_select: self.edit.tools.move_tool().auto_select,
+            move_show_transform: self.edit.tools.move_tool().show_transform,
+            clone_size: self.edit.tools.clone_like().size,
+            clone_hardness: self.edit.tools.clone_like().hardness,
+            clone_opacity: self.edit.tools.clone_like().opacity,
+            clone_spacing: self.edit.tools.clone_like().spacing,
+            clone_aligned: self.edit.tools.clone_like().aligned,
+            clone_sample_merged: self.edit.tools.clone_like().sample_merged,
+            clone_smart_fill: self.edit.tools.clone_like().smart_fill,
+            clone_source_thumbnail,
+            clone_source_marker,
+            repair_stroke_overlay,
+            smudge_size: self.edit.tools.smudge().size,
+            smudge_hardness: self.edit.tools.smudge().hardness,
+            smudge_strength: self.edit.tools.smudge().strength,
+            smudge_finger_painting: self.edit.tools.smudge().finger_painting,
+            dodge_size: self.edit.tools.dodge_burn().size,
+            dodge_hardness: self.edit.tools.dodge_burn().hardness,
+            dodge_exposure: self.edit.tools.dodge_burn().exposure,
+            dodge_range: self.edit.tools.dodge_burn().range.to_u8(),
+            dodge_protect_tones: self.edit.tools.dodge_burn().protect_tones,
+            patch_mode: self.edit.tools.patch().mode.to_u8(),
+            transform_interpolation: self.shell.ui.transform_interpolation,
+            wand_brush_size: self.edit.tools.wand().brush_size,
+            wand_contiguous: self.edit.tools.wand().contiguous,
+            wand_anti_alias: self.edit.tools.wand().anti_alias,
+            wand_sample_merged: self.edit.tools.wand().sample_merged,
+            smart_select_mode: self.edit.tools.wand().mode,
+            smart_select_auto_enhance: self.edit.tools.wand().auto_enhance,
+            pen_mode: self.edit.tools.pen().mode.to_u8(),
+            pen_stroke_width: self.edit.tools.pen().stroke_width,
+            vector_brush_width: self.edit.tools.vector_brush().width,
+            vector_brush_color: self.edit.fg_color,
+            vector_brush_smoothing: self.edit.tools.vector_brush().smoothing,
+            vector_brush_pressure: self.edit.tools.vector_brush().pressure,
+            vector_brush_velocity: self.edit.tools.vector_brush().velocity,
+            vector_brush_path: if self.edit.tools.active_id() == crate::tools::ToolId::VectorBrush {
+                self.edit.tools.vector_brush().preview_points()
+            } else {
+                Vec::new()
+            },
+            vector_brush_can_expand: self.active_brush_layer_id().is_some(),
+            arrow_width: selected_arrow_settings
+                .map_or(self.edit.tools.arrow().width, |settings| settings.0),
+            arrow_end: selected_arrow_settings
+                .map_or(self.edit.tools.arrow().end_arrow, |settings| settings.1),
+            arrow_route: selected_arrow_settings
+                .map_or(self.edit.tools.arrow().route, |settings| settings.2),
+            arrow_mode: self.edit.tools.arrow().mode,
+            arrow_tree_count: self.edit.tools.arrow().tree_count,
+            // Single / branch preview: one polyline (the UI adds the arrowhead).
+            // Tree preview lives in arrow_preview_contours instead.
+            arrow_path: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow
+                && !self.edit.tools.arrow().is_tree()
+            {
+                self.edit
+                    .tools
+                    .arrow()
+                    .preview_path()
+                    .and_then(|path| path.contours.into_iter().next())
+                    .map(|contour| {
+                        contour
+                            .nodes
+                            .into_iter()
+                            .map(|node| (node.anchor.x, node.anchor.y))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            arrow_preview_contours: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow
+                && self.edit.tools.arrow().is_tree()
+            {
+                self.edit
+                    .tools
+                    .arrow()
+                    .preview_path()
+                    .map(|path| {
+                        path.contours
+                            .into_iter()
+                            .map(|c| {
+                                c.nodes
+                                    .into_iter()
+                                    .map(|n| (n.anchor.x, n.anchor.y))
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+            arrow_snap_marker: if self.edit.tools.active_id() == crate::tools::ToolId::Arrow {
+                self.edit.tools.arrow().snap_marker().map(|p| (p.x, p.y))
+            } else {
+                None
+            },
+            shape_kind: self.edit.tools.shape().kind.to_u8(),
+            shape_fill: self.edit.tools.shape().fill,
+            shape_fill_color: self.edit.tools.shape().fill_color,
+            shape_stroke_width: self.edit.tools.shape().stroke_width,
+            shape_stroke_color: self.edit.tools.shape().stroke_color,
+            shape_corner_radius: self.edit.tools.shape().corner_radius,
+            shape_corner_type: self.edit.tools.shape().corner_type.to_u8(),
+            shape_sides: self.edit.tools.shape().sides,
+            shape_star_inner: self.edit.tools.shape().star_inner,
+            shape_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Shape {
+                self.edit.tools.shape().preview_rect()
+            } else {
+                None
+            },
+            // Editing handles for the active Shape layer, hidden while a new
+            // shape is being rubber-banded.
+            shape_overlay: if self.edit.tools.active_id() == crate::tools::ToolId::Shape
+                && !self.edit.tools.shape().is_dragging()
+            {
+                self.active_shape_overlay()
+                    .map(|(span, kind, radius, handles)| crate::ui::ShapeOverlay {
+                        span,
+                        kind,
+                        radius,
+                        handles,
+                        dragging: self.shape_drag_active() || self.shape_style_scrub_active(),
+                    })
+            } else {
+                None
+            },
+            path_display: self.active_path_display(),
+            // On-canvas node editing overlay for the active Path (Node tool).
+            node_overlay: self.active_node_overlay(),
+            path_gradient_overlay: self.active_path_gradient_overlay(),
+            // Fill/Outline of the active Path (options bar under Move / Node).
+            // Kept available outside Move/Node as well: the document Palette
+            // applies Fill/Outline to the selected editable Path.
+            path_style: self.active_path_style_vm(),
+            gradient_preview: if self.edit.tools.active_id() == crate::tools::ToolId::Gradient {
+                self.edit.tools.gradient().preview_line()
+            } else {
+                None
+            },
+            crop_rect: {
+                let c = self.edit.tools.crop();
+                if self.edit.tools.active_id() == crate::tools::ToolId::Crop && c.has_selection() {
+                    Some([c.crop_x0, c.crop_y0, c.crop_x1, c.crop_y1])
+                } else {
+                    None
+                }
+            },
+            crop_rotation: 0.0,
+            crop_image_moved: self.edit.tools.active_id() == crate::tools::ToolId::Crop
+                && self.edit.tools.crop().has_selection()
+                && self
+                    .win
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|gpu| gpu.crop_mask_active()),
+            persp_crop_quad: if self.edit.tools.active_id() == crate::tools::ToolId::PerspectiveCrop
+                && self.edit.tools.perspective_crop().has_quad()
+            {
+                Some(self.edit.tools.perspective_crop().corners)
+            } else {
+                None
+            },
+            persp_crop_preview: if self.edit.tools.active_id()
+                == crate::tools::ToolId::PerspectiveCrop
+                && self.edit.tools.perspective_crop().is_placing()
+            {
+                if let Some(rect) = self.edit.tools.perspective_crop().sweep_preview() {
+                    // Rubber-band rectangle being swept → preview it as a full quad.
+                    rect.to_vec()
+                } else {
+                    let mut pts = self.edit.tools.perspective_crop().placing_points().to_vec();
+                    if !pts.is_empty() {
+                        // Append the live cursor as the tentative next corner so the
+                        // rubber-band line / forming grid track the pointer in real time.
+                        let ev = self.tool_event();
+                        pts.push((ev.canvas_x, ev.canvas_y));
+                    }
+                    pts
+                }
+            } else {
+                Vec::new()
+            },
+            persp_w_display: {
+                let pc = self.edit.tools.perspective_crop();
+                let cw = self.docs.active().canvas.width as f32;
+                let ch = self.docs.active().canvas.height as f32;
+                pc.display_values(cw, ch).0
+            },
+            persp_h_display: {
+                let pc = self.edit.tools.perspective_crop();
+                let cw = self.docs.active().canvas.width as f32;
+                let ch = self.docs.active().canvas.height as f32;
+                pc.display_values(cw, ch).1
+            },
+            persp_unit: self.edit.tools.perspective_crop().unit,
+            persp_dpi: self.edit.tools.perspective_crop().dpi,
+            persp_size_manual: self.edit.tools.perspective_crop().manual_size.is_some(),
+            persp_has_quad: self.edit.tools.perspective_crop().has_quad(),
+            pen_path: if self.edit.tools.active_id() == crate::tools::ToolId::Pen {
+                // Only the placed anchors — no rubber-band segment to the cursor.
+                self.edit.tools.pen().preview_points()
+            } else {
+                Vec::new()
+            },
+            pen_anchors: if self.edit.tools.active_id() == crate::tools::ToolId::Pen {
+                self.edit
+                    .tools
+                    .pen()
+                    .anchors()
+                    .iter()
+                    .map(|a| a.pt)
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            pen_handles: if self.edit.tools.active_id() == crate::tools::ToolId::Pen {
+                self.edit.tools.pen().handle_segments()
+            } else {
+                Vec::new()
+            },
+            pen_closed: self.edit.tools.active_id() == crate::tools::ToolId::Pen
+                && self.edit.tools.pen().is_closed(),
+            crop_cursor_hint: self.crop_cursor_hint(),
+            transform_overlay: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| {
+                    let corners = ts.corners();
+                    let handles = ts.handle_positions();
+                    let center = ts.transform_point(ts.pivot_cx, ts.pivot_cy);
+                    TransformOverlayData {
+                        corners,
+                        handles,
+                        center,
+                        // Free Transform has no relocatable pivot: marker on centre.
+                        pivot: center,
+                        pivot_snap_label: None,
+                        alternate_handles: false,
+                    }
+                })
+                // No modal Free Transform: the Move tool's active Path shows
+                // the same oriented box for on-canvas scale/rotate.
+                .or_else(|| {
+                    self.active_path_transform_box()
+                        .map(|b| TransformOverlayData {
+                            corners: b.corners,
+                            handles: b.handles,
+                            center: b.center,
+                            pivot: b.pivot,
+                            // Snap label shown only while the pivot is dragged.
+                            pivot_snap_label: if self.edit.path_pivot_dragging {
+                                self.edit.path_pivot_snap
+                            } else {
+                                None
+                            },
+                            alternate_handles: self.path_alternate_mode(),
+                        })
+                })
+                .or_else(|| {
+                    self.move_selection_transform_box()
+                        .map(|(corners, handles, center)| TransformOverlayData {
+                            corners,
+                            handles,
+                            center,
+                            pivot: center,
+                            pivot_snap_label: None,
+                            alternate_handles: false,
+                        })
+                }),
+            transform_scale_x: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| ts.scale_x)
+                .unwrap_or(1.0),
+            transform_scale_y: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| ts.scale_y)
+                .unwrap_or(1.0),
+            transform_angle: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| ts.angle_deg)
+                .unwrap_or(0.0),
+            transform_tx: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| ts.translate_x)
+                .unwrap_or(0.0),
+            transform_ty: self
+                .edit
+                .transform_state
+                .as_ref()
+                .map(|ts| ts.translate_y)
+                .unwrap_or(0.0),
+            transform_cursor_hint: self.transform_cursor_hint(),
+            transform_ctx_menu_pos: self.edit.transform_ctx_menu_pos,
+            object_ctx_menu_pos: self.edit.object_ctx_menu_pos,
+            selected_rect_corner_type: self.active_rectangle_corner_type(),
+        }
+    }
+
+    /// Selection: mode, previews, Select Subject and the Refine panel.
+    fn selection_view_model(&self) -> SelectionViewModel {
+        SelectionViewModel {
+            selection_mode: self.edit.selection_mode,
+            lasso_preview: if self.edit.tools.active_id() == crate::tools::ToolId::PolygonLasso {
+                let mut pts = self.edit.tools.polygon_lasso().preview_points().to_vec();
+                if !pts.is_empty() {
+                    let ev = self.tool_event();
+                    pts.push((ev.canvas_x, ev.canvas_y));
+                }
+                pts
+            } else if self.edit.tools.active_id() == crate::tools::ToolId::Patch {
+                self.edit.tools.patch().preview_points().to_vec()
+            } else {
+                self.edit.tools.lasso().preview_points().to_vec()
+            },
+            rect_sel_preview: self
+                .edit
+                .tools
+                .move_tool()
+                .preview_rect()
+                .or_else(|| self.edit.tools.selection_rect().preview_rect()),
+            ellipse_sel_preview: self.edit.tools.selection_ellipse().preview_ellipse(),
+            selection_ctx_menu_pos: self.edit.selection_ctx_menu_pos,
+            has_selection: self.docs.active().canvas.selection.active,
+            select_subject_busy: self.jobs.select_subject.is_busy(),
+            select_subject_status_msg: self.jobs.select_subject.status_text(),
+            select_subject_model: self.jobs.select_subject.selected_model(),
+            yolo_people_only: self.jobs.select_subject.people_only(),
+            show_refine_panel: self.edit.show_refine_panel,
+            refine_params: self.refine_params(),
+            refine_can_undo: self
+                .docs
+                .active()
+                .canvas
+                .refine
+                .as_ref()
+                .is_some_and(|s| s.can_undo()),
+            refine_can_redo: self
+                .docs
+                .active()
+                .canvas
+                .refine
+                .as_ref()
+                .is_some_and(|s| s.can_redo()),
+            refine_view_opacity: self.edit.refine_view_opacity,
+            refine_show_original: self.edit.refine_show_original,
+            refine_decontaminate: self.edit.refine_decontaminate,
+            refine_decontaminate_amount: self.edit.refine_decontaminate_amount,
+            refine_brush_size: self.edit.tools.refine_brush().size,
+            refine_brush_hardness: self.edit.tools.refine_brush().hardness,
+            refine_brush_mode: self.edit.tools.refine_brush().mode,
+            refine_view_mode: self.edit.refine_view_mode,
+            refine_overlay_color: self.edit.refine_overlay_color,
+            show_refine_color_dialog: self.shell.ui.show_refine_color_dialog,
+            refine_color_dialog_color: self.shell.ui.refine_color_dialog_color,
+            refine_color_dialog_original: self.shell.ui.refine_color_dialog_original,
+            refine_color_dialog_live_preview: self.shell.ui.refine_color_dialog_live_preview,
+            refine_color_dialog_center_next: self.shell.ui.refine_color_dialog_center_next,
+            refine_output_mode: self.edit.refine_output_mode,
+            refine_overlay_tex: self.edit.refine_overlay_tex.as_ref().map(|t| t.id()),
+        }
+    }
+
+    /// The Develop dialog / window.
+    fn develop_view_model(&self) -> DevelopViewModel {
+        DevelopViewModel {
+            show_develop_dialog: self.shell.ui.show_develop_dialog,
+            develop_in_window: self.win.develop_window.is_some(),
+            develop_settings: self.shell.ui.develop_settings.clone(),
+            develop_histogram: self.dev.develop_histogram.clone(),
+            develop_scopes: self.dev.develop_scopes.clone(),
+            develop_scopes_revision: self.dev.develop_scopes_revision,
+            develop_scope_visibility: self.dev.develop_scope_visibility,
+            develop_mode: {
+                let active_id = self.docs.active().id;
+                self.dev
+                    .develop_session
+                    .iter()
+                    .any(|e| e.doc == active_id && e.transient)
+            },
+            develop_sections_open: self.dev.develop_sections_open,
+            develop_exif: self.docs.active().raw_exif.clone(),
+            develop_readout: self.dev.develop_readout,
+            develop_auto_available: self
+                .dev
+                .develop_preview
+                .as_ref()
+                .is_some_and(|p| p.scene.is_some() && !p.histogram_proxy.is_empty()),
+            develop_preview_settled: self.dev.develop_preview.as_ref().is_some_and(|p| {
+                !p.gpu_preview_active
+                    && !p.processing
+                    && p.pending_settings.is_none()
+                    && p.detail_refine_at.is_none()
+            }),
+            develop_preview_refining: self
+                .dev
+                .develop_preview
+                .as_ref()
+                .is_some_and(|p| p.processing || p.detail_refine_at.is_some()),
+            develop_pipeline_diagnostic: develop_pipeline_diagnostic(
+                self.docs.active().canvas.develop_source.as_deref(),
+                self.docs.active().canvas.metadata.raw_render_recipe,
+            ),
+            develop_local_selected: self.shell.ui.develop_local_selected,
+            develop_local_arm: self.shell.ui.develop_local_arm.map(|(k, _)| k),
+            develop_local_overlay: self.build_develop_local_overlay(),
+            develop_presets: self.shell.develop_presets.clone(),
+        }
+    }
+
+    /// Print and proof / colour management.
+    fn print_view_model(
+        &self,
+        print_preview_image: Option<std::sync::Arc<egui::ColorImage>>,
+    ) -> PrintViewModel {
+        PrintViewModel {
+            proof_enabled: self.shell.proof_enabled,
+            proof_gamut_warn: self.shell.proof_gamut_warn,
+            proof_target_label: self.shell.proof_target.label(),
+            display_cms_enabled: self.shell.display_cms_enabled,
+            display_profile_name: self.shell.display_profile_name.clone(),
+            show_print_dialog: self.shell.ui.show_print_dialog,
+            print_layout: self.shell.print_layout,
+            print_printers: std::sync::Arc::new(self.shell.print_printers.clone()),
+            print_selected_printer: self.shell.print_selected_printer.clone(),
+            print_copies: self.shell.print_copies,
+            print_refreshing: self.jobs.pending_printer_refresh.is_some(),
+            print_settings_open: self.jobs.pending_printer_settings.is_some(),
+            print_sending: self.jobs.pending_print.is_some(),
+            print_waiting_note: self
+                .jobs
+                .pending_print
+                .as_ref()
+                .and_then(|job| job.waiting_note())
+                .unwrap_or_default(),
+            print_preview_image,
+            print_printer_profile_name: self.shell.print_printer_profile_name.clone(),
+        }
+    }
+
+    /// Modal dialogs: which is open, plus their scratch inputs.
+    /// What the "AI offline" tab shows is filled in by the Pro part
+    /// (`fill_retouch_view`).
+    fn dialog_view_model(&self) -> DialogViewModel {
+        DialogViewModel {
+            paint_dialog_ink: if self.shell.ui.show_paint_color_dialog {
+                self.ink_split_of(self.shell.ui.paint_color_dialog_color)
+            } else {
+                None
+            },
+            show_new_dialog: self.shell.ui.show_new_dialog,
+            show_font_change_dialog: self.shell.ui.show_font_change_dialog,
+            pdf_batch_operation: self.shell.ui.pdf_batch_operation,
+            pdf_batch_page_count: self.shell.ui.pdf_batch_page_count,
+            show_vector_style_dialog: self.shell.ui.show_vector_style_dialog,
+            show_scan_cleanup_dialog: self.shell.ui.show_scan_cleanup_dialog,
+            show_portrait_dialog: self.shell.ui.show_portrait_dialog,
+            portrait_id_side: self.shell.ui.portrait_id_side,
+            portrait_session: false,
+            portrait_status: String::new(),
+            portrait_ready: false,
+            portrait_faces: Vec::new(),
+            portrait_hair: false,
+            portrait_body: None,
+            portrait_detail: None,
+            portrait_neck: None,
+            portrait_clothes: None,
+            #[cfg(feature = "pro")]
+            portrait_brush: None,
+            portrait_brush_undo: false,
+            portrait_brush_redo: false,
+            portrait_overlay: None,
+            portrait_reopened: false,
+            portrait_restore_settings: None,
+            portrait_restore_faces: None,
+            id_photo_status: Default::default(),
+            id_photo_error: Default::default(),
+            id_photo_busy: false,
+            id_photo_made: false,
+            garment_thumb: Default::default(),
+            garment_name: Default::default(),
+            garment_worn: false,
+            garment_busy: false,
+            garment_status: Default::default(),
+            garment_error: Default::default(),
+            print_folder: None,
+            scan_is_pdf: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .and_then(|d| d.pdf_document.as_ref())
+                .is_some(),
+            scan_page_count: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .and_then(|d| d.pdf_document.as_ref())
+                .map_or(1, |p| p.page_count),
+            scan_active_page: self
+                .docs
+                .documents
+                .get(self.docs.active_doc_idx)
+                .and_then(|d| d.pdf_document.as_ref())
+                .map_or(0, |p| p.active_page),
+            scan_open_doc_count: self.docs.documents.len(),
+            vector_style_target: self.shell.ui.vector_style_target,
+            // Only scan the layer stack for fonts-in-use while the dialog is
+            // open, so the common (closed) frame stays cheap.
+            text_fonts_in_use: if self.shell.ui.show_font_change_dialog {
+                self.document_text_fonts_in_use()
+            } else {
+                Vec::new()
+            },
+            show_resize_dialog: self.shell.ui.show_resize_dialog,
+            show_image_size_dialog: self.shell.ui.show_image_size_dialog,
+            show_rename_dialog: self.shell.ui.show_rename_dialog,
+            page_rename: self
+                .shell
+                .ui
+                .page_rename_target
+                .map(|idx| (idx, self.shell.ui.page_rename_text.clone())),
+            show_pdf_export_dialog: self.shell.ui.show_pdf_export_dialog,
+            pdf_export_scope: self.shell.ui.pdf_export_scope,
+            pdf_export_range: self.shell.ui.pdf_export_range.clone(),
+            pdf_export_dpi: self.shell.ui.pdf_export_dpi,
+            mail_merge: self.shell.ui.mail_merge.as_ref().map(|session| {
+                let pattern = &self.shell.ui.mail_merge_pattern;
+                let filename_preview = session
+                    .table
+                    .row(0)
+                    .map(|row| {
+                        let stem = crate::core::mail_merge::expand_filename(pattern, &row);
+                        let stem = if stem.is_empty() {
+                            "hop-dong-001".to_string()
+                        } else {
+                            stem
+                        };
+                        format!("{stem}.pdf")
+                    })
+                    .unwrap_or_default();
+                crate::ui::MailMergeViewModel {
+                    data_file: session.data_file.clone(),
+                    row_count: session.table.row_count(),
+                    matched: session.matched.clone(),
+                    missing: session.missing.clone(),
+                    filename_pattern: pattern.clone(),
+                    filename_preview,
+                }
+            }),
+            show_export_dialog: self.shell.ui.show_export_dialog,
+            show_preferences: self.shell.ui.show_preferences,
+            show_adjustment_dialog: self.shell.ui.show_adjustment_dialog,
+            adjustment_dialog: self.shell.ui.adjustment_dialog.clone(),
+            adjustment_preview_enabled: self.shell.ui.adjustment_preview_enabled,
+            adjustment_options: self.shell.ui.adjustment_options,
+            adj_eyedropper: self.shell.ui.adj_eyedropper,
+            levels_histogram: self
+                .shell
+                .adjustment_preview
+                .as_ref()
+                .map(|preview| preview.levels_histogram.clone())
+                .unwrap_or_else(|| std::sync::Arc::new([[0; 256]; 4])),
+            show_warp_dialog: self.shell.ui.show_warp_dialog,
+            warp_params: self.shell.ui.warp_params,
+            warp_resizing: self.edit.input.warp_resizing,
+            warp_resize_anchor: {
+                // Physical px → egui points (egui ppp == window scale factor here).
+                let ppp = self
+                    .win
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0)
+                    .max(0.0001);
+                (
+                    self.edit.input.alt_drag_start_x / ppp,
+                    self.edit.input.alt_drag_start_y / ppp,
+                )
+            },
+            warp_freeze: self.edit.warp_state.as_ref().and_then(|s| {
+                s.mesh.freeze_alpha().map(|(gw, gh, alpha)| {
+                    std::sync::Arc::new(crate::ui::WarpFreezeView {
+                        gw,
+                        gh,
+                        alpha,
+                        layer_x: s.layer_offset.0 as f32,
+                        layer_y: s.layer_offset.1 as f32,
+                        layer_w: s.layer_w as f32,
+                        layer_h: s.layer_h as f32,
+                    })
+                })
+            }),
+            show_filter_dialog: self.shell.ui.show_filter_dialog,
+            filter_dialog: self.shell.ui.filter_dialog,
+            filter_proxy_original: self
+                .shell
+                .filter_preview
+                .as_ref()
+                .map(|preview| preview.proxy_original_preview.clone()),
+            filter_proxy_preview: self
+                .shell
+                .filter_preview
+                .as_ref()
+                .and_then(|preview| preview.proxy_preview.clone()),
+            filter_preview_processing: self
+                .shell
+                .filter_preview
+                .as_ref()
+                .is_some_and(|preview| preview.processing),
+            filter_preview_enabled: self.shell.ui.filter_preview_enabled,
+            show_smart_fill_dialog: self.shell.ui.show_smart_fill_dialog,
+            lama_available: crate::core::lama::is_available(),
+            lama_status_msg: crate::core::lama::status_text().unwrap_or_default(),
+            show_exit_dialog: self.shell.ui.show_exit_dialog,
+            show_close_dialog: self.shell.ui.show_close_dialog,
+            document_editor_error: self.shell.ui.document_editor_error.clone(),
+            save_error: self.shell.ui.save_error.clone(),
+            show_reload_file_dialog: self.jobs.pending_reload_prompt.is_some(),
+            reload_file_name: self
+                .jobs
+                .pending_reload_prompt
+                .as_ref()
+                .and_then(|p| p.path.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string(),
+            reload_will_discard_changes: self
+                .jobs
+                .pending_reload_prompt
+                .as_ref()
+                .and_then(|p| self.docs.documents.get(p.doc_idx))
+                .is_some_and(|d| d.is_modified()),
+            show_pdf_import_dialog: self.jobs.pending_pdf_prompt.is_some(),
+            show_cmyk_convert_dialog: self.shell.ui.show_cmyk_convert_dialog,
+            cmyk_convert_use_icc: self.shell.ui.cmyk_convert_use_icc,
+            cmyk_convert_icc_name: self
+                .shell
+                .ui
+                .cmyk_convert_icc
+                .as_ref()
+                .map(|(n, _)| n.clone()),
+            pdf_import_file_name: self
+                .jobs
+                .pending_pdf_prompt
+                .as_ref()
+                .and_then(|p| p.path.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("PDF")
+                .to_string(),
+            pdf_import_path_key: self
+                .jobs
+                .pending_pdf_prompt
+                .as_ref()
+                .map(|p| p.path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            pdf_import_page_count: self
+                .jobs
+                .pending_pdf_prompt
+                .as_ref()
+                .map_or(0, |p| p.page_count),
+            pdf_import_page_dims: self
+                .jobs
+                .pending_pdf_prompt
+                .as_ref()
+                .map(|p| p.page_dims.clone())
+                .unwrap_or_default(),
+            show_feather_dialog: self.shell.ui.show_feather_dialog,
+            show_modify_dialog: self.shell.ui.show_modify_dialog,
+            show_stroke_dialog: self.shell.ui.show_stroke_dialog,
+            show_color_range_dialog: self.shell.ui.show_color_range_dialog,
+            color_range_color: self.shell.ui.color_range_color,
+            color_range_fuzziness: self.shell.ui.color_range_fuzziness,
+            color_range_preview: self.shell.ui.color_range_preview.clone(),
+            new_w_input: self.shell.ui.new_w_input,
+            new_h_input: self.shell.ui.new_h_input,
+            new_dpi: self.shell.ui.new_dpi,
+            new_bg_color: self.shell.ui.new_bg_color,
+            new_name: self.shell.ui.new_name.clone(),
+            new_unit: self.shell.ui.new_unit,
+            rename_idx: self.shell.ui.rename_idx,
+            rename_text: self.shell.ui.rename_text.clone(),
+            export_format: self.shell.ui.export_format.clone(),
+            show_paint_color_dialog: self.shell.ui.show_paint_color_dialog,
+            paint_color_dialog_target: self.shell.ui.paint_color_dialog_target,
+            paint_color_dialog_color: self.shell.ui.paint_color_dialog_color,
+            paint_color_dialog_original: self.shell.ui.paint_color_dialog_original,
+            paint_color_dialog_live_preview: self.shell.ui.paint_color_dialog_live_preview,
+            paint_color_dialog_center_next: self.shell.ui.paint_color_dialog_center_next,
+            user_presets: self.shell.user_presets.clone(),
+            adjustment_presets: self.shell.adjustment_presets.clone(),
+            show_preset_dialog: self.shell.ui.show_preset_dialog,
+            show_delete_preset_dialog: self.shell.ui.show_delete_preset_dialog,
+            preset_dialog_name: self.shell.ui.preset_dialog_name.clone(),
+            preset_dialog_w: self.shell.ui.preset_dialog_w,
+            preset_dialog_h: self.shell.ui.preset_dialog_h,
+            preset_dialog_unit: self.shell.ui.preset_dialog_unit.clone(),
+            preset_dialog_dpi: self.shell.ui.preset_dialog_dpi,
+        }
+    }
+
+    /// Window chrome: panels, toolbox, theme, rulers / guides / snap, status.
+    fn chrome_view_model(&self) -> ChromeViewModel {
+        ChromeViewModel {
+            status_msg: self.shell.status_msg.clone(),
+            show_welcome: self.shell.ui.show_welcome,
+            show_library: self.shell.ui.show_library,
+            theme_mode: self.shell.ui.theme_mode,
+            show_color_panel: self.shell.ui.show_color_panel,
+            show_layer_panel: self.shell.ui.show_layer_panel,
+            show_history_panel: self.shell.ui.show_history_panel,
+            show_info_panel: self.shell.ui.show_info_panel,
+            show_channels_panel: self.shell.ui.show_channels_panel,
+            show_rulers: self.shell.ui.show_rulers,
+            show_guides: self.shell.ui.show_guides,
+            lock_guides: self.shell.ui.lock_guides,
+            snap_enabled: self.shell.ui.snap_enabled,
+            guides: self.docs.active().guides.clone(),
+            guide_preview: match self.edit.guide_op {
+                Some(crate::app::state::GuideOp::Create { orientation, pos }) => {
+                    Some((orientation, pos))
+                }
+                _ => None,
+            },
+            hovered_guide: self.active_hover_guide(),
+            snap_guides: if self.edit.transform_state.is_some() {
+                self.edit.transform_snap_guides.clone()
+            } else if self.edit.tools.active_id() == crate::tools::ToolId::Move {
+                self.edit.tools.move_tool().snap_guides.clone()
+            } else {
+                Vec::new()
+            },
+            artboards: self.docs.active().effective_artboards(),
+            toolbar_w: self.shell.toolbar_w,
+            panel_r_w: self.shell.panel_r_w,
+            is_tool_modal: self.modal_lock_active() && !self.portrait_yields(),
+            modal_flash: self
+                .shell
+                .ui
+                .modal_flash_until
+                .is_some_and(|until| std::time::Instant::now() < until),
+            update: self.update_view(),
+            support: self.shell.ui.support_dialog,
+            news: crate::author_news::current(),
+            mail: self.mail_view(),
+            #[cfg(feature = "pro")]
+            pro: self.pro_view(),
+        }
+    }
+
+    /// The Channels panel, from the thumbnails `refresh_channel_thumbnails` keeps.
+    fn channels_view_model(&self) -> ChannelsViewModel {
+        ChannelsViewModel {
+            channels_write_mask: self.docs.active().canvas.channels.write_mask,
+            channel_view: self.docs.active().canvas.channels.view,
+            alpha_channels: self.shell.ui_data_cache.alpha_channel_names.clone(),
+            active_alpha_channel: self.docs.active().canvas.channels.active_alpha,
+            channel_thumbnails: self.shell.ui_data_cache.channel_thumbnails.clone(),
+            alpha_thumbnails: self.shell.ui_data_cache.alpha_thumbnails.clone(),
+        }
+    }
+
+    /// CMYK ink split of an RGB colour through the active document's converter
+    /// — `None` on an RGB document. Feeds the Info-panel and colour-picker
+    /// ink readouts.
+    fn ink_split_of(&self, color: [u8; 4]) -> Option<[u8; 4]> {
+        let conv = self.docs.active().canvas.cmyk_converter()?;
+        let mut ink = [[0u8; 4]; 1];
+        conv.rgb_to_cmyk_slice(&[[color[0], color[1], color[2]]], &mut ink);
+        Some(ink[0])
+    }
+}
+
+/// Stable UI-facing layer kind. Do not derive this from `Debug`: unified
+/// `LayerType::Vector` deliberately contains both parametric Shape and curve
+/// Path geometry, but the Layer menu needs to distinguish them for
+/// Convert-to-Curves and Rasterize.
+fn layer_ui_type(layer_type: &crate::core::layer::LayerType) -> &'static str {
+    use crate::core::layer::LayerType;
+    use crate::core::vector::object::VectorGeometry;
+    match layer_type {
+        LayerType::Raster => "Raster",
+        LayerType::Adjustment(_) => "Adjustment",
+        LayerType::Text(_) => "Text",
+        LayerType::Group => "Group",
+        LayerType::SmartObject => "SmartObject",
+        LayerType::Vector(VectorGeometry::Primitive(_)) => "Shape",
+        LayerType::Vector(VectorGeometry::Path(_)) => "Path",
+    }
+}
+
+/// The cached thumbnail for layer `id` when its content key still matches,
+/// otherwise a freshly built one (which replaces the cache entry).
+fn cached_thumbnail(
+    cache: &mut std::collections::HashMap<u32, (u64, std::sync::Arc<Vec<u8>>)>,
+    id: u32,
+    key: u64,
+    build: impl FnOnce() -> Vec<u8>,
+) -> (u64, std::sync::Arc<Vec<u8>>) {
+    if let Some((cached_key, thumb)) = cache.get(&id) {
+        if *cached_key == key {
+            return (key, thumb.clone());
+        }
+    }
+    let thumb = std::sync::Arc::new(build());
+    cache.insert(id, (key, thumb.clone()));
+    (key, thumb)
+}
+
+fn build_layer_thumbnail_rgba(layer: &crate::core::layer::Layer) -> Vec<u8> {
+    let mut out = vec![0_u8; PANEL_THUMB * PANEL_THUMB * 4];
+    if layer.width == 0 || layer.height == 0 {
+        return out;
+    }
+
+    let (draw_w, draw_h, off_x, off_y) =
+        thumbnail_fit(layer.width as usize, layer.height as usize, PANEL_THUMB);
+    for y in 0..draw_h {
+        for x in 0..draw_w {
+            let sx = ((x as f32 + 0.5) / draw_w as f32 * layer.width as f32) - 0.5;
+            let sy = ((y as f32 + 0.5) / draw_h as f32 * layer.height as f32) - 0.5;
+            let [r, g, b, a] = bilinear_rgba_sample(sx, sy, |px, py| {
+                let px = px.clamp(0, layer.width.saturating_sub(1) as i32) as u32;
+                let py = py.clamp(0, layer.height.saturating_sub(1) as i32) as u32;
+                let (r, g, b, a) = layer.tiles.get_pixel(px, py);
+                [r, g, b, a]
+            });
+            let i = ((off_y + y) * PANEL_THUMB + off_x + x) * 4;
+            out[i] = r;
+            out[i + 1] = g;
+            out[i + 2] = b;
+            out[i + 3] = a;
+        }
+    }
+    out
+}
+
+/// Sample the flat composite into the Channels panel plates: one RGBA
+/// composite thumbnail plus three grayscale plates (R, G, B), all panel-sized,
+/// in a single pass.
+fn build_channel_thumbnails_rgba(pixels: &[u8], w: u32, h: u32) -> Vec<Vec<u8>> {
+    let mut out = vec![blank_channel_thumbnail_rgba(); 4];
+    if w == 0 || h == 0 || pixels.len() < (w as usize) * (h as usize) * 4 {
+        return out;
+    }
+    let (draw_w, draw_h, off_x, off_y) = thumbnail_fit(w as usize, h as usize, CHANNEL_THUMB);
+    for y in 0..draw_h {
+        for x in 0..draw_w {
+            let sx = ((x as f32 + 0.5) / draw_w as f32 * w as f32) - 0.5;
+            let sy = ((y as f32 + 0.5) / draw_h as f32 * h as f32) - 0.5;
+            let rgba = bilinear_rgba_sample(sx, sy, |px, py| {
+                let px = px.clamp(0, w.saturating_sub(1) as i32) as usize;
+                let py = py.clamp(0, h.saturating_sub(1) as i32) as usize;
+                let si = (py * w as usize + px) * 4;
+                [pixels[si], pixels[si + 1], pixels[si + 2], pixels[si + 3]]
+            });
+            let i = ((off_y + y) * CHANNEL_THUMB + off_x + x) * 4;
+            out[0][i..i + 4].copy_from_slice(&rgba);
+            for c in 0..3 {
+                let v = rgba[c];
+                let plate = &mut out[c + 1];
+                plate[i] = v;
+                plate[i + 1] = v;
+                plate[i + 2] = v;
+                plate[i + 3] = 255;
+            }
+        }
+    }
+    out
+}
+
+/// Channels panel thumbnails for a CMYK document: composite RGB mirror plus
+/// C/M/Y/K ink-density plates (paper white, ink dark).
+fn build_channel_thumbnails_cmyk(canvas: &crate::core::canvas::Canvas) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(5);
+    let rgb = build_channel_thumbnails_rgba(&canvas.pixels, canvas.width, canvas.height);
+    out.push(
+        rgb.into_iter()
+            .next()
+            .unwrap_or_else(blank_channel_thumbnail_rgba),
+    );
+    for channel in 0..4 {
+        let thumb = canvas
+            .cmyk_plate_preview_mask(channel)
+            .map(|mask| build_grayscale_thumbnail_rgba(&mask, canvas.width, canvas.height))
+            .unwrap_or_else(blank_channel_thumbnail_rgba);
+        out.push(thumb);
+    }
+    out
+}
+
+fn blank_channel_thumbnail_rgba() -> Vec<u8> {
+    vec![0_u8; CHANNEL_THUMB * CHANNEL_THUMB * 4]
+}
+
+fn build_grayscale_thumbnail_rgba(mask: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let mut out = blank_channel_thumbnail_rgba();
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 || mask.len() < w * h {
+        return out;
+    }
+    let (draw_w, draw_h, off_x, off_y) = thumbnail_fit(w, h, CHANNEL_THUMB);
+    for y in 0..draw_h {
+        for x in 0..draw_w {
+            let sx = ((x as f32 + 0.5) / draw_w as f32 * w as f32) - 0.5;
+            let sy = ((y as f32 + 0.5) / draw_h as f32 * h as f32) - 0.5;
+            let [v, _, _, _] = bilinear_rgba_sample(sx, sy, |px, py| {
+                let px = px.clamp(0, w.saturating_sub(1) as i32) as usize;
+                let py = py.clamp(0, h.saturating_sub(1) as i32) as usize;
+                let v = mask[py * w + px];
+                [v, v, v, 255]
+            });
+            let i = ((off_y + y) * CHANNEL_THUMB + off_x + x) * 4;
+            out[i] = v;
+            out[i + 1] = v;
+            out[i + 2] = v;
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
+/// One alpha channel's mask as a panel-sized grayscale thumbnail.
+fn build_alpha_thumbnail_rgba(channel: &crate::core::channels::AlphaChannel) -> Vec<u8> {
+    build_grayscale_thumbnail_rgba(&channel.mask, channel.width, channel.height)
+}
+
+fn build_layer_mask_thumbnail_rgba(layer: &crate::core::layer::Layer) -> Vec<u8> {
+    let mut out = vec![0_u8; PANEL_THUMB * PANEL_THUMB * 4];
+    let Some(mask) = layer.mask.as_ref() else {
+        return Vec::new();
+    };
+    if mask.width == 0 || mask.height == 0 {
+        return out;
+    }
+
+    let (draw_w, draw_h, off_x, off_y) =
+        thumbnail_fit(mask.width as usize, mask.height as usize, PANEL_THUMB);
+    for y in 0..draw_h {
+        for x in 0..draw_w {
+            let sx = ((x as f32 + 0.5) / draw_w as f32 * mask.width as f32) - 0.5;
+            let sy = ((y as f32 + 0.5) / draw_h as f32 * mask.height as f32) - 0.5;
+            let [v, _, _, _] = bilinear_rgba_sample(sx, sy, |px, py| {
+                let px = px.clamp(0, mask.width.saturating_sub(1) as i32) as u32;
+                let py = py.clamp(0, mask.height.saturating_sub(1) as i32) as u32;
+                let v = (mask.sample(px, py) * 255.0).round().clamp(0.0, 255.0) as u8;
+                [v, v, v, 255]
+            });
+            let i = ((off_y + y) * PANEL_THUMB + off_x + x) * 4;
+            out[i] = v;
+            out[i + 1] = v;
+            out[i + 2] = v;
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
+fn thumbnail_fit(src_w: usize, src_h: usize, thumb: usize) -> (usize, usize, usize, usize) {
+    if src_w == 0 || src_h == 0 || thumb == 0 {
+        return (0, 0, 0, 0);
+    }
+
+    let scale = (thumb as f32 / src_w as f32).min(thumb as f32 / src_h as f32);
+    let draw_w = ((src_w as f32 * scale).round() as usize).clamp(1, thumb);
+    let draw_h = ((src_h as f32 * scale).round() as usize).clamp(1, thumb);
+    let off_x = (thumb - draw_w) / 2;
+    let off_y = (thumb - draw_h) / 2;
+    (draw_w, draw_h, off_x, off_y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::layer::{Layer, LayerMask};
+    use crate::core::shape::{ShapeData, ShapeKind};
+    use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+
+    /// Draws the whole window from `collect_ui_data` in a spread of app
+    /// states, then with each canvas overlay of `ui::frame` switched on, and
+    /// prints for each the shape count and one number over every shape. Run
+    /// it before and after moving `collect_ui_data` or `ui::frame` code
+    /// around: no line may change.
+    /// `cargo test --lib probe_ui_data_shapes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn probe_ui_data_shapes() {
+        use crate::tools::ToolId;
+        use crate::ui::UiActions;
+        use std::hash::{Hash, Hasher};
+
+        type Setup = fn(&mut App);
+        type Tweak = fn(&mut UiData);
+        const TOOLS: [ToolId; 30] = [
+            ToolId::Brush,
+            ToolId::Eraser,
+            ToolId::Pencil,
+            ToolId::Move,
+            ToolId::Crop,
+            ToolId::Zoom,
+            ToolId::Hand,
+            ToolId::Fill,
+            ToolId::Gradient,
+            ToolId::Eyedropper,
+            ToolId::SelectionRect,
+            ToolId::SelectionEllipse,
+            ToolId::Lasso,
+            ToolId::PolygonLasso,
+            ToolId::SmartSelect,
+            ToolId::Clone,
+            ToolId::Transform,
+            ToolId::RefineBrush,
+            ToolId::Text,
+            ToolId::Shape,
+            ToolId::Repair,
+            ToolId::PerspectiveCrop,
+            ToolId::Pen,
+            ToolId::Smudge,
+            ToolId::Dodge,
+            ToolId::Burn,
+            ToolId::Patch,
+            ToolId::Node,
+            ToolId::VectorBrush,
+            ToolId::Arrow,
+        ];
+        let states: Vec<(&str, Setup)> = vec![
+            ("blank", |_| {}),
+            ("welcome", |a| a.shell.ui.show_welcome = true),
+            ("library", |a| a.shell.ui.show_library = true),
+            ("layers + selection", |a| {
+                let canvas = &mut a.docs.active_mut().canvas;
+                canvas.add_layer();
+                canvas.add_layer();
+                canvas.layer_stack.layers[1].name = "Hidden".to_string();
+                canvas.layer_stack.layers[1].visible = false;
+                canvas.layer_stack.layers[2].opacity = 0.5;
+                canvas.layer_revision += 1;
+                canvas.select_all();
+            }),
+            ("every panel", |a| {
+                let ui = &mut a.shell.ui;
+                ui.show_color_panel = true;
+                ui.show_layer_panel = true;
+                ui.show_history_panel = true;
+                ui.show_info_panel = true;
+                ui.show_channels_panel = true;
+                ui.show_ai_panel = true;
+                ui.show_rulers = true;
+                ui.show_guides = true;
+            }),
+            ("no panel", |a| {
+                let ui = &mut a.shell.ui;
+                ui.show_color_panel = false;
+                ui.show_layer_panel = false;
+                ui.show_history_panel = false;
+                ui.show_info_panel = false;
+                ui.show_channels_panel = false;
+                ui.show_ai_panel = false;
+                ui.show_rulers = false;
+                ui.show_guides = false;
+            }),
+            ("zoomed", |a| {
+                a.edit.view.zoom = 2.5;
+                a.edit.view.offset_x = -40.0;
+                a.edit.view.offset_y = 25.0;
+            }),
+            ("new", |a| a.shell.ui.show_new_dialog = true),
+            ("font change", |a| a.shell.ui.show_font_change_dialog = true),
+            ("vector style", |a| {
+                a.shell.ui.show_vector_style_dialog = true
+            }),
+            ("scan cleanup", |a| {
+                a.shell.ui.show_scan_cleanup_dialog = true
+            }),
+            ("portrait", |a| a.shell.ui.show_portrait_dialog = true),
+            ("resize", |a| a.shell.ui.show_resize_dialog = true),
+            ("image size", |a| a.shell.ui.show_image_size_dialog = true),
+            ("rename", |a| a.shell.ui.show_rename_dialog = true),
+            ("export", |a| a.shell.ui.show_export_dialog = true),
+            ("print", |a| a.shell.ui.show_print_dialog = true),
+            ("preferences", |a| a.shell.ui.show_preferences = true),
+            ("adjustment", |a| a.shell.ui.show_adjustment_dialog = true),
+            ("develop", |a| a.shell.ui.show_develop_dialog = true),
+            ("warp", |a| a.shell.ui.show_warp_dialog = true),
+            ("filter", |a| a.shell.ui.show_filter_dialog = true),
+            ("smart fill", |a| a.shell.ui.show_smart_fill_dialog = true),
+            ("gradient editor", |a| {
+                a.shell.ui.show_gradient_editor = true
+            }),
+            ("exit", |a| a.shell.ui.show_exit_dialog = true),
+            ("close", |a| a.shell.ui.show_close_dialog = true),
+            ("feather", |a| a.shell.ui.show_feather_dialog = true),
+            ("stroke", |a| a.shell.ui.show_stroke_dialog = true),
+            ("color range", |a| a.shell.ui.show_color_range_dialog = true),
+            ("pdf export", |a| a.shell.ui.show_pdf_export_dialog = true),
+            ("preset", |a| a.shell.ui.show_preset_dialog = true),
+            ("delete preset", |a| {
+                a.shell.ui.show_delete_preset_dialog = true
+            }),
+            ("refine color", |a| {
+                a.shell.ui.show_refine_color_dialog = true
+            }),
+            ("paint color", |a| a.shell.ui.show_paint_color_dialog = true),
+            ("cmyk convert", |a| {
+                a.shell.ui.show_cmyk_convert_dialog = true
+            }),
+            ("painting", |a| {
+                a.edit.tools.select(ToolId::Clone);
+                a.edit.input.painting = true;
+                a.edit.input.mouse_x = 300.0;
+                a.edit.input.mouse_y = 200.0;
+            }),
+            ("two tabs", |a| {
+                let mut second = crate::core::document::Document::from_canvas(
+                    crate::core::document::DocumentId(9001),
+                    crate::core::canvas::Canvas::from_rgba(
+                        [10u8, 200, 90, 255].repeat(64 * 48),
+                        64,
+                        48,
+                    ),
+                    None,
+                );
+                second.title = "Second".to_string();
+                a.docs.documents.push(second);
+            }),
+            ("cmyk-less 16 bit", |a| {
+                a.docs.active_mut().canvas.bit_depth = crate::core::canvas::BitDepth::Sixteen;
+                a.docs.active_mut().canvas.metadata.resolution_ppi = 300.0;
+            }),
+        ];
+
+        let overlays: Vec<(&str, Tweak)> = vec![
+            ("artboards", |d| {
+                use crate::core::page::{Page, PageId};
+                let mut second = Page::implicit(400, 300);
+                second.id = PageId(1);
+                second.bleed = 12.0;
+                second.margin = 24.0;
+                second.background = Some([255, 250, 240, 255]);
+                d.chrome.artboards = vec![Page::implicit(800, 600), second];
+            }),
+            ("guides", |d| {
+                use crate::core::document::{Guide, GuideOrientation};
+                d.chrome.show_guides = true;
+                d.chrome.guides = vec![
+                    Guide {
+                        orientation: GuideOrientation::Horizontal,
+                        pos: 120.0,
+                    },
+                    Guide {
+                        orientation: GuideOrientation::Vertical,
+                        pos: 310.0,
+                    },
+                ];
+                d.chrome.hovered_guide = Some(1);
+            }),
+            ("snap guides", |d| {
+                use crate::core::snapping::{SnapKind, SnapLine};
+                d.chrome.snap_guides = vec![
+                    SnapLine {
+                        vertical: true,
+                        pos: 400.0,
+                        kind: SnapKind::CanvasCenter,
+                    },
+                    SnapLine {
+                        vertical: false,
+                        pos: 0.0,
+                        kind: SnapKind::CanvasEdge,
+                    },
+                    SnapLine {
+                        vertical: false,
+                        pos: 250.0,
+                        kind: SnapKind::LayerEdge,
+                    },
+                ];
+            }),
+            ("lasso", |d| {
+                d.sel.lasso_preview =
+                    vec![(50.0, 60.0), (300.0, 80.0), (260.0, 320.0), (90.0, 280.0)];
+            }),
+            ("rect selection", |d| {
+                d.sel.rect_sel_preview = Some([40.0, 50.0, 420.0, 330.0])
+            }),
+            ("ellipse selection", |d| {
+                d.sel.ellipse_sel_preview = Some([40.0, 50.0, 420.0, 330.0])
+            }),
+            ("refine panel", |d| d.sel.show_refine_panel = true),
+            ("selection menu", |d| {
+                d.sel.selection_ctx_menu_pos = Some((700.0, 400.0))
+            }),
+            ("perspective crop", |d| {
+                d.tool.active_tool = ToolId::PerspectiveCrop;
+                d.tool.persp_crop_quad =
+                    Some([(60.0, 40.0), (700.0, 70.0), (720.0, 520.0), (40.0, 560.0)]);
+            }),
+            ("perspective crop placing", |d| {
+                d.tool.active_tool = ToolId::PerspectiveCrop;
+                d.tool.persp_crop_preview = vec![(60.0, 40.0), (700.0, 70.0), (720.0, 520.0)];
+            }),
+            ("pen", |d| {
+                d.tool.active_tool = ToolId::Pen;
+                d.tool.pen_path = vec![(100.0, 100.0), (220.0, 60.0), (340.0, 180.0)];
+                d.tool.pen_anchors = vec![(100.0, 100.0), (340.0, 180.0)];
+                d.tool.pen_handles = vec![[100.0, 100.0, 160.0, 40.0], [340.0, 180.0, 300.0, 90.0]];
+            }),
+            ("vector brush", |d| {
+                d.tool.active_tool = ToolId::VectorBrush;
+                d.tool.vector_brush_path = vec![(80.0, 300.0), (160.0, 260.0), (240.0, 310.0)];
+            }),
+            ("arrow", |d| {
+                d.tool.active_tool = ToolId::Arrow;
+                d.tool.arrow_path = vec![(80.0, 300.0), (160.0, 300.0), (160.0, 420.0)];
+                d.tool.arrow_snap_marker = Some((160.0, 420.0));
+            }),
+            ("arrow tree", |d| {
+                d.tool.active_tool = ToolId::Arrow;
+                d.tool.arrow_preview_contours = vec![
+                    vec![(80.0, 300.0), (160.0, 300.0), (160.0, 420.0)],
+                    vec![(160.0, 300.0), (260.0, 300.0)],
+                ];
+            }),
+            ("shape preview", |d| {
+                d.tool.active_tool = ToolId::Shape;
+                d.tool.shape_preview = Some([100.0, 120.0, 460.0, 380.0]);
+            }),
+            ("shape overlay", |d| {
+                d.tool.active_tool = ToolId::Shape;
+                d.tool.shape_overlay = Some(crate::ui::ShapeOverlay {
+                    span: [100.0, 120.0, 460.0, 380.0],
+                    kind: 0,
+                    radius: 24.0,
+                    handles: vec![(0, 100.0, 120.0), (1, 460.0, 380.0), (2, 124.0, 120.0)],
+                    dragging: true,
+                });
+            }),
+            ("node overlay", |d| {
+                d.tool.active_tool = ToolId::Node;
+                d.tool.node_overlay = Some(crate::ui::NodeOverlay {
+                    outlines: vec![vec![(100.0, 100.0), (300.0, 80.0), (320.0, 300.0)]],
+                    hovered_segment: Some(vec![(100.0, 100.0), (300.0, 80.0)]),
+                    insertion_marker: Some((200.0, 90.0)),
+                    insertion_at_mid: true,
+                    nodes: vec![
+                        (100.0, 100.0, true),
+                        (300.0, 80.0, false),
+                        (320.0, 300.0, false),
+                    ],
+                    handles: vec![[100.0, 100.0, 150.0, 40.0]],
+                    marquee: Some([650.0, 300.0, 800.0, 420.0]),
+                });
+            }),
+            ("path gradient", |d| {
+                d.tool.path_gradient_overlay = Some(crate::ui::PathGradientOverlay {
+                    kind: 0,
+                    center: (300.0, 250.0),
+                    axis_x: (120.0, 0.0),
+                    axis_y: (0.0, 80.0),
+                    stops: vec![(240.0, 250.0), (360.0, 250.0)],
+                });
+            }),
+            ("gradient preview", |d| {
+                d.tool.active_tool = ToolId::Gradient;
+                d.tool.gradient_preview = Some([100.0, 120.0, 460.0, 380.0]);
+            }),
+            ("crop", |d| {
+                d.tool.active_tool = ToolId::Crop;
+                d.tool.crop_rect = Some([100.0, 120.0, 460.0, 380.0]);
+            }),
+            ("crop, image turned", |d| {
+                d.tool.active_tool = ToolId::Crop;
+                d.tool.crop_rect = Some([100.0, 120.0, 460.0, 380.0]);
+                d.tool.crop_image_moved = true;
+            }),
+            ("transform", |d| {
+                d.tool.transform_overlay = Some(TransformOverlayData {
+                    corners: [
+                        (100.0, 100.0),
+                        (500.0, 100.0),
+                        (100.0, 400.0),
+                        (500.0, 400.0),
+                    ],
+                    handles: [
+                        (100.0, 100.0),
+                        (300.0, 100.0),
+                        (500.0, 100.0),
+                        (100.0, 250.0),
+                        (500.0, 250.0),
+                        (100.0, 400.0),
+                        (300.0, 400.0),
+                        (500.0, 400.0),
+                    ],
+                    center: (300.0, 250.0),
+                    pivot: (100.0, 100.0),
+                    pivot_snap_label: Some("Corner"),
+                    alternate_handles: false,
+                });
+            }),
+            ("transform menu", |d| {
+                d.tool.transform_ctx_menu_pos = Some((700.0, 400.0))
+            }),
+            ("object menu", |d| {
+                d.tool.object_ctx_menu_pos = Some((700.0, 400.0))
+            }),
+            ("brush popup", |d| {
+                d.tool.active_tool = ToolId::Brush;
+                d.tool.brush_popup_pos = Some((700.0, 400.0));
+            }),
+            ("eraser popup", |d| {
+                d.tool.active_tool = ToolId::Eraser;
+                d.tool.brush_popup_pos = Some((700.0, 400.0));
+            }),
+            ("smart select", |d| d.tool.active_tool = ToolId::SmartSelect),
+            ("clone marker", |d| {
+                d.tool.active_tool = ToolId::Clone;
+                d.tool.clone_source_marker = Some((240.0, 200.0));
+            }),
+            ("powerclip bar", |d| d.layers.powerclip_editing = true),
+            ("text editing", |d| {
+                d.tool.active_tool = ToolId::Text;
+                d.tool.text_editing = true;
+                d.tool.text_buffer = "Xin ch\u{e0}o".to_string();
+                d.tool.text_overlay_pos = (500.0, 300.0);
+                d.tool.text_font_px = 36.0;
+            }),
+            ("pixel grid", |d| {
+                d.doc.zoom = 12.0;
+                d.doc.offset_x = 300.0;
+                d.doc.offset_y = 200.0;
+            }),
+        ];
+
+        let draw = |name: &str, tool: Option<ToolId>, setup: Setup, tweak: Option<Tweak>| {
+            let mut app = App::new();
+            // The welcome screen lists this machine's recent files otherwise.
+            app.lib.catalog = crate::app::library::Catalog::default();
+            app.shell.ui.show_welcome = false;
+            let grey = [128u8, 128, 128, 255].repeat(800 * 600);
+            app.docs.documents[0].canvas = crate::core::canvas::Canvas::from_rgba(grey, 800, 600);
+            if let Some(tool) = tool {
+                app.edit.tools.select(tool);
+            }
+            setup(&mut app);
+            let ctx = app.win.egui_ctx.clone();
+            ctx.set_fonts(crate::ui::snapshot::fonts());
+            crate::ui::theme::apply_theme(&ctx, crate::ui::theme::ThemeMode::Dark);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
+            let mut last = None;
+            for _ in 0..4 {
+                let mut data = app.collect_ui_data();
+                let mut actions = UiActions::default();
+                let mut input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(0.0),
+                    ..Default::default()
+                };
+                if let Some(tweak) = tweak {
+                    tweak(&mut data);
+                    // The pointer rests on the canvas: cursors and hover hints draw.
+                    input
+                        .events
+                        .push(egui::Event::PointerMoved(egui::pos2(640.0, 430.0)));
+                }
+                last = Some(ctx.run_ui(input, |ui| crate::ui::frame(ui, &data, &mut actions)));
+            }
+            let output = last.expect("frames ran");
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", output.shapes).hash(&mut hasher);
+            println!(
+                "{name}: {} shapes, {:016x}",
+                output.shapes.len(),
+                hasher.finish()
+            );
+        };
+        for (name, setup) in states {
+            draw(name, None, setup, None);
+        }
+        for tool in TOOLS {
+            draw(&format!("{tool:?}"), Some(tool), |_| {}, None);
+            let panels: Setup = |a| {
+                a.shell.ui.show_channels_panel = true;
+                a.shell.ui.show_history_panel = true;
+                a.shell.ui.show_info_panel = true;
+            };
+            draw(&format!("{tool:?} + every panel"), Some(tool), panels, None);
+        }
+        for (name, tweak) in overlays {
+            draw(&format!("overlay: {name}"), None, |_| {}, Some(tweak));
+        }
+    }
+
+    #[test]
+    fn layer_thumbnail_preserves_wide_aspect_ratio() {
+        let mut layer = Layer::new(1, "wide", 48, 24);
+        for y in 0..layer.height {
+            for x in 0..layer.width {
+                layer.tiles.set_pixel(x, y, 255, 0, 0, 255);
+            }
+        }
+
+        let thumb = build_layer_thumbnail_rgba(&layer);
+        assert_eq!(thumb.len(), PANEL_THUMB * PANEL_THUMB * 4);
+        let alpha_at = |x: usize, y: usize| thumb[(y * PANEL_THUMB + x) * 4 + 3];
+
+        assert_eq!(alpha_at(32, 15), 0);
+        assert_eq!(alpha_at(32, 16), 255);
+        assert_eq!(alpha_at(32, 47), 255);
+        assert_eq!(alpha_at(32, 48), 0);
+    }
+
+    #[test]
+    fn mask_thumbnail_preserves_tall_aspect_ratio() {
+        let mut layer = Layer::new(1, "tall-mask", 24, 48);
+        layer.mask = Some(LayerMask::new_white(24, 48));
+
+        let thumb = build_layer_mask_thumbnail_rgba(&layer);
+        assert_eq!(thumb.len(), PANEL_THUMB * PANEL_THUMB * 4);
+        let alpha_at = |x: usize, y: usize| thumb[(y * PANEL_THUMB + x) * 4 + 3];
+
+        assert_eq!(alpha_at(15, 32), 0);
+        assert_eq!(alpha_at(16, 32), 255);
+        assert_eq!(alpha_at(47, 32), 255);
+        assert_eq!(alpha_at(48, 32), 0);
+    }
+
+    #[test]
+    fn clone_preview_matches_the_real_dab_pixel_for_pixel() {
+        // Fully soft (the owner's usual tip) and a partly hard, lower-opacity one.
+        for (hardness, opacity) in [(0.0, 1.0), (0.3, 0.8)] {
+            check_clone_preview_against_dab(hardness, opacity);
+        }
+    }
+
+    fn check_clone_preview_against_dab(hardness: f32, opacity: f32) {
+        use crate::extension::tool::{PointerEvent, ToolCtx};
+        let (w, h) = (200u32, 120u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[
+                    (x * 37 % 256) as u8,
+                    (y * 53 % 256) as u8,
+                    ((x + y) * 11 % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+        let mut app = App::new();
+        app.docs.documents[0].canvas = crate::core::canvas::Canvas::from_rgba(px, w, h);
+        app.edit.tools.select(crate::tools::ToolId::Clone);
+        {
+            let t = app.edit.tools.clone_like_mut();
+            t.size = 21.0;
+            t.hardness = hardness;
+            t.opacity = opacity;
+        }
+        app.edit.view.zoom = 1.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+        let (fg, bg) = ([0, 0, 0, 255], [255; 4]);
+        {
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
+            let mut alt = PointerEvent::new(40.3, 50.6);
+            alt.alt = true;
+            app.edit.tools.on_press(alt, &mut ctx);
+        }
+
+        let (cx, cy) = (130.7, 60.2);
+        app.edit.input.mouse_x = cx;
+        app.edit.input.mouse_y = cy;
+        let preview = app.build_clone_source_thumbnail().expect("preview");
+        assert_eq!(preview.texel, 1);
+
+        {
+            let mut ctx = ToolCtx::new(&mut app.docs.documents[0], fg, bg, 1.0, 0.0, 0.0);
+            app.edit.tools.on_press(PointerEvent::new(cx, cy), &mut ctx);
+            app.edit
+                .tools
+                .on_release(PointerEvent::new(cx, cy), &mut ctx);
+            ctx.canvas_mut().end_stroke();
+        }
+        let tiles = &app.docs.documents[0].canvas.active_layer().tiles;
+        let mut checked = 0;
+        for ty in 0..preview.height {
+            for tx in 0..preview.width {
+                let p = &preview.pixels[(ty * preview.width + tx) * 4..][..4];
+                if p[3] == 0 {
+                    continue;
+                }
+                // Opaque texels are drawn as-is: nothing left to blend, so no
+                // dark halo can appear around the soft edge.
+                assert_eq!(p[3], 255, "opaque document → opaque preview");
+                let x = (preview.canvas_x0 + tx as i32) as u32;
+                let y = (preview.canvas_y0 + ty as i32) as u32;
+                let (r, g, b, _) = tiles.get_pixel(x, y);
+                for (got, want) in p[..3].iter().zip([r, g, b]) {
+                    assert!(
+                        (*got as i32 - want as i32).abs() <= 1,
+                        "hardness {hardness}: ({x},{y}) preview {p:?} vs dab {:?}",
+                        (r, g, b)
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 250, "only {checked} preview pixels compared");
+    }
+
+    #[test]
+    fn soft_preview_edges_are_premultiplied_in_linear_light() {
+        assert_eq!(
+            premultiply_for_linear_target([10, 20, 30], 1.0),
+            [10, 20, 30, 255]
+        );
+        // Half-covered white must read as half the light, not a dark 128.
+        let half = premultiply_for_linear_target([255, 255, 255], 0.5);
+        assert!((half[0] as i32 - 188).abs() <= 1, "{half:?}");
+        assert_eq!(half[3], 128);
+    }
+
+    #[test]
+    fn unified_vector_geometry_keeps_shape_and_path_ui_kinds() {
+        let (shape, _) = ShapeData::from_canvas_span(
+            ShapeKind::Star,
+            10.0,
+            10.0,
+            90.0,
+            90.0,
+            0.0,
+            true,
+            [0, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Primitive(shape)
+            )),
+            "Shape"
+        );
+        assert_eq!(
+            layer_ui_type(&crate::core::layer::LayerType::Vector(
+                VectorGeometry::Path(VectorObjectData::default())
+            )),
+            "Path"
+        );
+    }
+}

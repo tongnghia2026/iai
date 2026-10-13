@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>iAi Document Editor</title>
+  </head>
+  <body>
+    <div id="editor-shell">
+      <header id="editor-toolbar" role="toolbar" aria-label="Thanh công cụ soạn thảo">
+        <div class="toolbar-group" aria-label="Lịch sử">
+          <button id="toolbar-undo" type="button" title="Hoàn tác (Ctrl+Z)" aria-label="Hoàn tác">↶</button>
+          <button id="toolbar-redo" type="button" title="Làm lại (Ctrl+Y)" aria-label="Làm lại">↷</button>
+        </div>
+
+        <div class="toolbar-group toolbar-group-grow" aria-label="Phông chữ">
+          <label class="sr-only" for="toolbar-font">Phông chữ</label>
+          <select id="toolbar-font" class="toolbar-font" title="Phông chữ" aria-label="Phông chữ">
+            <option value="Noto Sans">Noto Sans</option>
+            <option value="Arial">Arial</option>
+            <option value="Calibri">Calibri</option>
+            <option value="Times New Roman">Times New Roman</option>
+            <option value="Tahoma">Tahoma</option>
+          </select>
+          <label class="sr-only" for="toolbar-size">Cỡ chữ</label>
+          <select id="toolbar-size" class="toolbar-size" title="Cỡ chữ" aria-label="Cỡ chữ">
+            <option value="8">8</option>
+            <option value="9">9</option>
+            <option value="10">10</option>
+            <option value="11">11</option>
+            <option value="12" selected>12</option>
+            <option value="14">14</option>
+            <option value="16">16</option>
+            <option value="18">18</option>
+            <option value="20">20</option>
+            <option value="24">24</option>
+            <option value="28">28</option>
+            <option value="32">32</option>
+            <option value="36">36</option>
+            <option value="48">48</option>
+            <option value="72">72</option>
+          </select>
+        </div>
+
+        <div class="toolbar-group toolbar-color-group" aria-label="Định dạng chữ">
+          <button id="toolbar-bold" type="button" title="Đậm (Ctrl+B)" aria-label="Đậm"><strong>B</strong></button>
+          <button id="toolbar-italic" type="button" title="Nghiêng (Ctrl+I)" aria-label="Nghiêng"><em>I</em></button>
+          <button id="toolbar-underline" type="button" title="Gạch chân (Ctrl+U)" aria-label="Gạch chân"><u>U</u></button>
+          <button
+            id="toolbar-color-button"
+            class="toolbar-color-button"
+            type="button"
+            title="Màu chữ"
+            aria-label="Màu chữ"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+          >
+            <span>A</span>
+            <span id="toolbar-color-indicator" aria-hidden="true"></span>
+          </button>
+          <div id="toolbar-color-popover" class="toolbar-popover color-popover" role="dialog" aria-label="Chọn màu chữ" hidden>
+            <div class="color-palette-heading">Bảng màu</div>
+            <div id="toolbar-color-swatches" class="color-swatches" role="group" aria-label="Bảng màu chữ"></div>
+            <div class="color-custom" aria-label="Mã màu tùy chỉnh">
+              <label class="color-hex-row" for="toolbar-color">
+                <span>Màu khác</span>
+                <span id="toolbar-color-preview" aria-hidden="true"></span>
+                <input
+                  id="toolbar-color"
+                  type="text"
+                  value="#000000"
+                  maxlength="7"
+                  pattern="#[0-9A-Fa-f]{6}"
+                  spellcheck="false"
+                  aria-label="Mã màu HEX"
+                />
+              </label>
+            </div>
+            <div class="toolbar-dialog-actions">
+              <button id="toolbar-color-cancel" type="button">Cancel</button>
+              <button id="toolbar-color-ok" class="primary" type="button">OK</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="toolbar-group" aria-label="Chèn">
+          <button id="toolbar-insert-image" type="button" title="Chèn ảnh" aria-label="Chèn ảnh">Ảnh</button>
+          <input id="toolbar-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden />
+          <button id="toolbar-insert-table" type="button" title="Chèn bảng" aria-label="Chèn bảng">Bảng</button>
+          <button id="toolbar-insert-link" type="button" title="Chèn liên kết" aria-label="Chèn liên kết">Link</button>
+          <button id="toolbar-insert-separator" type="button" title="Chèn đường phân cách" aria-label="Chèn đường phân cách">―</button>
+          <button id="toolbar-insert-page-break" type="button" title="Chèn ngắt trang" aria-label="Chèn ngắt trang">Ngắt trang</button>
+        </div>
+
+        <div class="toolbar-group" aria-label="Đoạn văn">
+          <button id="toolbar-align-left" type="button" title="Căn trái" aria-label="Căn trái">≡</button>
+          <button id="toolbar-align-center" type="button" title="Căn giữa" aria-label="Căn giữa">≣</button>
+          <button id="toolbar-align-right" type="button" title="Căn phải" aria-label="Căn phải">≡</button>
+          <button id="toolbar-align-justify" type="button" title="Căn đều hai bên" aria-label="Căn đều hai bên">☰</button>
+          <button id="toolbar-bullet-list" type="button" title="Danh sách dấu đầu dòng" aria-label="Danh sách dấu đầu dòng">•≡</button>
+          <button id="toolbar-number-list" type="button" title="Danh sách đánh số" aria-label="Danh sách đánh số">1.≡</button>
+          <label class="sr-only" for="toolbar-line-spacing">Giãn dòng</label>
+          <select id="toolbar-line-spacing" class="toolbar-spacing" title="Giãn dòng" aria-label="Giãn dòng">
+            <option value="1">1.0</option>
+            <option value="1.15">1.15</option>
+            <option value="1.5">1.5</option>
+            <option value="2">2.0</option>
+          </select>
+        </div>
+
+        <div class="toolbar-group toolbar-zoom" aria-label="Thu phóng">
+          <button id="toolbar-zoom-out" type="button" title="Thu nhỏ" aria-label="Thu nhỏ">−</button>
+          <output id="toolbar-zoom-value" aria-live="polite">100%</output>
+          <button id="toolbar-zoom-in" type="button" title="Phóng to" aria-label="Phóng to">+</button>
+        </div>
+      </header>
+      <dialog id="toolbar-table-dialog" class="toolbar-dialog" aria-labelledby="toolbar-table-title">
+        <form method="dialog">
+          <h2 id="toolbar-table-title">Chèn bảng</h2>
+          <div class="toolbar-dialog-fields table-size-fields">
+            <label>Hàng <input id="toolbar-table-rows" type="number" min="1" max="20" value="3" required /></label>
+            <label>Cột <input id="toolbar-table-cols" type="number" min="1" max="12" value="3" required /></label>
+          </div>
+          <p id="toolbar-table-error" class="toolbar-dialog-error" role="alert" hidden></p>
+          <div class="toolbar-dialog-actions">
+            <button id="toolbar-table-cancel" value="cancel" type="button">Cancel</button>
+            <button id="toolbar-table-ok" class="primary" value="ok" type="submit">OK</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="toolbar-link-dialog" class="toolbar-dialog" aria-labelledby="toolbar-link-title">
+        <form method="dialog">
+          <h2 id="toolbar-link-title">Chèn liên kết</h2>
+          <div class="toolbar-dialog-fields">
+            <label>Văn bản <input id="toolbar-link-text" type="text" maxlength="500" /></label>
+            <label>Địa chỉ <input id="toolbar-link-url" type="url" maxlength="2048" placeholder="example.com" required /></label>
+          </div>
+          <p id="toolbar-link-error" class="toolbar-dialog-error" role="alert" hidden></p>
+          <div class="toolbar-dialog-actions">
+            <button id="toolbar-link-cancel" value="cancel" type="button">Cancel</button>
+            <button id="toolbar-link-ok" class="primary" value="ok" type="submit">OK</button>
+          </div>
+        </form>
+      </dialog>
+      <div id="document-editor" role="application" aria-label="Document editor"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

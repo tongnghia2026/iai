@@ -1,0 +1,410 @@
+//! The RedrawRequested path for the main window, extracted verbatim from
+//! the window_event match arm.
+
+use crate::app::state::App;
+use crate::extension::tool::ToolCtx;
+use winit::event_loop::ActiveEventLoop;
+
+impl App {
+    /// The main window's RedrawRequested arm, verbatim: GPU recovery, frame
+    /// build, ants cadence and the needs-another-frame poll.
+    pub(in crate::app) fn on_main_redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if self.win.rendering {
+            return;
+        }
+        self.win.rendering = true;
+        // Diagnostic: slow-frame breakdown, logged at the end of this frame.
+        let frame_t0 = std::time::Instant::now();
+        let mut t_ui: Option<std::time::Duration> = None;
+        let mut t_actions: Option<std::time::Duration> = None;
+        let mut t_render: Option<std::time::Duration> = None;
+
+        // A lost GPU device (driver reset / TDR — typically after a
+        // heavy AI inference or an idle power cycle) invalidates every
+        // texture and pipeline; without this rebuild the app freezes on
+        // an endless stream of validation errors and eventually dies.
+        if self
+            .win
+            .gpu
+            .as_ref()
+            .is_some_and(|g| g.device_lost.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            self.recover_gpu_device();
+        }
+
+        if matches!(
+            self.win.startup_phase,
+            crate::app::state::StartupPhase::Loading(_)
+        ) && !self.finish_startup_if_ready(event_loop)
+        {
+            self.win.rendering = false;
+            return;
+        }
+
+        self.poll_file_dialog(event_loop);
+        self.poll_pdf_export();
+        self.poll_save_jobs();
+        self.poll_print_job();
+        self.poll_flow_text_image();
+        self.poll_mail_merge_data();
+        self.poll_mail_merge_export();
+        self.poll_raw_drafts(event_loop);
+        self.poll_raw_previews(event_loop);
+        self.poll_loads();
+        self.poll_raw_prefetch();
+        self.poll_develop_switch();
+        self.poll_iai_projects();
+        self.poll_pdf_probe();
+        self.poll_pdf_render();
+        self.poll_pdf_page_render();
+        self.flush_dropped_pdf_page_files();
+        self.poll_pdf_page_insert();
+        self.enter_pending_develop(event_loop);
+        self.poll_develop_bake_all();
+        self.poll_reload_open_file();
+        self.poll_transform_commit();
+        if !self.docs.crash_recovery_checked {
+            self.docs.crash_recovery_checked = true;
+            self.check_crash_recovery();
+        }
+        if let Some(notice) = crate::core::prefs_store::take_notice() {
+            crate::diag::note("prefs", notice);
+            self.shell.status_msg = notice.to_string();
+        }
+        self.maybe_autosave();
+
+        if self.win.pending_view_change {
+            let flushed_view = self.flush_pending_view_change();
+            if flushed_view {
+                self.win.last_cursor_radius = 0;
+                self.sync_cursor(event_loop);
+            }
+        }
+
+        if !self.edit.pending_stroke_inputs.is_empty() {
+            let events: Vec<_> = self.edit.pending_stroke_inputs.drain(..).collect();
+            let mut did_paint = false;
+            for event in events {
+                let mut ctx = ToolCtx::new(
+                    self.docs.active_mut(),
+                    self.edit.fg_color,
+                    self.edit.bg_color,
+                    self.edit.view.zoom,
+                    self.edit.view.offset_x,
+                    self.edit.view.offset_y,
+                );
+                let _ = self.edit.tools.on_drag(event, &mut ctx);
+                did_paint = true;
+            }
+            if did_paint {
+                let mut ctx = ToolCtx::new(
+                    self.docs.active_mut(),
+                    self.edit.fg_color,
+                    self.edit.bg_color,
+                    self.edit.view.zoom,
+                    self.edit.view.offset_x,
+                    self.edit.view.offset_y,
+                );
+                let _ = self.edit.tools.on_frame(&mut ctx);
+                self.flush_canvas();
+                self.docs.active_mut().canvas.selection.refresh_bbox();
+                if self.docs.active().canvas.selection.active {
+                    self.upload_selection_mask();
+                }
+            }
+        }
+
+        if self.docs.active().canvas.selection.active {
+            let now = std::time::Instant::now();
+            let delta = now.duration_since(self.win.last_selection_push);
+            if delta.as_millis() >= 16 {
+                self.push_selection_uniforms();
+                self.win.last_selection_push = now;
+            }
+        }
+
+        self.poll_select_subject();
+        self.poll_repair_ai();
+        if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
+            crate::core::lama::preload();
+        }
+        self.poll_pro_jobs();
+
+        self.update_refine_overlay_tex();
+        let t_polls = frame_t0.elapsed();
+
+        // Background jobs above must still make progress while minimized, but
+        // never build egui or acquire/present a hidden surface. A degenerate egui
+        // frame persists collapsed dock dimensions AND clamps floating panels to a
+        // tiny screen rect (they reappear stuck at the left edge on restore) — so
+        // skip the frame whenever the window is minimized or near-zero-sized. The
+        // real min inner size is 640x400, so a <200px dimension only ever occurs
+        // in the transient minimize/restore state, never for a real window.
+        let degenerate_size = self
+            .win
+            .window
+            .as_ref()
+            .map(|window| window.inner_size())
+            .is_some_and(|size| size.width < 200 || size.height < 200);
+        let minimized = self
+            .win
+            .window
+            .as_ref()
+            .is_some_and(|window| super::window_is_minimized(window));
+        if self.win.window_occluded || degenerate_size || minimized {
+            #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+            self.hide_document_webview();
+            self.win.rendering = false;
+            return;
+        }
+
+        // A stalled surface (acquire timeout / occluded window) blocks up to a
+        // second per attempt, so only retry when due (see `defer_stalled_present`).
+        {
+            let now = std::time::Instant::now();
+            let retry_due = self.win.surface_retry_at.is_none_or(|at| now >= at);
+            if let Some(gpu) = &mut self.win.gpu {
+                gpu.skip_present = gpu.surface_stalled && !retry_due;
+            }
+        }
+
+        if let Some(window) = self.win.window.as_ref().cloned() {
+            let mut main_frame_presented = self.win.gpu.is_none();
+            // "Ants-only" frame: this redraw was scheduled purely by the
+            // marching-ants timer (ants_redraw_pending — any other window
+            // event clears it) AND nothing carries new UI state: egui wants
+            // no repaint, no input/async/preview/transform is in flight.
+            // Reuse the last tessellated UI instead of rebuilding the whole
+            // immediate-mode tree ~15×/sec; only the selection `time` uniform
+            // (pushed above) advances. Every async poll still ran above, so
+            // a completing job can't be stranded by this skip.
+            let ants_only = self.win.ants_redraw_pending
+                && !self.win.cached_egui_primitives.is_empty()
+                && self.win.egui_repaint_deadline.is_none()
+                && self.docs.active().canvas.selection.active
+                && !self.edit.input.painting
+                && self.edit.pending_stroke_inputs.is_empty()
+                && !self.win.pending_view_change
+                && !self.win.interactive_recompose_pending
+                && self.edit.transform_state.is_none()
+                && self.edit.pending_fill.is_none()
+                && self.edit.pending_stroke.is_none()
+                && !self.dev.develop_gpu_preview_dirty
+                && self.shell.adjustment_preview_pending.is_none()
+                && !self.jobs.select_subject.is_busy()
+                && self.jobs.repair_ai.is_none()
+                && !self.pro_jobs_running()
+                && self.jobs.pending_file_dialog.is_none()
+                && self.jobs.pending_pdf_export.is_none()
+                && self.jobs.pending_mail_merge_data.is_none()
+                && self.jobs.pending_mail_merge_export.is_none()
+                && self.jobs.pending_loads.is_empty()
+                && !crate::core::lama::is_downloading();
+            self.win.ants_redraw_pending = false;
+
+            let pixels_per_point = window.scale_factor() as f32;
+            let backdrop = self.shell.ui.theme_mode.palette().canvas_backdrop();
+
+            if ants_only {
+                let hide_selection_outline = self.refine_hides_ants();
+                let draw_selection =
+                    self.docs.active().canvas.selection.active && !hide_selection_outline;
+                let canvas_clip = self.canvas_screen_clip();
+                let draw_canvas = self.main_window_draws_canvas();
+                let empty_delta = egui::TexturesDelta::default();
+                if let Some(gpu) = &mut self.win.gpu {
+                    let presented = gpu.render(
+                        &self.win.egui_ctx,
+                        &self.win.cached_egui_primitives,
+                        &empty_delta,
+                        pixels_per_point,
+                        draw_selection,
+                        None,
+                        backdrop,
+                        canvas_clip,
+                        draw_canvas,
+                    );
+                    main_frame_presented = presented;
+                    // A dropped frame (surface Outdated/Lost, now
+                    // reconfigured) must retry, or the window shows its
+                    // stale last frame until an external repaint.
+                    if !presented && !gpu.surface_stalled {
+                        window.request_redraw();
+                    }
+                }
+                if !self.win.window_visible {
+                    window.set_visible(true);
+                    self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
+                }
+            } else {
+                // Push the theme into egui's global Visuals only when it
+                // actually changed (set_global_style takes effect for this
+                // frame's run_ui below).
+                if self.win.theme_applied != Some(self.shell.ui.theme_mode) {
+                    crate::ui::theme::apply_theme(&self.win.egui_ctx, self.shell.ui.theme_mode);
+                    self.win.theme_applied = Some(self.shell.ui.theme_mode);
+                }
+                let ui_data = self.collect_ui_data();
+                let (primitives, textures_delta, actions, repaint_delay, cursor_icon) =
+                    crate::ui::build(
+                        &self.win.egui_ctx,
+                        &mut self.win.egui_state,
+                        &window,
+                        &ui_data,
+                    );
+                t_ui = Some(frame_t0.elapsed());
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                let document_webview_rect = actions.chrome.document_webview_rect;
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                let popup_open = self.win.egui_ctx.any_popup_open();
+                self.win.egui_repaint_deadline = if repaint_delay == std::time::Duration::MAX {
+                    None
+                } else {
+                    Some(std::time::Instant::now() + repaint_delay)
+                };
+                self.win.ui_cursor_icon = cursor_icon;
+                self.apply_ui_actions(actions, event_loop);
+                t_actions = Some(frame_t0.elapsed());
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                self.sync_document_webview(&window, document_webview_rect, popup_open);
+                self.flush_pending_adjustment_preview();
+
+                // Hover/layer ownership is authoritative only after this UI
+                // frame: a popup can appear without any pointer motion. Resolve
+                // both sides of the handoff, including egui's cached UI cursor.
+                self.refresh_pointer_ui_state(self.edit.input.mouse_x, self.edit.input.mouse_y);
+                self.sync_cursor(event_loop);
+
+                if self.docs.active().canvas.selection.active {
+                    self.push_selection_uniforms();
+                }
+
+                if let Some(fill_color) = self.edit.pending_fill.take() {
+                    self.docs.active_mut().canvas.fill_solid_color(fill_color);
+                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
+                }
+
+                if let Some(stroke) = self.edit.pending_stroke.take() {
+                    self.docs.active_mut().canvas.stroke_selection(stroke);
+                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
+                }
+
+                self.flush_canvas();
+                self.flush_pending_interactive_recompose();
+
+                self.flush_develop_gpu_preview();
+
+                // Recompute after apply_ui_actions, which may have toggled
+                // the selection / refine panel or changed the view.
+                let hide_selection_outline = self.refine_hides_ants();
+                let draw_selection =
+                    self.docs.active().canvas.selection.active && !hide_selection_outline;
+                let canvas_clip = self.canvas_screen_clip();
+                let draw_canvas = self.main_window_draws_canvas();
+
+                self.win.cached_egui_primitives = primitives;
+                if let Some(gpu) = &mut self.win.gpu {
+                    let presented = gpu.render(
+                        &self.win.egui_ctx,
+                        &self.win.cached_egui_primitives,
+                        &textures_delta,
+                        pixels_per_point,
+                        draw_selection,
+                        None,
+                        backdrop,
+                        canvas_clip,
+                        draw_canvas,
+                    );
+                    t_render = Some(frame_t0.elapsed());
+                    main_frame_presented = presented;
+                    // A dropped frame (surface Outdated/Lost, now
+                    // reconfigured) must retry, or the window shows its
+                    // stale last frame until an external repaint.
+                    if !presented && !gpu.surface_stalled {
+                        window.request_redraw();
+                    }
+                }
+                if !self.win.window_visible {
+                    window.set_visible(true);
+                    self.win.window_visible = true;
+                    self.win.startup_focus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+                    // Activate on first reveal so Windows gives the hidden-created
+                    // borderless window a real WM_SETFOCUS (IME association),
+                    // otherwise it dings on every keystroke until minimise+restore.
+                    window.focus_window();
+                }
+            }
+            if main_frame_presented {
+                self.retire_develop_window_after_main_present();
+            } else {
+                self.defer_stalled_present();
+            }
+        }
+        // The Develop window samples the shared compositor, so it must
+        // resample after the main window recomposites (e.g. a Develop
+        // slider changed the live preview).
+        if let Some(dev) = &self.win.develop_window {
+            dev.request_redraw();
+        }
+        // Each mark is the time into the frame at which that stage was done.
+        let frame = frame_t0.elapsed();
+        let breakdown = || {
+            let ms = |t: Option<std::time::Duration>| t.map_or(-1, |d| d.as_millis() as i64);
+            format!(
+                "polls@{} ui@{} actions@{} render@{}; transform={} commit_pending={} canvas={}x{}",
+                t_polls.as_millis(),
+                ms(t_ui),
+                ms(t_actions),
+                ms(t_render),
+                self.edit.transform_state.is_some(),
+                self.edit.pending_transform_commit.is_some(),
+                self.docs.active().canvas.width,
+                self.docs.active().canvas.height,
+            )
+        };
+        if frame.as_millis() >= 200 {
+            eprintln!(
+                "iai[perf]: slow frame {} ms ({})",
+                frame.as_millis(),
+                breakdown()
+            );
+        }
+        self.journal_frame_state();
+        crate::diag::frame(frame, breakdown);
+        self.win.rendering = false;
+    }
+
+    /// After a frame that could not present because the surface stalled, wait
+    /// before acquiring again instead of re-requesting a redraw at once: each
+    /// attempt can block the UI thread for wgpu's full one-second timeout.
+    /// Focus or pointer motion clears the wait (see `window_event`).
+    fn defer_stalled_present(&mut self) {
+        if !self.win.gpu.as_ref().is_some_and(|gpu| gpu.surface_stalled) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let delay = if self.win.window_focused {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+        // Keep a retry that is still pending; a skipped frame must not push it out.
+        let at = match self.win.surface_retry_at {
+            Some(at) if at > now => at,
+            _ => now + delay,
+        };
+        self.win.surface_retry_at = Some(at);
+        self.win.egui_repaint_deadline = Some(
+            self.win
+                .egui_repaint_deadline
+                .map_or(at, |deadline| deadline.min(at)),
+        );
+    }
+}

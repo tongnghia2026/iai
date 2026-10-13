@@ -1,0 +1,52 @@
+/target/
+/.target-*/
+/dist/
+/web/document-editor/node_modules/
+/.pnpm-store/
+/output/
+/tmp/
+/_photo_plan/
+/_tu-dong-in-fix/
+/models/**/*.onnx
+/models/**/*.pth
+/models/**/*.tflite
+**/*.rs.bk
+.env
+*.psd
+.vscode/
+.claude/
+
+# Crash-recovery / temp files
+*.tmp
+*.iai.tmp
+
+# AI credentials — real path is %APPDATA%/IAI/ai.json (outside the repo);
+# these patterns are defensive so a key never lands in a commit.
+ai.json
+*.key
+secrets.json
+# The author's key that signs Pro keys lives in %APPDATA%/IAI/owner; a copy
+# kept in this folder for backup must never be committed.
+/KHOA_CAP_MA_PRO/
+pro_signing_key*
+pro_ledger*
+
+# Ad-hoc patch scripts (dev-only, not part of the build)
+patch_*.py
+__pycache__/
+
+# Stray test images / scratch assets
+z*.jpg
+BB.jpg
+Untitled.png
+cr_test.jpg
+anh-mau/
+scratch/
+
+# Local artifacts / large test assets (never commit — GitHub rejects big files)
+*.zip
+*.CR2
+*.NEF
+*.ARW
+*.DNG
+IMG_*.*

@@ -1,0 +1,2247 @@
+use super::{UiActions, UiData};
+use crate::app::commands::Command;
+use crate::formats::ExportFormat;
+use egui;
+use egui_phosphor::regular as ph;
+
+pub const TITLEBAR_H: f32 = 28.0;
+
+fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let cache_id = egui::Id::new("iai_logo_tex");
+    let cached = ctx.data(|d| d.get_temp::<egui::TextureHandle>(cache_id));
+    if let Some(tex) = cached {
+        return Some(tex);
+    }
+    let bytes = include_bytes!("../../logo_iAi.png");
+    // The logo may ship far larger than it renders; clamp its side to a size every
+    // GPU accepts (older cards cap texture sides at 2048) before uploading it.
+    let src = image::load_from_memory(bytes).ok()?;
+    let src = if src.width().max(src.height()) > 512 {
+        src.resize(512, 512, image::imageops::FilterType::Lanczos3)
+    } else {
+        src
+    };
+    let img = src.into_rgba8();
+    let (w, h) = img.dimensions();
+    let color_image =
+        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+    let tex = ctx.load_texture("iai_logo", color_image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(cache_id, tex.clone()));
+    Some(tex)
+}
+
+#[allow(deprecated)]
+pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    let logo_tex = load_logo(ctx);
+    let pal = data.chrome.theme_mode.palette();
+
+    egui::TopBottomPanel::top("titlebar")
+        .exact_size(TITLEBAR_H)
+        .frame(
+            egui::Frame::new()
+                .fill(pal.top_bar_bg)
+                .inner_margin(egui::Margin::ZERO),
+        )
+        .show(ctx, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            {
+                let visuals = ui.visuals_mut();
+                visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
+            }
+
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+
+                ui.add_space(6.0);
+                if let Some(ref tex) = logo_tex {
+                    let tex_size = tex.size_vec2();
+                    let icon_h = 20.0_f32;
+                    let icon_w = icon_h * tex_size.x / tex_size.y;
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(icon_w, icon_h), egui::Sense::hover());
+                    let logo_color = pal.text_primary;
+                    ui.painter().image(
+                        tex.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        logo_color,
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("P")
+                            .size(16.0)
+                            .strong()
+                            .color(pal.accent_primary),
+                    );
+                }
+                ui.add_space(6.0);
+
+                ui.add(egui::Separator::default().vertical());
+                ui.add_space(2.0);
+
+                ui.spacing_mut().item_spacing.x = 2.0;
+
+                // Strict modal lock: the menus are disabled while a modal
+                // operation is open; clicking them rings the bell. The window
+                // buttons further right stay live.
+                let menus = ui.add_enabled_ui(!data.chrome.is_tool_modal, |ui| {
+                    ui.scope(|ui| {
+                        let visuals = ui.visuals_mut();
+                        visuals.window_fill = pal.panel_bg;
+                        visuals.window_stroke = egui::Stroke::new(1.0_f32, pal.border_subtle);
+                        visuals.widgets.hovered.bg_fill = pal.hover_bg;
+                        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                        visuals.widgets.hovered.fg_stroke =
+                            egui::Stroke::new(1.0_f32, pal.text_primary);
+
+                        ui.menu_button("File", |ui| {
+                            file_menu(ui, data, actions, pal);
+                        });
+                    });
+
+                    ui.menu_button("Edit", |ui| {
+                        edit_menu(ui, data, actions);
+                    });
+
+                    ui.menu_button("Image", |ui| {
+                        image_menu(ui, data, actions, pal);
+                    });
+
+                    ui.menu_button("Layer", |ui| {
+                        layer_menu(ui, data, actions);
+                    });
+
+                    ui.menu_button("Object", |ui| {
+                        object_menu(ui, data, actions);
+                    });
+
+                    // Everything that acts on type, gathered in one place.
+                    ui.menu_button("Text", |ui| {
+                        text_menu(ui, data, actions);
+                    });
+
+                    ui.menu_button("Select", |ui| {
+                        select_menu(ui, data, actions);
+                    });
+
+                    ui.menu_button("Filter", |ui| {
+                        filter_menu(ui, actions);
+                    });
+
+                    ui.menu_button("View", |ui| {
+                        view_menu(ui, data, actions, pal);
+                    });
+
+                    ui.menu_button("Window", |ui| {
+                        window_menu(ui, pal);
+                    });
+
+                    ui.menu_button("Help", |ui| {
+                        help_menu(ui, data, actions, pal);
+                    });
+
+                    // The "AI" window is a direct action, not a drop-down
+                    // menu: one click opens it, on the tab it showed last. It
+                    // sits slightly separated at the outer end of the menu row.
+                    #[cfg(feature = "pro")]
+                    {
+                        ui.add_space(10.0);
+                        let open = data.ai.tab.is_some();
+                        if ui
+                            .add_enabled(
+                                data.doc.has_doc,
+                                egui::Button::new(super::ai_window::TITLE).selected(open),
+                            )
+                            .on_hover_text("AI online, AI offline (Gói Pro)")
+                            .clicked()
+                            && !open
+                        {
+                            actions.ai.open_ai_window = Some(super::ai_window::last_tab());
+                        }
+                    }
+                });
+                if data.chrome.is_tool_modal
+                    && ui.input(|i| i.pointer.primary_clicked())
+                    && ui
+                        .input(|i| i.pointer.interact_pos())
+                        .is_some_and(|pos| menus.response.rect.contains(pos))
+                {
+                    actions.chrome.modal_denied = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+
+                    let close_hovered_id = egui::Id::new("tb_close_hovered");
+                    let close_hovered = ctx
+                        .data(|d| d.get_temp::<bool>(close_hovered_id))
+                        .unwrap_or(false);
+                    let close_fill = if close_hovered {
+                        pal.danger
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let close_resp = ui.add(
+                        egui::Button::new(egui::RichText::new(ph::X).size(10.0).color(pal.icon))
+                            .frame(false)
+                            .fill(close_fill)
+                            .min_size(egui::vec2(44.0, TITLEBAR_H)),
+                    );
+                    ctx.data_mut(|d| d.insert_temp(close_hovered_id, close_resp.hovered()));
+                    if close_resp.clicked() {
+                        actions.doc.exit = true;
+                    }
+
+                    let max_hovered_id = egui::Id::new("tb_max_hovered");
+                    let max_hovered = ctx
+                        .data(|d| d.get_temp::<bool>(max_hovered_id))
+                        .unwrap_or(false);
+                    let max_fill = if max_hovered {
+                        pal.hover_bg
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let max_resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::SQUARE).size(10.0).color(pal.icon),
+                        )
+                        .frame(false)
+                        .fill(max_fill)
+                        .min_size(egui::vec2(44.0, TITLEBAR_H)),
+                    );
+                    ctx.data_mut(|d| d.insert_temp(max_hovered_id, max_resp.hovered()));
+                    if max_resp.clicked() {
+                        actions.chrome.window_maximize_toggle = true;
+                    }
+
+                    let min_hovered_id = egui::Id::new("tb_min_hovered");
+                    let min_hovered = ctx
+                        .data(|d| d.get_temp::<bool>(min_hovered_id))
+                        .unwrap_or(false);
+                    let min_fill = if min_hovered {
+                        pal.hover_bg
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let min_resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::MINUS).size(10.0).color(pal.icon),
+                        )
+                        .frame(false)
+                        .fill(min_fill)
+                        .min_size(egui::vec2(44.0, TITLEBAR_H)),
+                    );
+                    ctx.data_mut(|d| d.insert_temp(min_hovered_id, min_resp.hovered()));
+                    if min_resp.clicked() {
+                        actions.chrome.window_minimize = true;
+                    }
+
+                    ui.add_space(4.0);
+                    ui.add(egui::Separator::default().vertical().shrink(6.0));
+                    ui.add_space(8.0);
+
+                    // A newer build of the app: shown only while there is
+                    // something to do about it, and live under a modal lock.
+                    let update = &data.chrome.update;
+                    if let Some(label) = super::dialogs::update_button_label(update) {
+                        let icon = match update.stage {
+                            crate::ui::UpdateStage::DownloadFailed(_) => ph::WARNING,
+                            _ => ph::ARROW_CIRCLE_UP,
+                        };
+                        let button = egui::Button::new(
+                            egui::RichText::new(format!("{icon}  {label}"))
+                                .size(11.5)
+                                .strong()
+                                .color(super::dialogs::UPDATE_BUTTON_TEXT),
+                        )
+                        .fill(super::dialogs::update_button_fill(update, pal))
+                        .corner_radius(10.0);
+                        if ui.add(button).clicked() {
+                            actions.chrome.show_update_dialog = Some(true);
+                        }
+                        ui.add_space(8.0);
+                    }
+
+                    // The author's music is one way to support the app: the
+                    // button opens the ways there are, for the user to pick
+                    // one. Its words give way to the icon on a narrow window.
+                    let hint = super::dialogs::SUPPORT_TITLE;
+                    let worded = ui.available_width() > 220.0;
+                    let text = if worded {
+                        format!("{}  {hint}", ph::MUSIC_NOTES)
+                    } else {
+                        ph::MUSIC_NOTES.to_string()
+                    };
+                    let mut music = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(text).size(11.5).color(pal.text_primary),
+                        )
+                        .fill(pal.accent_selected_bg)
+                        .corner_radius(10.0),
+                    );
+                    if !worded {
+                        music = music.on_hover_text(hint);
+                    }
+                    if music.clicked() {
+                        actions.chrome.open_support = Some(crate::ui::SupportDialog::Support);
+                    }
+                    ui.add_space(8.0);
+
+                    let drag_w = ui.available_width();
+                    if drag_w > 2.0 {
+                        let (_, drag_resp) = ui.allocate_exact_size(
+                            egui::vec2(drag_w, TITLEBAR_H),
+                            egui::Sense::click_and_drag(),
+                        );
+                        if drag_resp.double_clicked() {
+                            actions.chrome.window_maximize_toggle = true;
+                        }
+                        if drag_resp.drag_started() {
+                            actions.chrome.window_drag = true;
+                        }
+                    }
+                });
+            });
+        });
+}
+
+fn file_menu(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: crate::ui::theme::Palette,
+) {
+    if ui
+        .add(menu_item("New", &data.keymap.label_for(Command::FileNew)))
+        .clicked()
+    {
+        actions.dialogs.show_new_dialog = Some(true);
+        ui.close();
+    }
+    if ui
+        .add(menu_item(
+            "Open...",
+            &data.keymap.label_for(Command::FileOpen),
+        ))
+        .clicked()
+    {
+        actions.doc.open_file = true;
+        ui.close();
+    }
+    ui.menu_button("Open Recent", |ui| {
+        if data.welcome.recent.is_empty() {
+            ui.label(
+                egui::RichText::new("(No recent files)")
+                    .color(pal.text_secondary)
+                    .size(11.0),
+            );
+        } else {
+            for item in data.welcome.recent.iter().take(15) {
+                if ui
+                    .button(&item.name)
+                    .on_hover_text(item.path.display().to_string())
+                    .clicked()
+                {
+                    actions.doc.open_recent = Some(item.path.clone());
+                    ui.close();
+                }
+            }
+        }
+    });
+    if ui
+        .add(menu_item_enabled(
+            "Close",
+            &data.keymap.label_for(Command::FileClose),
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.doc.close_doc_tab = Some(data.doc.active_doc_idx);
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item("Save", &data.keymap.label_for(Command::FileSave)))
+        .clicked()
+    {
+        actions.doc.save = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item(
+            "Save As...",
+            &data.keymap.label_for(Command::FileSaveAs),
+        ))
+        .clicked()
+    {
+        actions.doc.save_as = true;
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("Export As", |ui| {
+        if ui
+            .add(menu_item_enabled("PDF…", "", data.doc.has_doc))
+            .clicked()
+        {
+            actions.doc.show_pdf_export_dialog = Some(true);
+            ui.close();
+        }
+        ui.separator();
+        for fmt in ExportFormat::all_export() {
+            if matches!(fmt, ExportFormat::Pdf { .. }) {
+                continue;
+            }
+            if ui.button(format!("{}...", fmt.name())).clicked() {
+                actions.doc.export = Some(fmt);
+                actions.dialogs.show_export_dialog = Some(true);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui
+            .add(menu_item_enabled("SVG (Vector)...", "", data.doc.has_doc))
+            .clicked()
+        {
+            actions.print.export_svg = true;
+            ui.close();
+        }
+    });
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Print...",
+            &data.keymap.label_for(Command::FilePrint),
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.print.show_print_dialog = Some(true);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "CMYK Separations...",
+            "",
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.print.export_cmyk_separations = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item(
+            "Preferences",
+            &data.keymap.label_for(Command::Preferences),
+        ))
+        .clicked()
+    {
+        actions.dialogs.show_preferences = Some(true);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Exit").clicked() {
+        actions.doc.exit = true;
+        ui.close();
+    }
+}
+
+fn edit_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if ui
+        .add(menu_item_enabled(
+            "Undo",
+            &data.keymap.label_for(Command::EditUndo),
+            data.doc.undo_count > 0,
+        ))
+        .clicked()
+    {
+        actions.doc.undo = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Redo",
+            &data.keymap.label_for(Command::EditRedo),
+            data.doc.redo_count > 0,
+        ))
+        .clicked()
+    {
+        actions.doc.redo = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Cut",
+            &data.keymap.label_for(Command::EditCut),
+            data.sel.has_selection,
+        ))
+        .clicked()
+    {
+        actions.doc.cut = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item("Copy", &data.keymap.label_for(Command::EditCopy)))
+        .clicked()
+    {
+        actions.doc.copy = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item(
+            "Paste",
+            &data.keymap.label_for(Command::EditPaste),
+        ))
+        .clicked()
+    {
+        actions.doc.paste = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Free Transform",
+            &data.keymap.label_for(Command::FreeTransform),
+            data.doc.has_doc && !data.doc.is_cmyk,
+        ))
+        .clicked()
+    {
+        actions.tool.start_transform = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Fill Foreground",
+            "Alt+Delete",
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.doc.fill_foreground = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Fill Background",
+            "Ctrl+Delete",
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.doc.fill_background = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled("Clear", "Delete", data.sel.has_selection))
+        .clicked()
+    {
+        actions.sel.clear_selection_pixels = true;
+        ui.close();
+    }
+    let pdf_base_selected = data.doc.pdf_nav.is_some()
+        && data.sel.has_selection
+        && data
+            .layers
+            .layer_is_background
+            .get(data.layers.active_layer_idx)
+            .copied()
+            .unwrap_or(false);
+    if ui
+        .add(menu_item_enabled(
+            "Clear on PDF Page Range…",
+            "Shift+Delete",
+            pdf_base_selected,
+        ))
+        .clicked()
+    {
+        actions.sel.clear_selection_all_pdf_pages = true;
+        ui.close();
+    }
+    let active_layer_type = data
+        .layers
+        .layer_types
+        .get(data.layers.active_layer_idx)
+        .map(String::as_str)
+        .unwrap_or("");
+    let active_is_background = data
+        .layers
+        .layer_is_background
+        .get(data.layers.active_layer_idx)
+        .copied()
+        .unwrap_or(false);
+    if ui
+        .add(menu_item_enabled(
+            "Add Current Text to PDF Page Range…",
+            "",
+            data.doc.pdf_nav.is_some() && active_layer_type == "Text",
+        ))
+        .clicked()
+    {
+        actions.sel.add_text_all_pdf_pages = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Add Current Image to All PDF Pages",
+            "",
+            data.doc.pdf_nav.is_some()
+                && matches!(active_layer_type, "Raster" | "SmartObject")
+                && !active_is_background,
+        ))
+        .clicked()
+    {
+        actions.sel.add_image_all_pdf_pages = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Smart Fill",
+            "Shift+F5",
+            data.sel.has_selection,
+        ))
+        .clicked()
+    {
+        actions.dialogs.smart_fill_fill = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item(
+            "Preferences",
+            &data.keymap.label_for(Command::Preferences),
+        ))
+        .clicked()
+    {
+        actions.dialogs.show_preferences = Some(true);
+        ui.close();
+    }
+}
+
+#[allow(deprecated)] // egui::SelectableLabel, in the Mode submenu
+fn image_menu(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: crate::ui::theme::Palette,
+) {
+    if ui.add(menu_item("Canvas Size...", "")).clicked() {
+        actions.dialogs.show_resize_dialog = Some(true);
+        ui.close();
+    }
+    if ui.add(menu_item("Image Size...", "Ctrl+Alt+I")).clicked() {
+        actions.dialogs.show_image_size_dialog = Some(true);
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("Mode", |ui| {
+        if ui
+            .selectable_label(!data.doc.is_cmyk, "RGB Color")
+            .clicked()
+        {
+            if data.doc.is_cmyk {
+                actions.doc.convert_rgb_mode = true;
+            }
+            ui.close();
+        }
+        let cmyk_label = if data.doc.is_cmyk {
+            format!("CMYK Color — {}", data.doc.cmyk_profile_name)
+        } else {
+            "CMYK Color…".to_string()
+        };
+        if ui
+            .add_enabled(
+                data.doc.has_doc,
+                egui::SelectableLabel::new(data.doc.is_cmyk, cmyk_label),
+            )
+            .clicked()
+        {
+            if !data.doc.is_cmyk {
+                actions.doc.show_cmyk_convert_dialog = Some(true);
+            }
+            ui.close();
+        }
+        ui.separator();
+        // Bit depth applies to RGB documents (CMYK ink is 8-bit).
+        ui.add_enabled_ui(!data.doc.is_cmyk, |ui| {
+            if ui
+                .selectable_label(data.doc.canvas_bit_depth == 8, "8 Bits/Channel")
+                .clicked()
+            {
+                actions.doc.set_bit_depth = Some(false);
+                ui.close();
+            }
+            if ui
+                .selectable_label(data.doc.canvas_bit_depth == 16, "16 Bits/Channel")
+                .clicked()
+            {
+                actions.doc.set_bit_depth = Some(true);
+                ui.close();
+            }
+        });
+        ui.separator();
+        if ui
+            .add_enabled(
+                data.doc.has_doc && !data.doc.is_cmyk,
+                egui::Button::new("Grayscale"),
+            )
+            .clicked()
+        {
+            actions.doc.convert_grayscale = true;
+            ui.close();
+        }
+    });
+    ui.menu_button("Color Profile", |ui| {
+        ui.label(
+            egui::RichText::new("Assign Profile")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        for wp in crate::core::cms::WorkingProfile::all() {
+            if ui
+                .add_enabled(data.doc.has_doc, egui::Button::new(wp.name()))
+                .clicked()
+            {
+                actions.doc.assign_profile = Some(*wp);
+                ui.close();
+            }
+        }
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Convert to Profile")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        for wp in crate::core::cms::WorkingProfile::all() {
+            if ui
+                .add_enabled(data.doc.has_doc, egui::Button::new(wp.name()))
+                .clicked()
+            {
+                actions.doc.convert_profile = Some(*wp);
+                ui.close();
+            }
+        }
+    });
+    ui.separator();
+    ui.menu_button("Rotate Canvas", |ui| {
+        if ui.button("90° Clockwise").clicked() {
+            actions.doc.rotate_cw = true;
+            ui.close();
+        }
+        if ui.button("90° Counter-Clockwise").clicked() {
+            actions.doc.rotate_ccw = true;
+            ui.close();
+        }
+    });
+    ui.menu_button("Flip Canvas", |ui| {
+        if ui.button("Flip Horizontal").clicked() {
+            actions.doc.flip_horizontal = true;
+            ui.close();
+        }
+        if ui.button("Flip Vertical").clicked() {
+            actions.doc.flip_vertical = true;
+            ui.close();
+        }
+    });
+    ui.menu_button("Trang · Artboard", |ui| {
+        let en = data.doc.has_doc;
+        if ui
+            .add_enabled(en, egui::Button::new("Thêm Artboard"))
+            .on_hover_text("Thêm một trang mới cạnh phải (mở rộng vùng làm việc)")
+            .clicked()
+        {
+            actions.doc.add_artboard = true;
+            ui.close();
+        }
+        ui.separator();
+        // Bleed / safe-margin are drawn as guides on the page
+        // sheet. Presets cover the print-standard 3 mm bleed;
+        // 0 turns the guide off.
+        ui.menu_button("Bleed", |ui| {
+            for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
+                if ui.add_enabled(en, egui::Button::new(label)).clicked() {
+                    actions.doc.set_page_bleed_mm = Some(mm);
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Lề an toàn", |ui| {
+            for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
+                if ui.add_enabled(en, egui::Button::new(label)).clicked() {
+                    actions.doc.set_page_margin_mm = Some(mm);
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+        // Master (shared background) page: one background/frame
+        // inherited by every page, edited once.
+        let master_label = if data.doc.editing_master {
+            "✓ Xong trang nền"
+        } else if data.doc.has_master {
+            "Chỉnh trang nền (Master)"
+        } else {
+            "Tạo trang nền (Master)…"
+        };
+        if ui
+            .add_enabled(en, egui::Button::new(master_label))
+            .on_hover_text("Trang nền dùng chung hiện dưới mọi trang — sửa một lần, áp cho tất cả")
+            .clicked()
+        {
+            actions.doc.toggle_master_edit = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                en && data.doc.has_master,
+                egui::Button::new("Xoá trang nền"),
+            )
+            .clicked()
+        {
+            actions.doc.delete_master = true;
+            ui.close();
+        }
+    });
+    ui.separator();
+    if ui
+        .add(menu_item(
+            "Develop...",
+            &data.keymap.label_for(Command::OpenDevelop),
+        ))
+        .clicked()
+    {
+        actions.develop.open_develop_dialog = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Làm sạch bản scan…",
+            "",
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.dialogs.show_scan_cleanup_dialog = Some(true);
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("Adjustments", |ui| {
+        use crate::core::layer::AdjustmentType;
+        if ui
+            .add(menu_item(
+                "Levels...",
+                &data.keymap.label_for(Command::Levels),
+            ))
+            .clicked()
+        {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::default_levels());
+            ui.close();
+        }
+        if ui
+            .add(menu_item_enabled(
+                "Auto Levels",
+                &data.keymap.label_for(Command::AutoLevels),
+                data.doc.has_doc,
+            ))
+            .clicked()
+        {
+            actions.dialogs.auto_levels = true;
+            ui.close();
+        }
+        if ui
+            .add(menu_item(
+                "Curves...",
+                &data.keymap.label_for(Command::Curves),
+            ))
+            .clicked()
+        {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::default_curves());
+            ui.close();
+        }
+        if ui
+            .add(menu_item(
+                "Color Balance...",
+                &data.keymap.label_for(Command::ColorBalance),
+            ))
+            .clicked()
+        {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::ColorBalance {
+                shadows: [0.0; 3],
+                midtones: [0.0; 3],
+                highlights: [0.0; 3],
+                preserve_luminosity: true,
+            });
+            ui.close();
+        }
+        if ui
+            .add(menu_item(
+                "Hue/Saturation...",
+                &data.keymap.label_for(Command::HueSaturation),
+            ))
+            .clicked()
+        {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::HueSaturation {
+                hue: 0.0,
+                saturation: 0.0,
+                lightness: 0.0,
+            });
+            ui.close();
+        }
+        if ui
+            .add(menu_item_enabled(
+                "Desaturate",
+                &data.keymap.label_for(Command::Desaturate),
+                data.doc.has_doc,
+            ))
+            .clicked()
+        {
+            actions.dialogs.apply_direct_adjustment = Some(AdjustmentType::Desaturate);
+            ui.close();
+        }
+        if ui
+            .add(menu_item_enabled(
+                "Invert",
+                &data.keymap.label_for(Command::Invert),
+                data.doc.has_doc,
+            ))
+            .clicked()
+        {
+            actions.layers.invert_active = Some(data.layers.active_layer_idx);
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(menu_item("Brightness/Contrast...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::BrightnessContrast {
+                brightness: 0.0,
+                contrast: 0.0,
+            });
+            ui.close();
+        }
+        if ui.add(menu_item("Exposure...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::Exposure {
+                exposure: 0.0,
+                offset: 0.0,
+                gamma: 1.0,
+            });
+            ui.close();
+        }
+        if ui.add(menu_item("Vibrance...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::Vibrance {
+                vibrance: 0.0,
+                saturation: 0.0,
+            });
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(menu_item("Threshold...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::Threshold { value: 128 });
+            ui.close();
+        }
+        if ui.add(menu_item("Posterize...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::Posterize { levels: 4 });
+            ui.close();
+        }
+        ui.separator();
+        if ui.add(menu_item("Black & White...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::BlackAndWhite {
+                r: 40.0,
+                y: 60.0,
+                g: 40.0,
+                c: 60.0,
+                b: 20.0,
+                m: 80.0,
+            });
+            ui.close();
+        }
+        if ui.add(menu_item("Channel Mixer...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::ChannelMixer {
+                red: [1.0, 0.0, 0.0],
+                green: [0.0, 1.0, 0.0],
+                blue: [0.0, 0.0, 1.0],
+                monochrome: false,
+            });
+            ui.close();
+        }
+        if ui.add(menu_item("Photo Filter...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::PhotoFilter {
+                color: [236, 138, 0],
+                density: 0.25,
+                luminosity: true,
+            });
+            ui.close();
+        }
+        if ui.add(menu_item("Gradient Map...", "")).clicked() {
+            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::default_gradient_map());
+            ui.close();
+        }
+    });
+}
+
+fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if ui.button("New Layer").clicked() {
+        actions.layers.add_layer = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Duplicate Layer",
+            "",
+            data.layers.layer_count > 0,
+        ))
+        .clicked()
+    {
+        actions.layers.duplicate_layer = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Layer via Copy",
+            &data.keymap.label_for(Command::LayerViaCopy),
+            data.layers.layer_count > 0,
+        ))
+        .clicked()
+    {
+        actions.layers.layer_via_copy = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Delete Layer",
+            "Delete",
+            data.layers.layer_count > 1,
+        ))
+        .clicked()
+    {
+        actions.layers.remove_layer = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Rasterize Layer",
+            "",
+            data.layers
+                .layer_types
+                .get(data.layers.active_layer_idx)
+                .is_some_and(|t| t == "Path"),
+        ))
+        .clicked()
+    {
+        actions.layers.rasterize_layer = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Convert to Curves",
+            "Ctrl+Q",
+            data.layers
+                .layer_types
+                .get(data.layers.active_layer_idx)
+                .is_some_and(|t| t == "Shape"),
+        ))
+        .clicked()
+    {
+        actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    {
+        use crate::core::vector::boolean::BooleanOp;
+        // Enabled once at least two selected vector objects
+        // (Shape or Path, unlocked, non-background) exist.
+        let shaping_enabled = (0..data.layers.layer_count)
+            .filter(|&i| {
+                data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                    && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                    && !data
+                        .layers
+                        .layer_is_background
+                        .get(i)
+                        .copied()
+                        .unwrap_or(false)
+                    && data
+                        .layers
+                        .layer_types
+                        .get(i)
+                        .is_some_and(|t| t == "Shape" || t == "Path")
+            })
+            .count()
+            >= 2;
+        ui.add_enabled_ui(shaping_enabled, |ui| {
+            ui.menu_button("Shaping", |ui| {
+                for (label, op) in [
+                    ("Weld", BooleanOp::Union),
+                    ("Trim", BooleanOp::Difference),
+                    ("Intersect", BooleanOp::Intersect),
+                    ("Simplify", BooleanOp::Exclude),
+                ] {
+                    if ui.button(label).clicked() {
+                        actions.layers.boolean_op = Some(op);
+                        ui.close();
+                    }
+                }
+            });
+        });
+    }
+    {
+        // PowerClip: place selected content inside a selected
+        // vector frame. Enabled when ≥2 layers are selected and
+        // at least one of them is a vector (the frame); the
+        // command re-validates the exact roles.
+        let sel = |i: usize| {
+            data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                && !data.layers.layer_locked.get(i).copied().unwrap_or(false)
+                && !data
+                    .layers
+                    .layer_is_background
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
+        };
+        let sel_total = (0..data.layers.layer_count).filter(|&i| sel(i)).count();
+        let sel_vector = (0..data.layers.layer_count)
+            .filter(|&i| {
+                sel(i)
+                    && data
+                        .layers
+                        .layer_types
+                        .get(i)
+                        .is_some_and(|t| t == "Shape" || t == "Path")
+            })
+            .count();
+        let place_enabled = sel_total >= 2 && sel_vector >= 1;
+        ui.menu_button("PowerClip", |ui| {
+            if ui
+                .add(menu_item_enabled("Place Inside Frame", "", place_enabled))
+                .on_hover_text(
+                    "Place the selected content inside the topmost vector \
+                     shape (content is clipped to the frame)",
+                )
+                .clicked()
+            {
+                actions.layers.powerclip_place = true;
+                ui.close();
+            }
+            if ui
+                .button("Extract From Frame")
+                .on_hover_text("Remove the clip: release the selected content")
+                .clicked()
+            {
+                actions.layers.powerclip_release = true;
+                ui.close();
+            }
+            // Edit the content in place (unclip → edit → re-clip).
+            let edit_label = if data.layers.powerclip_editing {
+                "Finish Editing Contents"
+            } else {
+                "Edit Contents"
+            };
+            let edit_enabled = data.layers.powerclip_editing
+                || (0..data.layers.layer_count).any(|i| {
+                    data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                        && data
+                            .layers
+                            .layer_is_clipped
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false)
+                })
+                || (0..data.layers.layer_count).any(|i| {
+                    data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                        && data
+                            .layers
+                            .layer_is_clip_base
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false)
+                });
+            if ui
+                .add_enabled(edit_enabled, egui::Button::new(edit_label))
+                .on_hover_text(
+                    "Show the frame's content unclipped so you can move / \
+                     edit it, then finish to re-clip it in place",
+                )
+                .clicked()
+            {
+                actions.layers.powerclip_edit_contents = true;
+                ui.close();
+            }
+            ui.separator();
+            // Arrange the content inside its frame (Corel-style).
+            // Enabled when a selected layer is PowerClip content.
+            use crate::app::powerclip_ops::PowerClipFit;
+            let arrange_enabled = (0..data.layers.layer_count).any(|i| {
+                data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                    && data
+                        .layers
+                        .layer_is_clipped
+                        .get(i)
+                        .copied()
+                        .unwrap_or(false)
+            });
+            for (label, mode, hint) in [
+                (
+                    "Center Content",
+                    PowerClipFit::Center,
+                    "Centre the content in the frame (no scaling)",
+                ),
+                (
+                    "Fit Content",
+                    PowerClipFit::Fit,
+                    "Scale the content to fit entirely inside the frame",
+                ),
+                (
+                    "Fill Frame",
+                    PowerClipFit::Fill,
+                    "Scale the content to cover the frame (overflow clipped)",
+                ),
+                (
+                    "Stretch to Fill",
+                    PowerClipFit::Stretch,
+                    "Stretch the content to exactly fill the frame",
+                ),
+            ] {
+                if ui
+                    .add_enabled(arrange_enabled, egui::Button::new(label))
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    actions.layers.powerclip_arrange = Some(mode);
+                    ui.close();
+                }
+            }
+        });
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Clipping Mask",
+            "Ctrl+Alt+G",
+            data.layers.layer_count > 1,
+        ))
+        .on_hover_text(
+            "Clip the selected layer to the shape of the layer directly \
+             below (click again to release). Works for both vector and pixel.",
+        )
+        .clicked()
+    {
+        actions.layers.toggle_clipping_mask = true;
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("New Adjustment Layer", |ui| {
+        use crate::core::layer::AdjustmentType;
+        let adjs = [
+            (
+                "Brightness/Contrast",
+                AdjustmentType::BrightnessContrast {
+                    brightness: 0.0,
+                    contrast: 0.0,
+                },
+            ),
+            (
+                "Hue/Saturation",
+                AdjustmentType::HueSaturation {
+                    hue: 0.0,
+                    saturation: 0.0,
+                    lightness: 0.0,
+                },
+            ),
+            ("Levels", AdjustmentType::default_levels()),
+            ("Curves", AdjustmentType::default_curves()),
+            (
+                "Vibrance",
+                AdjustmentType::Vibrance {
+                    vibrance: 0.0,
+                    saturation: 0.0,
+                },
+            ),
+            (
+                "Exposure",
+                AdjustmentType::Exposure {
+                    exposure: 0.0,
+                    offset: 0.0,
+                    gamma: 1.0,
+                },
+            ),
+            ("Invert", AdjustmentType::Invert),
+            ("Threshold", AdjustmentType::Threshold { value: 128 }),
+            ("Posterize", AdjustmentType::Posterize { levels: 4 }),
+            ("Desaturate", AdjustmentType::Desaturate),
+            (
+                "Black & White",
+                AdjustmentType::BlackAndWhite {
+                    r: 40.0,
+                    y: 60.0,
+                    g: 40.0,
+                    c: 60.0,
+                    b: 20.0,
+                    m: 80.0,
+                },
+            ),
+            (
+                "Channel Mixer",
+                AdjustmentType::ChannelMixer {
+                    red: [1.0, 0.0, 0.0],
+                    green: [0.0, 1.0, 0.0],
+                    blue: [0.0, 0.0, 1.0],
+                    monochrome: false,
+                },
+            ),
+            (
+                "Photo Filter",
+                AdjustmentType::PhotoFilter {
+                    color: [236, 138, 0],
+                    density: 0.25,
+                    luminosity: true,
+                },
+            ),
+            ("Gradient Map", AdjustmentType::default_gradient_map()),
+        ];
+        for (name, adj) in adjs {
+            if ui.button(name).clicked() {
+                actions.layers.add_adjustment_layer = Some(adj);
+                ui.close();
+            }
+        }
+    });
+    ui.separator();
+    if ui.add(menu_item("Group Layers", "Ctrl+G")).clicked() {
+        actions.layers.group_selected = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item("Ungroup Layers", "Ctrl+Shift+G"))
+        .clicked()
+    {
+        actions.layers.ungroup = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Merge Selected",
+            "Ctrl+E",
+            data.layers.layer_count > 1,
+        ))
+        .clicked()
+    {
+        actions.layers.merge_selected = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Merge Down",
+            "",
+            data.layers.active_layer_idx > 0,
+        ))
+        .clicked()
+    {
+        actions.layers.merge_down = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    if ui.add(menu_item("Stamp Visible", "Ctrl+Shift+E")).clicked() {
+        actions.layers.merge_visible = true;
+        ui.close();
+    }
+    if ui.button("Merge All").clicked() {
+        actions.layers.merge_all = true;
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("Layer Mask", |ui| {
+        if ui.button("Add Mask (Reveal All)").clicked() {
+            actions.layers.add_mask_white = Some(data.layers.active_layer_idx);
+            ui.close();
+        }
+        if ui.button("Add Mask (Hide All)").clicked() {
+            actions.layers.add_mask_black = Some(data.layers.active_layer_idx);
+            ui.close();
+        }
+        if ui
+            .add(menu_item_enabled(
+                "Apply Mask",
+                "",
+                data.layers
+                    .layer_has_mask
+                    .get(data.layers.active_layer_idx)
+                    .copied()
+                    .unwrap_or(false),
+            ))
+            .clicked()
+        {
+            actions.layers.apply_mask = Some(data.layers.active_layer_idx);
+            ui.close();
+        }
+        if ui
+            .add(menu_item_enabled(
+                "Delete Mask",
+                "",
+                data.layers
+                    .layer_has_mask
+                    .get(data.layers.active_layer_idx)
+                    .copied()
+                    .unwrap_or(false),
+            ))
+            .clicked()
+        {
+            actions.layers.delete_mask = Some(data.layers.active_layer_idx);
+            ui.close();
+        }
+    });
+}
+
+fn object_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if ui
+        .add(menu_item_enabled(
+            "Format All Vectors…",
+            "",
+            data.layers
+                .layer_types
+                .iter()
+                .any(|t| t == "Shape" || t == "Path"),
+        ))
+        .clicked()
+    {
+        actions.dialogs.open_vector_style_dialog =
+            Some(crate::ui::intent::VectorStyleTarget::Document);
+        ui.close();
+    }
+}
+
+fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if ui
+        .add(menu_item_enabled(
+            "Format All Text…",
+            "",
+            data.layers.layer_types.iter().any(|t| t == "Text"),
+        ))
+        .clicked()
+    {
+        actions.dialogs.show_font_change_dialog = Some(true);
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Convert Text to Curves",
+            "Ctrl+Q",
+            data.layers
+                .layer_types
+                .get(data.layers.active_layer_idx)
+                .is_some_and(|t| t == "Text"),
+        ))
+        .clicked()
+    {
+        actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Tài liệu văn bản mới…").clicked() {
+        actions.doc.new_flow_text_document = true;
+        ui.close();
+    }
+}
+
+fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    if ui
+        .add(menu_item_enabled(
+            "Select All",
+            &data.keymap.label_for(Command::SelectAll),
+            data.doc.has_doc,
+        ))
+        .clicked()
+    {
+        actions.sel.select_all = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Deselect",
+            "Ctrl+D",
+            data.sel.has_selection,
+        ))
+        .clicked()
+    {
+        actions.sel.deselect = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Invert Selection",
+            "Shift+F7",
+            data.sel.has_selection,
+        ))
+        .clicked()
+    {
+        actions.sel.invert_selection = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled("Color Range...", "", data.doc.has_doc))
+        .on_hover_text("Chọn theo màu: bấm vào ảnh để lấy màu, chỉnh Fuzziness")
+        .clicked()
+    {
+        actions.sel.show_color_range_dialog = Some(true);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Refine Selection...",
+            "Ctrl+Alt+R",
+            data.doc.has_doc,
+        ))
+        .on_hover_text("Tinh chỉnh mép vùng chọn: tóc, lông, làm mềm, dời mép")
+        .clicked()
+    {
+        actions.sel.open_refine_panel = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui
+        .add(menu_item_enabled(
+            "Feather...",
+            "Shift+F6",
+            data.sel.has_selection,
+        ))
+        .clicked()
+    {
+        actions.sel.show_feather_dialog = Some(true);
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled("Stroke...", "", data.sel.has_selection))
+        .clicked()
+    {
+        actions.sel.show_stroke_dialog = Some(true);
+        ui.close();
+    }
+    ui.menu_button("Modify", |ui| {
+        use crate::ui::SelectionModifyKind;
+        let has = data.sel.has_selection;
+        if ui
+            .add_enabled(has, egui::Button::new("Expand..."))
+            .clicked()
+        {
+            actions.sel.open_modify_dialog = Some(SelectionModifyKind::Expand);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has, egui::Button::new("Contract..."))
+            .clicked()
+        {
+            actions.sel.open_modify_dialog = Some(SelectionModifyKind::Contract);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has, egui::Button::new("Feather..."))
+            .clicked()
+        {
+            actions.sel.show_feather_dialog = Some(true);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has, egui::Button::new("Smooth..."))
+            .clicked()
+        {
+            actions.sel.open_modify_dialog = Some(SelectionModifyKind::Smooth);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has, egui::Button::new("Border..."))
+            .clicked()
+        {
+            actions.sel.open_modify_dialog = Some(SelectionModifyKind::Border);
+            ui.close();
+        }
+    });
+}
+
+fn filter_menu(ui: &mut egui::Ui, actions: &mut UiActions) {
+    use crate::core::filters::FilterType;
+    if ui.add(menu_item("Warp...", "Ctrl+Shift+X")).clicked() {
+        actions.dialogs.open_warp_dialog = true;
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Gaussian Blur...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::GaussianBlur { radius: 2.0 });
+        ui.close();
+    }
+    if ui.button("Sharpen...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::Sharpen {
+            amount: 1.0,
+            radius: 2.0,
+        });
+        ui.close();
+    }
+    if ui.button("High Pass...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::HighPass { radius: 3.0 });
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Add Noise...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::AddNoise {
+            amount: 25.0,
+            monochromatic: false,
+        });
+        ui.close();
+    }
+    if ui.button("Reduce Noise...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::ReduceNoise { strength: 50.0 });
+        ui.close();
+    }
+    if ui.button("Pixelate...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(FilterType::Pixelate { cell: 8.0 });
+        ui.close();
+    }
+}
+
+fn view_menu(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: crate::ui::theme::Palette,
+) {
+    if ui.add(menu_item("Zoom In", "Ctrl++")).clicked() {
+        actions.doc.zoom_in = true;
+        ui.close();
+    }
+    if ui.add(menu_item("Zoom Out", "Ctrl+-")).clicked() {
+        actions.doc.zoom_out = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item(
+            "Fit to Screen",
+            &data.keymap.label_for(Command::FitScreen),
+        ))
+        .clicked()
+    {
+        actions.doc.fit_to_screen = true;
+        ui.close();
+    }
+    if ui
+        .add(menu_item(
+            "100%",
+            &data.keymap.label_for(Command::ZoomActual),
+        ))
+        .clicked()
+    {
+        actions.doc.zoom_100 = true;
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button("Proof Setup", |ui| {
+        use crate::core::cms::ProofTarget;
+        if ui
+            .selectable_label(data.print.proof_target_label == "sRGB", "sRGB")
+            .clicked()
+        {
+            actions.print.set_proof_target = Some(ProofTarget::Srgb);
+            ui.close();
+        }
+        if ui
+            .selectable_label(
+                data.print.proof_target_label == "Adobe RGB (1998)",
+                "Adobe RGB (1998)",
+            )
+            .clicked()
+        {
+            actions.print.set_proof_target = Some(ProofTarget::AdobeRgb);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Load Profile…").clicked() {
+            actions.print.load_proof_profile = true;
+            ui.close();
+        }
+        ui.label(
+            egui::RichText::new(format!("Current: {}", data.print.proof_target_label))
+                .color(pal.text_secondary)
+                .size(10.0),
+        );
+    });
+    if ui
+        .checkbox(
+            &mut data.print.proof_enabled.clone(),
+            "Proof Colors  (Ctrl+Y)",
+        )
+        .clicked()
+    {
+        actions.print.toggle_proof_colors = true;
+    }
+    if ui
+        .checkbox(
+            &mut data.print.proof_gamut_warn.clone(),
+            "Gamut Warning  (Ctrl+Shift+Y)",
+        )
+        .clicked()
+    {
+        actions.print.toggle_gamut_warning = true;
+    }
+    ui.menu_button("Display Profile", |ui| {
+        if ui
+            .selectable_label(!data.print.display_cms_enabled, "Off (assume sRGB)")
+            .clicked()
+        {
+            actions.print.display_cms_off = true;
+            ui.close();
+        }
+        if ui.button("From System").clicked() {
+            actions.print.display_cms_from_system = true;
+            ui.close();
+        }
+        if ui.button("Load Profile…").clicked() {
+            actions.print.display_cms_load = true;
+            ui.close();
+        }
+        if data.print.display_cms_enabled {
+            ui.label(
+                egui::RichText::new(format!("On: {}", data.print.display_profile_name))
+                    .color(pal.text_secondary)
+                    .size(10.0),
+            );
+        }
+    });
+    ui.separator();
+    if ui
+        .checkbox(&mut data.chrome.show_color_panel.clone(), "Color Panel")
+        .clicked()
+    {
+        actions.chrome.toggle_color_panel = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.show_layer_panel.clone(), "Layer Panel")
+        .clicked()
+    {
+        actions.chrome.toggle_layer_panel = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.show_history_panel.clone(), "History Panel")
+        .clicked()
+    {
+        actions.chrome.toggle_history_panel = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.show_info_panel.clone(), "Info Panel")
+        .clicked()
+    {
+        actions.chrome.toggle_info_panel = true;
+    }
+    if ui
+        .checkbox(
+            &mut data.chrome.show_channels_panel.clone(),
+            "Channels Panel",
+        )
+        .clicked()
+    {
+        actions.chrome.toggle_channels_panel = true;
+    }
+    ui.separator();
+    if ui
+        .checkbox(
+            &mut data.chrome.show_rulers.clone(),
+            with_shortcut("Rulers", &data.keymap.label_for(Command::ToggleRulers)),
+        )
+        .clicked()
+    {
+        actions.chrome.toggle_rulers = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.show_guides.clone(), "Show Guides")
+        .clicked()
+    {
+        actions.chrome.toggle_show_guides = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.lock_guides.clone(), "Lock Guides")
+        .clicked()
+    {
+        actions.chrome.toggle_lock_guides = true;
+    }
+    if ui
+        .checkbox(&mut data.chrome.snap_enabled.clone(), "Snap")
+        .clicked()
+    {
+        actions.chrome.toggle_snap = true;
+    }
+    if ui
+        .add_enabled(
+            !data.chrome.guides.is_empty(),
+            egui::Button::new("Clear Guides"),
+        )
+        .clicked()
+    {
+        actions.chrome.clear_guides = true;
+        ui.close();
+    }
+}
+
+fn window_menu(ui: &mut egui::Ui, pal: crate::ui::theme::Palette) {
+    ui.label(
+        egui::RichText::new("Workspace layouts coming soon")
+            .color(pal.text_secondary)
+            .size(11.0),
+    );
+}
+
+fn help_menu(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    pal: crate::ui::theme::Palette,
+) {
+    const IAI_REPO_URL: &str = "https://github.com/tongnghia2026/iai";
+    const IAI_LICENSE_URL: &str = "https://github.com/tongnghia2026/iai/blob/main/LICENSE";
+    const IAI_FACEBOOK_URL: &str = "https://www.facebook.com/minhnghia7189/";
+    const IAI_YOUTUBE_URL: &str = "https://www.youtube.com/@TongNghia3999";
+
+    ui.menu_button("Keyboard Shortcuts", |ui| {
+        keyboard_shortcuts_list(ui, pal, &data.keymap);
+    });
+    ui.separator();
+    // The flight recorder (`crate::diag`): mark the moment
+    // something went wrong, or fetch its files.
+    if ui
+        .add(egui::Button::new("Đánh dấu lỗi vừa gặp").shortcut_text("Ctrl+Shift+F12"))
+        .clicked()
+    {
+        actions.chrome.mark_problem = true;
+        ui.close();
+    }
+    if ui.button("Mở thư mục nhật ký lỗi").clicked() {
+        crate::diag::open_folder();
+        ui.close();
+    }
+    let feedback = crate::author_mail::Kind::Feedback;
+    if ui.button(feedback.label()).clicked() {
+        actions.chrome.open_support = Some(crate::ui::SupportDialog::Mail(feedback));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Kiểm tra cập nhật").clicked() {
+        actions.chrome.update_check = true;
+        ui.close();
+    }
+    if ui.button("Ủng hộ tác giả").clicked() {
+        actions.chrome.open_support = Some(crate::ui::SupportDialog::Support);
+        ui.close();
+    }
+    if ui.button(super::dialogs::SPONSORS_TITLE).clicked() {
+        actions.chrome.open_support = Some(crate::ui::SupportDialog::Sponsors);
+        ui.close();
+    }
+    #[cfg(feature = "pro")]
+    {
+        let pro = super::dialogs::pro_menu_label(data.chrome.pro.status);
+        if ui.button(pro).clicked() {
+            actions.chrome.open_support = Some(crate::ui::SupportDialog::Pro);
+            ui.close();
+        }
+        // The author's own machine: it holds the key that signs Pro keys.
+        if data.chrome.pro.can_issue
+            && ui
+                .button(format!("{}…", super::dialogs::ISSUE_TITLE))
+                .clicked()
+        {
+            actions.chrome.open_support = Some(crate::ui::SupportDialog::ProIssue);
+            ui.close();
+        }
+    }
+    ui.separator();
+    // AGPL asks that users can reach the program's source; expose
+    // the repository and the license text directly from the app.
+    if ui
+        .button("Source Code")
+        .on_hover_text(IAI_REPO_URL)
+        .clicked()
+    {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_REPO_URL));
+    }
+    if ui
+        .button("License (AGPL-3.0)")
+        .on_hover_text(IAI_LICENSE_URL)
+        .clicked()
+    {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(IAI_LICENSE_URL));
+    }
+    ui.separator();
+    ui.menu_button("About iAi", |ui| {
+        ui.label(egui::RichText::new("iAi").strong());
+        ui.label(
+            egui::RichText::new("Image & vector editor")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        ui.label(
+            egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        // Which build this is: what the update compares, and what a report
+        // of a problem should quote.
+        let build = crate::update::this_build();
+        ui.label(
+            egui::RichText::new(format!(
+                "Build {} ({})",
+                build.day(),
+                build.commit.get(..7).unwrap_or(build.commit)
+            ))
+            .color(pal.text_secondary)
+            .size(11.0),
+        );
+        ui.label(
+            egui::RichText::new("© 2026 Tong Van Nghia")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        ui.label(
+            egui::RichText::new("Licensed under AGPL-3.0-or-later")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+        ui.separator();
+        ui.hyperlink_to("Facebook", IAI_FACEBOOK_URL);
+        ui.hyperlink_to("YouTube", IAI_YOUTUBE_URL);
+        ui.hyperlink_to("minhnghia718@gmail.com", "mailto:minhnghia718@gmail.com");
+        ui.separator();
+        ui.label(egui::RichText::new("Support / Donate").strong().size(11.0));
+        ui.hyperlink_to(
+            "PayPal: paypal.me/TongNghia3999",
+            "https://paypal.me/TongNghia3999",
+        );
+        ui.label(
+            egui::RichText::new("ACB 18278961 — TONG VAN NGHIA")
+                .color(pal.text_secondary)
+                .size(11.0),
+        );
+    });
+}
+
+/// `"Rulers  (Ctrl+R)"`, or just the name when the command has no key.
+fn with_shortcut(name: &str, shortcut: &str) -> String {
+    if shortcut.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}  ({shortcut})")
+    }
+}
+
+fn menu_item<'a>(label: &'a str, shortcut: &'a str) -> egui::Button<'a> {
+    let mut btn = egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
+    if !shortcut.is_empty() {
+        btn = btn.shortcut_text(shortcut);
+    }
+    btn
+}
+
+fn menu_item_enabled<'a>(
+    label: &'a str,
+    shortcut: &'a str,
+    enabled: bool,
+) -> impl egui::Widget + 'a {
+    move |ui: &mut egui::Ui| -> egui::Response {
+        ui.add_enabled_ui(enabled, |ui| ui.add(menu_item(label, shortcut)))
+            .inner
+    }
+}
+
+/// Keyboard-shortcut reference rendered inside the Help ▸ Keyboard Shortcuts
+/// submenu. Re-bindable rows show the keys currently in effect.
+fn keyboard_shortcuts_list(
+    ui: &mut egui::Ui,
+    pal: crate::ui::theme::Palette,
+    keymap: &crate::app::commands::KeyMap,
+) {
+    use crate::app::commands::CommandGroup;
+
+    ui.set_max_width(300.0);
+    egui::ScrollArea::vertical()
+        .max_height(460.0)
+        .show(ui, |ui| {
+            let row = |ui: &mut egui::Ui, keys: &str, action: &str| {
+                ui.label(
+                    egui::RichText::new(keys)
+                        .monospace()
+                        .size(11.0)
+                        .color(pal.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(action)
+                        .size(11.0)
+                        .color(pal.text_secondary),
+                );
+                ui.end_row();
+            };
+
+            // Re-bindable commands come straight from the keymap engine, so this
+            // list, the menu bar and the Preferences page share one source.
+            for group in CommandGroup::all() {
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(group.title()).strong().size(11.0));
+                egui::Grid::new(("help_shortcuts", group.title()))
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 2.0))
+                    .show(ui, |ui| {
+                        for cmd in Command::in_group(group) {
+                            let keys = keymap.label_for(cmd);
+                            let keys = if keys.is_empty() {
+                                "—".to_string()
+                            } else {
+                                keys
+                            };
+                            row(ui, &keys, cmd.display_name());
+                        }
+                    });
+            }
+
+            // Context / fixed keys that are intentionally not re-bindable.
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new("Other").strong().size(11.0));
+            egui::Grid::new("help_shortcuts_other")
+                .num_columns(2)
+                .spacing(egui::vec2(12.0, 2.0))
+                .show(ui, |ui| {
+                    for (keys, action) in crate::app::commands::FIXED_SHORTCUTS {
+                        row(ui, keys, action);
+                    }
+                });
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MENUS: [&str; 11] = [
+        "File", "Edit", "Image", "Layer", "Object", "Text", "Select", "Filter", "View", "Window",
+        "Help",
+    ];
+
+    /// The title bar on a screen of its own, to click in.
+    struct Bar<'a> {
+        ctx: egui::Context,
+        data: &'a UiData,
+    }
+
+    impl<'a> Bar<'a> {
+        fn new(data: &'a UiData) -> Self {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::ui::snapshot::fonts());
+            let bar = Self { ctx, data };
+            bar.frame(vec![]);
+            bar
+        }
+
+        fn frame(&self, events: Vec<egui::Event>) -> (Vec<(String, egui::Pos2)>, UiActions) {
+            let mut actions = UiActions::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 1000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let output = self
+                .ctx
+                .run_ui(input, |ui| build(ui.ctx(), self.data, &mut actions));
+            let texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos)),
+                    _ => None,
+                })
+                .collect();
+            (texts, actions)
+        }
+
+        /// Every label drawn, the entries of an open menu among them.
+        fn labels(&self) -> Vec<String> {
+            self.frame(vec![]);
+            let (texts, _) = self.frame(vec![]);
+            texts.into_iter().map(|(text, _)| text).collect()
+        }
+
+        /// A click on `label`: what its frame asks for.
+        fn click(&self, label: &str) -> UiActions {
+            let at = self
+                .frame(vec![])
+                .0
+                .into_iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, pos)| pos + egui::vec2(4.0, 5.0))
+                .unwrap_or_else(|| panic!("no {label}"));
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+            self.frame(vec![button(true)]);
+            self.frame(vec![button(false)]).1
+        }
+    }
+
+    #[cfg(feature = "pro")]
+    #[test]
+    fn the_ai_button_opens_the_window_at_once_and_the_pro_pack_is_under_help() {
+        use crate::ui::{AiTab, SupportDialog};
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        // One click, no menu in between: the window, on the tab shown last
+        // (a test keeps no prefs, so the usual one).
+        let bar = Bar::new(&data);
+        let before = bar.labels();
+        assert_eq!(bar.click("AI").ai.open_ai_window, Some(AiTab::default()));
+        assert_eq!(bar.labels(), before, "no menu drops from it");
+        // Already open, it stays as it is whichever tab is in front.
+        data.ai.tab = Some(AiTab::Online);
+        assert!(Bar::new(&data).click("AI").ai.open_ai_window.is_none());
+        // With no photo open there is nothing for it to work on.
+        data.ai.tab = None;
+        data.doc.has_doc = false;
+        assert!(Bar::new(&data).click("AI").ai.open_ai_window.is_none());
+
+        // The Pro pack is bought from the Help menu, photo or no photo.
+        let pro = crate::ui::dialogs::pro_menu_label(data.chrome.pro.status);
+        let bar = Bar::new(&data);
+        bar.click("Help");
+        assert!(bar.labels().contains(&pro));
+        assert_eq!(
+            bar.click(&pro).chrome.open_support,
+            Some(SupportDialog::Pro)
+        );
+        // The retouch is no entry of the Image menu any more.
+        data.doc.has_doc = true;
+        let bar = Bar::new(&data);
+        bar.click("Image");
+        let image = bar.labels();
+        assert!(image.iter().any(|label| label == "Develop..."), "{image:?}");
+        assert!(!image.iter().any(|label| label.contains("retouch")));
+    }
+
+    #[cfg(not(feature = "pro"))]
+    #[test]
+    fn a_build_without_the_pro_part_shows_no_way_into_it() {
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let bar = Bar::new(&data);
+        let row = bar.labels();
+        assert!(row.iter().any(|label| label == "Help"), "{row:?}");
+        assert!(!row.iter().any(|label| label == "AI"), "{row:?}");
+        bar.click("Help");
+        let help = bar.labels();
+        assert!(
+            help.iter().any(|label| label == "Ủng hộ tác giả"),
+            "{help:?}"
+        );
+        assert!(!help.iter().any(|label| label.contains("Pro")), "{help:?}");
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the title bar is drawn there with
+    /// the update button in each of its states, `thanh_tieu_de_<state>.png`.
+    #[test]
+    #[ignore]
+    fn probe_title_bar_snapshot_of_the_update_button() {
+        use crate::ui::{UpdateStage, UpdateView};
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        for (name, stage) in [
+            ("co_ban_moi", UpdateStage::Available),
+            ("dang_tai", UpdateStage::Downloading(0.42)),
+            ("tai_xong", UpdateStage::Ready),
+            ("loi", UpdateStage::DownloadFailed(String::new())),
+            ("yen", UpdateStage::Idle),
+        ] {
+            let mut data = UiData::default();
+            data.doc.has_doc = true;
+            data.chrome.update = UpdateView {
+                stage,
+                ..Default::default()
+            };
+            let image = crate::ui::snapshot::render(1280.0, 60.0, 1.5, None, |ctx| {
+                build(ctx, &data, &mut UiActions::default());
+                #[allow(deprecated)]
+                egui::CentralPanel::default().show(ctx, |_| {});
+            });
+            image
+                .save(std::path::Path::new(&dir).join(format!("thanh_tieu_de_{name}.png")))
+                .unwrap();
+        }
+    }
+
+    /// What each top-level menu draws when opened, as its labels and one
+    /// number over every shape. Run it before and after moving menu code
+    /// around: no line may change.
+    /// `cargo test --lib probe_menu_shapes -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn probe_menu_shapes() {
+        use std::hash::{Hash, Hasher};
+
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        for menu in MENUS {
+            let ctx = egui::Context::default();
+            ctx.set_fonts(crate::ui::snapshot::fonts());
+            crate::ui::theme::apply_theme(&ctx, crate::ui::theme::ThemeMode::Dark);
+            let frame = |events: Vec<egui::Event>| {
+                let mut actions = UiActions::default();
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 1000.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| build(ui.ctx(), &data, &mut actions))
+            };
+            let texts = |output: &egui::FullOutput| -> Vec<(String, egui::Pos2)> {
+                output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos)),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            frame(vec![]);
+            let closed = frame(vec![]);
+            let at = texts(&closed)
+                .into_iter()
+                .find(|(text, _)| text == menu)
+                .map(|(_, pos)| pos + egui::vec2(4.0, 5.0))
+                .unwrap_or_else(|| panic!("no {menu}"));
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(vec![egui::Event::PointerMoved(at)]);
+            frame(vec![button(true)]);
+            frame(vec![button(false)]);
+            frame(vec![]);
+            let open = frame(vec![]);
+            let labels: Vec<String> = texts(&open).into_iter().map(|(text, _)| text).collect();
+            assert!(labels.len() > texts(&closed).len(), "{menu} did not open");
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", open.shapes).hash(&mut hasher);
+            println!(
+                "{menu}: {} shapes, {:016x}\n    {}",
+                open.shapes.len(),
+                hasher.finish(),
+                labels.join(" | ")
+            );
+        }
+    }
+}

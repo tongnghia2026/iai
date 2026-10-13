@@ -1,0 +1,997 @@
+//! apply_ui_actions handlers: modal dialogs — adjustments, Develop, Warp,
+//! filters, Smart Fill, AI panels, plus the New/preset/show_* dialog
+//! bookkeeping. Split out of actions.rs (phase 2).
+
+use crate::app::render::CanvasEvent;
+use crate::app::state::App;
+use crate::ui::UiActions;
+
+impl App {
+    pub(super) fn handle_dialog_actions(
+        &mut self,
+        actions: &mut UiActions,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) {
+        if let Some(adj) = actions.dialogs.open_adjustment_dialog.take() {
+            let cmyk_blocked = !adj.is_ink_native() && self.docs.active().canvas.is_cmyk();
+            if !self.begin_adjustment_preview(adj) {
+                self.shell.status_msg = if cmyk_blocked {
+                    "Điều chỉnh này chưa dùng được ở chế độ CMYK (chỉ Levels/Curves)".to_string()
+                } else {
+                    "Adjustment requires an unlocked raster layer".to_string()
+                };
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        if let Some(idx) = actions.dialogs.edit_adjustment_layer.take() {
+            self.begin_adjustment_layer_edit(idx);
+        }
+        if let Some(adj) = actions.dialogs.set_adjustment_dialog.take() {
+            // Store params immediately (cheap → the dialog/handles stay real-time),
+            // but defer the expensive full-layer apply + recomposite to a throttled
+            // flush so dragging never stalls on large images.
+            self.shell.ui.adjustment_dialog = adj.clone();
+            if self.shell.ui.show_adjustment_dialog
+                && self.shell.ui.adjustment_preview_enabled
+                && (self.shell.adjustment_preview.is_some()
+                    || self.edit.adjustment_layer_edit.is_some())
+            {
+                self.shell.adjustment_preview_pending = Some(adj);
+            }
+        }
+        if let Some(options) = actions.dialogs.set_adjustment_options.take() {
+            let options = crate::ui::dialogs::sanitize_adjustment_options(options);
+            self.shell.ui.adjustment_options = options;
+            crate::ui::dialogs::save_adjustment_options(options);
+        }
+        if let Some(enabled) = actions.dialogs.set_adjustment_preview_enabled.take() {
+            self.set_adjustment_preview_enabled(enabled);
+        }
+        if let Some(eyedropper) = actions.dialogs.set_adj_eyedropper.take() {
+            self.shell.ui.adj_eyedropper = eyedropper;
+        }
+        if actions.dialogs.apply_adjustment_dialog {
+            // Make sure the committed pixels reflect the very latest params, not a
+            // throttled-stale preview.
+            if let Some(adj) = self.shell.adjustment_preview_pending.take() {
+                if self.shell.adjustment_preview.is_some() {
+                    self.update_adjustment_preview(adj);
+                } else if self.edit.adjustment_layer_edit.is_some() {
+                    self.update_adjustment_layer_edit(adj);
+                }
+            }
+            let adj = self.shell.ui.adjustment_dialog.clone();
+            self.shell.ui.show_adjustment_dialog = false;
+            self.shell.ui.adj_eyedropper = None;
+            if self.edit.adjustment_layer_edit.is_some() {
+                if self.commit_adjustment_layer_edit(&adj) {
+                    self.shell.status_msg = format!("Edited {}", adj.name());
+                }
+            } else if self.commit_adjustment_preview(&adj) {
+                self.shell.status_msg = format!("Applied {}", adj.name());
+            } else {
+                self.shell.status_msg = "No adjustment changes applied".to_string();
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if actions.dialogs.cancel_adjustment_dialog {
+            self.shell.ui.show_adjustment_dialog = false;
+            self.shell.ui.adj_eyedropper = None;
+            self.shell.adjustment_preview_pending = None;
+            if self.edit.adjustment_layer_edit.is_some() {
+                self.cancel_adjustment_layer_edit();
+            } else {
+                self.cancel_adjustment_preview();
+            }
+        }
+        if actions.develop.open_develop_dialog {
+            self.open_develop_window(event_loop);
+        }
+        self.set_develop_controls_pointer_down(actions.develop.develop_controls_pointer_down);
+        if let Some(settings) = actions.develop.set_develop_settings.take() {
+            self.shell.ui.develop_settings = settings.clone();
+            if self.shell.ui.show_develop_dialog && self.dev.develop_preview.is_some() {
+                self.update_develop_preview(settings);
+            }
+        }
+        self.apply_develop_panel_actions(actions);
+        if actions.develop.apply_develop_dialog {
+            let active_id = self.docs.active().id;
+            if self
+                .jobs
+                .raw_preview_docs
+                .values()
+                .any(|id| *id == active_id)
+                || self.jobs.raw_preview_failures.contains_key(&active_id)
+            {
+                actions.develop.apply_develop_dialog = false;
+                self.shell.status_msg =
+                    "Wait for the RAW decoder to finish, or cancel the failed import".to_string();
+            }
+        }
+        if actions.develop.apply_develop_dialog {
+            // (in-canvas fallback dialog only; the Develop window commits via
+            // commit_develop_window)
+            let settings = self.shell.ui.develop_settings.clone();
+            self.shell.ui.show_develop_dialog = false;
+            // In the Develop stage, Open commits the document either way (a neutral
+            // develop just opens the decoded RAW); outside it, neutral is a no-op.
+            // (Fallback in-canvas dialog: single-image session.)
+            let active_id = self.docs.active().id;
+            let developing = self
+                .dev
+                .develop_session
+                .iter()
+                .any(|e| e.doc == active_id && e.transient);
+            self.dev.develop_session.clear();
+            if settings.is_neutral() {
+                self.cancel_develop_preview();
+                self.shell.status_msg = if developing {
+                    "Opened RAW".to_string()
+                } else {
+                    "No Develop changes applied".to_string()
+                };
+            } else {
+                self.apply_develop_settings_sync(settings);
+                if self.commit_develop_preview() {
+                    self.shell.status_msg = if developing {
+                        "Developed RAW".to_string()
+                    } else {
+                        "Applied Develop".to_string()
+                    };
+                } else {
+                    self.shell.status_msg = "No Develop changes applied".to_string();
+                }
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if actions.develop.cancel_develop_dialog {
+            self.shell.ui.show_develop_dialog = false;
+            self.cancel_develop_preview();
+            // Cancelling the Develop stage discards the transient RAW documents.
+            self.discard_develop_session_docs();
+        }
+        if actions.dialogs.open_warp_dialog {
+            if self.docs.active().canvas.is_cmyk() {
+                self.shell.status_msg = "Warp chưa dùng được ở chế độ CMYK".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else if !self.begin_warp() {
+                self.shell.status_msg = "Warp requires an unlocked raster layer".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        if let Some(params) = actions.dialogs.set_warp_params.take() {
+            self.shell.ui.warp_params = params;
+        }
+        if actions.dialogs.warp_restore_all {
+            self.warp_restore_all();
+        }
+        if actions.dialogs.apply_warp_dialog {
+            self.commit_warp();
+        }
+        if actions.dialogs.cancel_warp_dialog {
+            self.cancel_warp();
+        }
+        if let Some(filter) = actions.dialogs.open_filter_dialog.take() {
+            if self.docs.active().canvas.is_cmyk() {
+                self.shell.status_msg = "Bộ lọc chưa dùng được ở chế độ CMYK".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else if !self.begin_filter_preview(filter) {
+                self.shell.status_msg = "Filter requires an unlocked raster layer".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        if let Some(filter) = actions.dialogs.set_filter_dialog.take() {
+            self.shell.ui.filter_dialog = filter;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if let Some(enabled) = actions.dialogs.set_filter_preview_enabled.take() {
+            self.set_filter_preview_enabled(enabled);
+        }
+        if actions.dialogs.apply_filter_preview
+            && self.shell.ui.show_filter_dialog
+            && self.shell.filter_preview.is_some()
+        {
+            let filter = self.shell.ui.filter_dialog;
+            let proxy_changed = self.update_filter_proxy_preview(filter);
+            let canvas_changed = if self.shell.ui.filter_preview_enabled {
+                self.update_filter_canvas_preview(filter)
+            } else {
+                false
+            };
+            if (proxy_changed || canvas_changed) && self.win.window.is_some() {
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        if actions.dialogs.apply_filter_dialog {
+            let filter = self.shell.ui.filter_dialog;
+            self.shell.ui.show_filter_dialog = false;
+            if self.commit_filter_preview(&filter) {
+                self.shell.status_msg = format!("Applied {}", filter.name());
+            } else {
+                self.shell.status_msg = "No filter changes applied".to_string();
+            }
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if actions.dialogs.cancel_filter_dialog {
+            self.shell.ui.show_filter_dialog = false;
+            self.cancel_filter_preview();
+        }
+        if actions.dialogs.smart_fill_fill {
+            self.request_smart_fill_fill();
+        }
+        if let Some(use_ai) = actions.dialogs.apply_smart_fill_fill.take() {
+            self.do_smart_fill_fill(use_ai);
+        }
+        if actions.dialogs.cancel_smart_fill_dialog {
+            self.shell.ui.show_smart_fill_dialog = false;
+        }
+        if actions.dialogs.download_lama_model {
+            crate::core::lama::ensure_downloading();
+        }
+        self.handle_ai_actions(actions);
+    }
+
+    /// Develop-panel outputs shared by both hosts of the panel UI: the main
+    /// window's fallback in-canvas dialog (via `handle_dialog_actions`) and the
+    /// Develop OS window (via `redraw_develop_window`) — presets and local-mask
+    /// arm/select bookkeeping.
+    pub(crate) fn apply_develop_panel_actions(&mut self, actions: &mut UiActions) {
+        if let Some(name) = actions.develop.save_develop_preset.take() {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                let preset = crate::core::presets::DevelopPreset {
+                    name: name.clone(),
+                    settings: self.shell.ui.develop_settings.clone(),
+                };
+                let list = std::sync::Arc::make_mut(&mut self.shell.develop_presets);
+                // Same name overwrites: re-saving a tweaked look must not duplicate.
+                if let Some(existing) = list.iter_mut().find(|p| p.name == name) {
+                    *existing = preset;
+                } else {
+                    list.push(preset);
+                }
+                crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
+            }
+        }
+        if let Some(idx) = actions.develop.delete_develop_preset.take() {
+            if idx < self.shell.develop_presets.len() {
+                std::sync::Arc::make_mut(&mut self.shell.develop_presets).remove(idx);
+                crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
+            }
+        }
+        if let Some(arm) = actions.develop.arm_develop_local.take() {
+            self.shell.ui.develop_local_arm = Some(arm);
+            self.dev.develop_local_drag = None;
+        }
+        if actions.develop.disarm_develop_local {
+            self.shell.ui.develop_local_arm = None;
+            self.dev.develop_local_drag = None;
+        }
+        if let Some(sel) = actions.develop.select_develop_local.take() {
+            self.shell.ui.develop_local_selected = sel;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        }
+        if let Some((idx, open)) = actions.develop.set_develop_section_open.take() {
+            if idx < crate::ui::develop::DEV_PANEL_SECTIONS
+                && self.dev.develop_sections_open[idx] != open
+            {
+                crate::ui::develop::set_section_open(
+                    &mut self.dev.develop_sections_open,
+                    idx,
+                    open,
+                );
+                crate::ui::develop::save_sections_open(&self.dev.develop_sections_open);
+            }
+        }
+        if let Some(visible) = actions.develop.set_develop_scope_visibility.take() {
+            let visible = visible & 0b111;
+            if self.dev.develop_scope_visibility != visible {
+                self.dev.develop_scope_visibility = visible;
+                let settings = self.shell.ui.develop_settings.clone();
+                self.rebin_develop_histogram(&settings);
+            }
+        }
+        if actions.develop.develop_auto {
+            actions.develop.develop_auto = false;
+            self.apply_develop_auto();
+        }
+    }
+
+    /// "Auto" (D4 v1): fit Exposure so the scene's default render lands at a
+    /// fixed target brightness — the same bisection that anchors a fresh RAW
+    /// render to its embedded preview, here aimed at a canonical "well
+    /// exposed" mean instead.
+    fn apply_develop_auto(&mut self) {
+        // ACR's Auto lands renders in this bright-but-unclipped neighbourhood.
+        const DEVELOP_AUTO_TARGET: f32 = 0.45;
+        let Some(preview) = &self.dev.develop_preview else {
+            return;
+        };
+        if preview.scene.is_none() || preview.histogram_proxy.is_empty() {
+            self.shell.status_msg = "Auto needs a scene-referred session".to_string();
+            return;
+        }
+        let gain = crate::core::develop_scene::baseline_exposure_gain(
+            &preview.histogram_proxy,
+            DEVELOP_AUTO_TARGET,
+        );
+        let mut settings = self.shell.ui.develop_settings.clone();
+        // The gain is measured from the untouched scene through the DEFAULT
+        // tone transform, so it replaces (not offsets) the Exposure slider.
+        settings.exposure = gain.log2();
+        self.shell.ui.develop_settings = settings.clone();
+        self.shell.status_msg = format!("Auto exposure: {:+.2} EV", settings.exposure);
+        self.update_develop_preview(settings);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        if let Some(w) = &self.win.develop_window {
+            w.request_redraw();
+        }
+    }
+
+    /// Apply an edit from the Preferences dialog: clamp it, apply the live
+    /// effects (AI GPU, snap, default unit; UI scale is re-read each frame in the
+    /// redraw loop), store it, and persist to prefs.json.
+    fn apply_settings_change(&mut self, mut new: crate::core::settings::AppSettings) {
+        new.sanitize();
+        let keymap = crate::app::commands::KeyMap::from_overrides(&new.shortcuts);
+        new.shortcuts = keymap.to_overrides();
+        let old = self.shell.settings.clone();
+        if new == old {
+            return;
+        }
+        if new.ai_use_gpu != old.ai_use_gpu {
+            crate::core::ai::ort_ep::set_ai_use_gpu(new.ai_use_gpu);
+        }
+        if new.snap_default != old.snap_default {
+            // Reflect the new default in the running session too, so the change
+            // is visible immediately (the magnet still toggles it per-session).
+            self.shell.ui.snap_enabled = new.snap_default;
+        }
+        if new.default_unit != old.default_unit {
+            self.shell.canvas_unit = new.default_unit;
+            self.shell.ui.new_unit = new.default_unit;
+        }
+        if new.brush_cursor != old.brush_cursor || new.brush_tip_outline != old.brush_tip_outline {
+            // Rebuilt in the new style on the next pointer update.
+            self.win.cursor_ring = None;
+            self.win.last_cursor_radius = 0;
+        }
+        if new.history_steps != old.history_steps {
+            let steps = new.history_steps as usize;
+            crate::core::command::set_default_max_entries(steps);
+            for doc in &mut self.docs.documents {
+                doc.canvas.set_history_steps(steps);
+                for page in doc.pages.iter_mut().flatten() {
+                    page.set_history_steps(steps);
+                }
+                if let Some(master) = doc.master.as_deref_mut() {
+                    master.set_history_steps(steps);
+                }
+            }
+        }
+        self.shell.settings = new;
+        self.shell.keymap = keymap;
+        self.shell.settings.save();
+        self.push_cursor_uniforms();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Preferences ▸ Shortcuts ▸ Export: save the current shortcuts to a file.
+    fn export_shortcuts_file(&mut self) {
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Xuất bộ phím tắt")
+            .add_filter("Phím tắt iAi", &["json"])
+            .set_file_name("iai-phim-tat.json");
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let notice = match crate::core::atomic_file::write_bytes_atomic(
+            &path,
+            self.shell.keymap.export_json().as_bytes(),
+        ) {
+            Ok(()) => format!("Đã xuất bộ phím tắt ra {}.", path.display()),
+            Err(e) => format!("Không ghi được file phím tắt: {e}"),
+        };
+        crate::ui::dialogs::shortcut_notice(&self.win.egui_ctx, notice);
+    }
+
+    /// Preferences ▸ Shortcuts ▸ Import: replace the shortcuts with a file's.
+    fn import_shortcuts_file(&mut self) {
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Nhập bộ phím tắt")
+            .add_filter("Phím tắt iAi", &["json"]);
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let loaded = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Không đọc được file: {e}"))
+            .and_then(|text| crate::app::commands::KeyMap::import_json(&text));
+        let notice = match loaded {
+            Ok((keymap, ignored)) => {
+                let mut settings = self.shell.settings.clone();
+                settings.shortcuts = keymap.to_overrides();
+                self.apply_settings_change(settings);
+                if ignored == 0 {
+                    "Đã nhập bộ phím tắt.".to_string()
+                } else {
+                    format!("Đã nhập bộ phím tắt; bỏ qua {ignored} mục không dùng được.")
+                }
+            }
+            Err(e) => format!("Không nhập được: {e} Phím tắt hiện tại giữ nguyên."),
+        };
+        crate::ui::dialogs::shortcut_notice(&self.win.egui_ctx, notice);
+    }
+
+    pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
+        let created_new_canvas = if let Some((name, w, h, dpi, bg, unit, cmyk)) =
+            actions.doc.new_canvas_confirmed.take()
+        {
+            self.do_new_tab(name, w, h, dpi, bg, unit, cmyk);
+            true
+        } else {
+            false
+        };
+
+        if let Some(v) = actions.dialogs.show_new_dialog.take() {
+            if v {
+                self.open_new_canvas_dialog_with_clipboard_hint();
+            } else {
+                self.shell.ui.show_new_dialog = false;
+                if !created_new_canvas {
+                    self.edit.clipboard_image_new_doc_hint = None;
+                }
+            }
+        }
+        if let Some(v) = actions.dialogs.show_font_change_dialog.take() {
+            self.shell.ui.show_font_change_dialog = v;
+        }
+        if let Some(fmt) = actions.dialogs.apply_text_format.take() {
+            let n = self.change_document_text_format(fmt);
+            self.shell.ui.show_font_change_dialog = false;
+            self.shell.status_msg = if n == 0 {
+                "Không có layer chữ nào thay đổi".to_string()
+            } else {
+                format!("Đã định dạng {n} layer chữ")
+            };
+        }
+        if let Some(v) = actions.dialogs.show_scan_cleanup_dialog.take() {
+            if v {
+                self.shell.ui.show_scan_cleanup_dialog = true;
+                self.begin_scan_preview();
+            } else {
+                self.shell.ui.show_scan_cleanup_dialog = false;
+                self.cancel_scan_preview();
+            }
+        }
+        if let Some(params) = actions.dialogs.set_scan_cleanup_preview.take() {
+            self.update_scan_preview(params);
+        }
+        self.handle_retouch_actions(actions);
+        if std::mem::take(&mut actions.dialogs.cancel_scan_cleanup_dialog) {
+            self.shell.ui.show_scan_cleanup_dialog = false;
+            self.cancel_scan_preview();
+        }
+        if let Some(req) = actions.dialogs.apply_scan_cleanup.take() {
+            self.shell.ui.show_scan_cleanup_dialog = false;
+            // Restore the pristine layer, then commit undoably from it.
+            self.cancel_scan_preview();
+            self.apply_scan_cleanup(req);
+        }
+        if let Some(v) = actions.dialogs.show_vector_style_dialog.take() {
+            self.shell.ui.show_vector_style_dialog = v;
+        }
+        if let Some(target) = actions.dialogs.open_vector_style_dialog.take() {
+            self.shell.ui.vector_style_target = target;
+            self.shell.ui.show_vector_style_dialog = true;
+        }
+        if let Some(spec) = actions.dialogs.apply_vector_style.take() {
+            let selected_only = spec.target == crate::ui::intent::VectorStyleTarget::Selected;
+            let n = self.change_document_vector_style(spec);
+            self.shell.ui.show_vector_style_dialog = false;
+            self.shell.status_msg = if n == 0 {
+                if selected_only {
+                    "Không có layer vector đã chọn nào thay đổi".to_string()
+                } else {
+                    "Không có layer vector nào thay đổi".to_string()
+                }
+            } else if selected_only {
+                format!("Đã đổi kiểu cho {n} layer vector đã chọn")
+            } else {
+                format!("Đã đổi kiểu cho {n} layer vector")
+            };
+        }
+        if let Some(v) = actions.dialogs.show_resize_dialog.take() {
+            self.shell.ui.show_resize_dialog = v;
+        }
+        if let Some(v) = actions.dialogs.show_image_size_dialog.take() {
+            self.shell.ui.show_image_size_dialog = v;
+        }
+        if let Some(v) = actions.dialogs.show_export_dialog.take() {
+            self.shell.ui.show_export_dialog = v;
+        }
+        if let Some(v) = actions.dialogs.show_preferences.take() {
+            self.shell.ui.show_preferences = v;
+        }
+        if let Some(new_settings) = actions.settings.updated.take() {
+            self.apply_settings_change(new_settings);
+        }
+        if actions.settings.captured_taken {
+            self.shell.ui.shortcut_captured = None;
+        }
+        if actions.settings.export_shortcuts {
+            self.export_shortcuts_file();
+        }
+        if actions.settings.import_shortcuts {
+            self.import_shortcuts_file();
+        }
+        if let Some(target) = actions.settings.capture.take() {
+            self.shell.ui.shortcut_capture = target;
+            self.shell.ui.shortcut_captured = None;
+        }
+        if !self.shell.ui.show_preferences {
+            self.shell.ui.shortcut_capture = None;
+            self.shell.ui.shortcut_captured = None;
+        }
+        if let Some(v) = actions.dialogs.show_adjustment_dialog.take() {
+            self.shell.ui.show_adjustment_dialog = v;
+        }
+        if actions.doc.exit_cancel {
+            self.cancel_app_exit();
+        }
+        if actions.doc.exit_discard_current {
+            self.discard_current_exit_document();
+        }
+        if actions.doc.exit_save_current {
+            self.shell.ui.show_exit_dialog = false;
+            self.do_save_project();
+            let webview_persistence_pending = {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_save_is_pending()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            if webview_persistence_pending || self.jobs.pending_file_dialog.is_some() {
+                self.shell.exit_save_pending = true;
+            } else if !self.docs.active().is_modified() && {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    !self.document_webview_active_is_dirty()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    true
+                }
+            } {
+                self.close_answered_exit_document();
+            } else {
+                // A synchronous write failed; keep this tab in the sweep.
+                self.shell.ui.show_exit_dialog = true;
+            }
+        }
+        if let Some(v) = actions.dialogs.show_exit_dialog.take() {
+            if !v || !self.block_exit_if_active_operation() {
+                self.shell.ui.show_exit_dialog = v;
+            }
+        }
+        if let Some(v) = actions.dialogs.show_close_dialog.take() {
+            self.shell.ui.show_close_dialog = v;
+        }
+        if std::mem::take(&mut actions.dialogs.dismiss_document_editor_error) {
+            self.shell.ui.document_editor_error = None;
+        }
+        if std::mem::take(&mut actions.dialogs.dismiss_save_error) {
+            self.shell.ui.save_error = None;
+        }
+        if actions.doc.reload_open_file_confirm {
+            self.confirm_reload_open_file();
+        }
+        if actions.doc.reload_open_file_cancel {
+            self.cancel_reload_open_file();
+        }
+        if let Some((indices, dpi)) = actions.doc.pdf_import_confirm.take() {
+            self.confirm_pdf_import(indices, dpi);
+        }
+        if actions.doc.pdf_import_cancel {
+            self.cancel_pdf_import();
+        }
+        if let Some(target) = actions.doc.pdf_nav_goto.take() {
+            self.pdf_nav_goto(target);
+        }
+        if let Some(v) = actions.sel.show_feather_dialog.take() {
+            self.shell.ui.show_feather_dialog = v;
+        }
+        if let Some(v) = actions.sel.show_stroke_dialog.take() {
+            self.shell.ui.show_stroke_dialog = v;
+        }
+        if let Some(params) = actions.sel.apply_stroke.take() {
+            self.edit.pending_stroke = Some(params);
+        }
+        if let Some(v) = actions.sel.show_color_range_dialog.take() {
+            if v {
+                self.open_color_range_dialog();
+            } else {
+                self.shell.ui.show_color_range_dialog = false;
+                self.shell.ui.color_range_preview = None;
+            }
+        }
+        if let Some(c) = actions.sel.set_color_range_color.take() {
+            self.shell.ui.color_range_color = c;
+            self.rebuild_color_range_preview();
+        }
+        if let Some(f) = actions.sel.set_color_range_fuzziness.take() {
+            self.shell.ui.color_range_fuzziness = f;
+            self.rebuild_color_range_preview();
+        }
+        if std::mem::take(&mut actions.sel.apply_color_range) {
+            self.apply_color_range();
+        }
+
+        if let Some(true) = actions.doc.close_file_without_saving.take() {
+            // This dialog handler runs before the general file-action handler.
+            // Consume and execute Save & Close here so the tab can never be
+            // removed before its save snapshot/write has actually started.
+            let save_before_close = actions.doc.save_project;
+            if save_before_close {
+                actions.doc.save_project = false;
+                self.do_save_project();
+            }
+            let webview_persistence_pending = {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_save_is_pending()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            let persistence_dirty = self.docs.active().is_modified() || {
+                #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
+                {
+                    self.document_webview_active_is_dirty()
+                }
+                #[cfg(not(all(target_os = "windows", feature = "canvas-editor-webview")))]
+                {
+                    false
+                }
+            };
+            if webview_persistence_pending || self.jobs.pending_file_dialog.is_some() {
+                self.shell.close_requested = true;
+            } else if save_before_close && persistence_dirty {
+                // A synchronous save failed (or Canvas Editor could not start
+                // its snapshot). Keep the tab and let the user retry/discard.
+                self.shell.ui.show_close_dialog = true;
+            } else {
+                self.execute_close();
+            }
+        }
+        if let Some(v) = actions.chrome.show_welcome.take() {
+            self.shell.ui.show_welcome = v;
+            // The welcome screen and the Library grid are mutually exclusive.
+            if v {
+                self.shell.ui.show_library = false;
+            }
+        }
+        if let Some((v, idx)) = actions.dialogs.show_rename_dialog.take() {
+            self.shell.ui.show_rename_dialog = v;
+            if v {
+                self.shell.ui.rename_idx = idx;
+                self.shell.ui.rename_text = self
+                    .docs
+                    .active()
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .get(idx)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default();
+            }
+        }
+        if let Some(v) = actions.doc.new_w_input.take() {
+            self.shell.ui.new_w_input = v;
+        }
+        if let Some(v) = actions.doc.new_h_input.take() {
+            self.shell.ui.new_h_input = v;
+        }
+        if let Some(v) = actions.doc.new_dpi.take() {
+            self.shell.ui.new_dpi = v;
+        }
+        if let Some(v) = actions.doc.new_bg_color.take() {
+            self.shell.ui.new_bg_color = v;
+        }
+        if let Some(v) = actions.doc.new_name.take() {
+            self.shell.ui.new_name = v;
+        }
+        if let Some(v) = actions.doc.new_unit.take() {
+            self.shell.ui.new_unit = v;
+        }
+        if let Some(v) = actions.doc.set_canvas_unit.take() {
+            self.shell.canvas_unit = v;
+        }
+        if let Some(t) = actions.doc.rename_text.take() {
+            self.shell.ui.rename_text = t;
+        }
+        if let Some(f) = actions.doc.export.take() {
+            self.shell.ui.export_format = f;
+        }
+        if let Some(interp) = actions.tool.set_transform_interpolation.take() {
+            self.shell.ui.transform_interpolation = interp;
+        }
+
+        if let Some((name, width, height, unit, dpi)) = actions.dialogs.save_preset.take() {
+            let preset = crate::core::presets::SizePreset {
+                name,
+                width,
+                height,
+                unit,
+                dpi,
+            };
+            std::sync::Arc::make_mut(&mut self.shell.user_presets).push(preset);
+            crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
+        }
+        if actions.dialogs.open_delete_preset_dialog {
+            self.shell.ui.show_delete_preset_dialog = true;
+        }
+        if actions.dialogs.close_delete_preset_dialog {
+            self.shell.ui.show_delete_preset_dialog = false;
+        }
+        if let Some(idx) = actions.dialogs.delete_preset.take() {
+            if idx < self.shell.user_presets.len() {
+                std::sync::Arc::make_mut(&mut self.shell.user_presets).remove(idx);
+                crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
+            }
+            if self.shell.user_presets.is_empty() {
+                self.shell.ui.show_delete_preset_dialog = false;
+            }
+        }
+        if let Some((w, h, unit, dpi)) = actions.dialogs.open_preset_dialog.take() {
+            let auto_name = if unit == "px" {
+                format!("{:.0}x{:.0}px @{:.0}DPI", w, h, dpi)
+            } else {
+                format!("{:.2}x{:.2}{} @{:.0}DPI", w, h, unit, dpi)
+            };
+            self.shell.ui.show_preset_dialog = true;
+            self.shell.ui.preset_dialog_name = auto_name;
+            self.shell.ui.preset_dialog_w = w;
+            self.shell.ui.preset_dialog_h = h;
+            self.shell.ui.preset_dialog_unit = unit;
+            self.shell.ui.preset_dialog_dpi = dpi;
+        }
+        if let Some(name) = actions.dialogs.preset_dialog_name_changed.take() {
+            self.shell.ui.preset_dialog_name = name;
+        }
+        if actions.dialogs.preset_dialog_confirm {
+            let name = self.shell.ui.preset_dialog_name.trim().to_string();
+            if !name.is_empty() {
+                let preset = crate::core::presets::SizePreset {
+                    name,
+                    width: self.shell.ui.preset_dialog_w,
+                    height: self.shell.ui.preset_dialog_h,
+                    unit: self.shell.ui.preset_dialog_unit.clone(),
+                    dpi: self.shell.ui.preset_dialog_dpi,
+                };
+                std::sync::Arc::make_mut(&mut self.shell.user_presets).push(preset);
+                crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
+            }
+            self.shell.ui.show_preset_dialog = false;
+        }
+        if actions.dialogs.preset_dialog_cancel {
+            self.shell.ui.show_preset_dialog = false;
+        }
+
+        if let Some((name, channels)) = actions.dialogs.save_levels_preset.take() {
+            let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
+            presets.upsert_levels(name, channels);
+            presets.save();
+        }
+        if let Some(idx) = actions.dialogs.delete_levels_preset.take() {
+            let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
+            if idx < presets.levels.len() {
+                presets.levels.remove(idx);
+                presets.save();
+            }
+        }
+        if let Some((name, channels)) = actions.dialogs.save_curves_preset.take() {
+            let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
+            presets.upsert_curves(name, channels);
+            presets.save();
+        }
+        if let Some(idx) = actions.dialogs.delete_curves_preset.take() {
+            let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
+            if idx < presets.curves.len() {
+                presets.curves.remove(idx);
+                presets.save();
+            }
+        }
+    }
+
+    /// Open Select ▸ Color Range: seed the target colour from the foreground so
+    /// the dialog previews something at once, then build the first thumbnail.
+    pub(crate) fn open_color_range_dialog(&mut self) {
+        if self.has_only_welcome_placeholder() {
+            self.shell.status_msg = "Hãy mở một ảnh trước".to_string();
+            return;
+        }
+        let fg = self.edit.tools.brush().settings.color;
+        self.shell.ui.color_range_color = [fg[0], fg[1], fg[2], 255];
+        self.shell.ui.show_color_range_dialog = true;
+        self.rebuild_color_range_preview();
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Canvas eyedropper for the Color Range dialog: sample the composited pixel
+    /// under the cursor as the new target colour and refresh the preview.
+    pub(crate) fn pick_color_range_at(&mut self, cx: f32, cy: f32) {
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if cx < 0.0 || cy < 0.0 || cx >= w as f32 || cy >= h as f32 {
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let (sx, sy) = (cx as u32, cy as u32);
+        let color = {
+            let pixels = &self.docs.documents[idx].canvas.pixels;
+            let i = ((sy * w + sx) * 4) as usize;
+            if i + 2 >= pixels.len() {
+                return;
+            }
+            [pixels[i], pixels[i + 1], pixels[i + 2], 255]
+        };
+        self.shell.ui.color_range_color = color;
+        self.shell.status_msg = format!(
+            "Color Range: #{:02X}{:02X}{:02X}",
+            color[0], color[1], color[2]
+        );
+        self.rebuild_color_range_preview();
+    }
+
+    /// Rebuild the grayscale mask thumbnail (white = selected) from the
+    /// composited image with the current target colour + fuzziness. Only called
+    /// when an input changes, and downsampled so it stays cheap on large images.
+    pub(crate) fn rebuild_color_range_preview(&mut self) {
+        if !self.shell.ui.show_color_range_dialog {
+            return;
+        }
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if w == 0 || h == 0 {
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let target = {
+            let c = self.shell.ui.color_range_color;
+            [c[0], c[1], c[2]]
+        };
+        let fuzz = self.shell.ui.color_range_fuzziness as f32;
+
+        // Fit the preview within a small box; sample the composite by a stride.
+        const MAX_EDGE: u32 = 260;
+        let step = (w.max(h).div_ceil(MAX_EDGE)).max(1);
+        let pw = w.div_ceil(step).max(1);
+        let ph = h.div_ceil(step).max(1);
+        let pixels = &self.docs.documents[idx].canvas.pixels;
+        if pixels.len() < (w as usize) * (h as usize) * 4 {
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        let mut rgba = vec![0u8; (pw as usize) * (ph as usize) * 4];
+        for py in 0..ph {
+            let sy = (py * step).min(h - 1);
+            for px in 0..pw {
+                let sx = (px * step).min(w - 1);
+                let si = ((sy * w + sx) * 4) as usize;
+                let rgb = [pixels[si], pixels[si + 1], pixels[si + 2]];
+                let a = crate::core::selection::color_range_alpha(rgb, target, fuzz);
+                let di = ((py * pw + px) * 4) as usize;
+                rgba[di] = a;
+                rgba[di + 1] = a;
+                rgba[di + 2] = a;
+                rgba[di + 3] = 255;
+            }
+        }
+        let img = egui::ColorImage::from_rgba_unmultiplied([pw as usize, ph as usize], &rgba);
+        self.shell.ui.color_range_preview = Some(std::sync::Arc::new(img));
+    }
+
+    /// Apply the Color Range dialog's colour + fuzziness as a NEW selection over
+    /// the whole composited image (one undoable step), then close the dialog.
+    pub(crate) fn apply_color_range(&mut self) {
+        let idx = self.docs.active_doc_idx;
+        let (w, h) = {
+            let c = &self.docs.documents[idx].canvas;
+            (c.width, c.height)
+        };
+        if w == 0 || h == 0 {
+            self.shell.ui.show_color_range_dialog = false;
+            self.shell.ui.color_range_preview = None;
+            return;
+        }
+        self.docs.documents[idx].canvas.ensure_pixels();
+        let target = {
+            let c = self.shell.ui.color_range_color;
+            [c[0], c[1], c[2]]
+        };
+        let fuzz = self.shell.ui.color_range_fuzziness;
+        let mask = {
+            let pixels = &self.docs.documents[idx].canvas.pixels;
+            crate::core::selection::color_range_mask(pixels, w, h, target, fuzz)
+        };
+
+        {
+            let canvas = &mut self.docs.documents[idx].canvas;
+            if mask.len() == canvas.selection.mask.len() {
+                let mut cmd = crate::core::command::SelectionCommand::capture_before(
+                    "Color Range",
+                    &canvas.selection,
+                );
+                canvas
+                    .selection
+                    .apply_with_mode(mask, crate::core::selection::SelectionMode::New);
+                cmd.capture_after(&canvas.selection);
+                canvas.record_as(Box::new(cmd), crate::core::gateway::ChangeKind::Selection);
+            }
+        }
+
+        self.shell.ui.show_color_range_dialog = false;
+        self.shell.ui.color_range_preview = None;
+        self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        let selected = self.docs.documents[idx].canvas.selection.active;
+        self.shell.status_msg = if selected {
+            "Color Range: đã tạo vùng chọn theo màu".to_string()
+        } else {
+            "Color Range: không có điểm ảnh nào khớp màu".to_string()
+        };
+    }
+}
