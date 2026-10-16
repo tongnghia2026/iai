@@ -8,8 +8,10 @@ pub(crate) use pro::ProDoor;
 mod adjustments;
 mod ai;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod ai_studio;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod ai_window;
 mod author_mail;
 mod channels;
@@ -18,9 +20,11 @@ mod develop;
 mod edit_ops;
 mod filters;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub(in crate::app) mod impose;
 mod print;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod pro;
 mod refine;
 mod ui_chrome;

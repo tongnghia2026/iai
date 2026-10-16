@@ -31,6 +31,7 @@ pub mod file_io;
 pub use iai_formats as formats;
 pub mod gpu;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod pro;
 pub mod tools;
 pub mod ui;

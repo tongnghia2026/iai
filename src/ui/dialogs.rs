@@ -4,13 +4,17 @@ mod author_mail;
 mod document;
 mod filter;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod id_photo;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod portrait;
 mod print;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod print_sheet;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod pro;
 mod scan_cleanup;
 mod select_ops;

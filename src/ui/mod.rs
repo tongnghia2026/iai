@@ -3,10 +3,13 @@
 // KHONG bao gio import truc tiep tu app.rs
 
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod ai_panel;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod ai_progress;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub(crate) mod ai_window;
 pub mod artboard_bar;
 pub mod color_picker;
@@ -19,6 +22,7 @@ pub mod menubar;
 pub mod panels;
 pub mod refine_select;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod retouch_gate;
 #[cfg(test)]
 pub(crate) mod snapshot;

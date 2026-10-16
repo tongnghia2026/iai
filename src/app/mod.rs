@@ -15,9 +15,11 @@ pub mod document_webview;
 pub mod editor_interaction;
 pub mod engine;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod ext_bridge;
 pub mod file_ops;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod id_photo_ops;
 pub mod input;
 pub mod library;
@@ -32,8 +34,10 @@ pub mod path_gradient;
 pub mod path_style;
 pub mod pen_ops;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod portrait_brush;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod portrait_ops;
 pub mod powerclip_ops;
 pub mod render;

@@ -5,20 +5,27 @@
 // ChatGPT (`edit`, `studio`).
 
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod body_parts;
 pub mod download;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod edit;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod face_mesh;
 pub mod ort_ep;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod pose;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod retouch;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod settings;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod studio;
 
 #[cfg(feature = "pro")]

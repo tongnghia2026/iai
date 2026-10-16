@@ -28,6 +28,7 @@ pub use iai_raster::blend;
 pub use iai_raster::box_filter;
 pub use iai_vector::command_vector;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod id_photo;
 pub use iai_color::perceptual_color;
 pub use iai_doc::layer;
@@ -38,6 +39,7 @@ pub use iai_doc::palette;
 pub use iai_imaging::output_sharpen;
 pub use iai_platform::mem_report;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod portrait;
 pub use iai_canvas::raw_spill;
 pub use iai_doc::portrait_recipe;
@@ -62,6 +64,7 @@ pub use iai_color::gamut_map;
 pub use iai_imaging::filters;
 pub use iai_raster::fast_math;
 #[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod imposition;
 pub use iai_ai::lama;
 pub use iai_layout::mail_merge;

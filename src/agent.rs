@@ -266,6 +266,7 @@ fn run_script(host: &mut dyn Host, mut gate: Gate, script: Option<&std::path::Pa
 
 #[cfg(feature = "pro")]
 #[cfg(test)]
+#[rustfmt::skip]
 mod e2e;
 
 #[cfg(test)]
