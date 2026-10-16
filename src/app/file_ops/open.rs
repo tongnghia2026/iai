@@ -1407,9 +1407,6 @@ impl App {
                     file_io::FileDialogResult::PickedPrintFolder(dir) => {
                         self.set_print_folder(dir);
                     }
-                    file_io::FileDialogResult::OpenedGarmentSheets(paths) => {
-                        self.open_garment_sheets(paths);
-                    }
                     file_io::FileDialogResult::PickedSponsorLogo(path) => {
                         self.set_sponsor_logo(path);
                     }

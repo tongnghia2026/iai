@@ -316,7 +316,7 @@ impl BrushTool {
         canvas: &mut Canvas,
         cx: f32,
         cy: f32,
-        mut stroke: Option<&mut StrokeBuffer>,
+        stroke: Option<&mut StrokeBuffer>,
     ) {
         if Self::paint_alpha_plane_dab(settings, canvas, cx, cy) {
             return;
@@ -394,7 +394,6 @@ impl BrushTool {
         let tile_size = crate::core::tile::TILE_SIZE;
 
         let has_sel = canvas.selection.active;
-        let sel_ptr: *const crate::core::selection::Selection = &canvas.selection;
         let paint_target = canvas.layer_stack.layers[layer_idx].paint_target;
         let paint_mask = match &stroke {
             Some(s) => s.paint_mask,
@@ -410,6 +409,7 @@ impl BrushTool {
         } else {
             canvas.channels.write_gate()
         };
+        let sel = &canvas.selection;
         let Some(tiles) = canvas.layer_stack.layers[layer_idx].get_paint_tiles_mut() else {
             return;
         };
@@ -423,18 +423,28 @@ impl BrushTool {
         let n_tiles = (((tx_end - tx_start) + 1) * ((ty_end - ty_start) + 1)) as usize;
         tiles.tiles.reserve(n_tiles);
 
-        #[derive(Clone, Copy)]
-        struct TileJob {
-            ptr: usize,
-            /// Coverage buffer for this tile (0 when unbuffered).
-            cov_ptr: usize,
-            /// Stroke-start snapshot tile (0 = tile was empty at stroke start).
-            base_ptr: usize,
+        // Each touched tile is taken out of the layer (and its coverage out of
+        // the stroke) for the length of the dab, so that one job owns it, and
+        // put back after.
+        struct TileJob<'a> {
+            pos: crate::core::tile::TilePos,
+            tile: std::sync::Arc<crate::core::tile::Tile>,
+            /// Coverage of this tile (buffered strokes only).
+            cov: Option<Box<[f32]>>,
+            /// The tile as the stroke began (None: it was empty then).
+            base: Option<&'a crate::core::tile::Tile>,
             tile_x0: u32,
             tile_y0: u32,
         }
 
+        let (base_tiles, mut cov_tiles) = match stroke {
+            Some(s) => (Some(&s.base.tiles), Some(&mut s.cov)),
+            None => (None, None),
+        };
         let tile_pixels = (tile_size * tile_size) as usize;
+        // What a row of a tile that was empty when the stroke began reads as.
+        static EMPTY_ROW: [u8; crate::core::tile::TILE_SIZE as usize * 4] =
+            [0; crate::core::tile::TILE_SIZE as usize * 4];
         let mut jobs: Vec<TileJob> = Vec::with_capacity(n_tiles);
         for ty in ty_start..=ty_end {
             let tile_y0 = ty * tile_size;
@@ -463,38 +473,99 @@ impl BrushTool {
                     x: tx as i32,
                     y: ty as i32,
                 };
-                let tile = tiles.get_tile_mut(pos);
-                let ptr = tile as *mut crate::core::tile::Tile as usize;
-                let (cov_ptr, base_ptr) = match stroke.as_mut() {
-                    Some(s) => {
-                        let cov = s
-                            .cov
-                            .entry(pos)
-                            .or_insert_with(|| vec![0.0f32; tile_pixels].into_boxed_slice());
-                        let base_ptr = s
-                            .base
-                            .tiles
-                            .get(&pos)
-                            .map(|a| std::sync::Arc::as_ptr(a) as usize)
-                            .unwrap_or(0);
-                        (cov.as_mut_ptr() as usize, base_ptr)
-                    }
-                    None => (0, 0),
+                // Copy-on-write, a fresh revision, the 16-bit master and ink
+                // dropped: what any 8-bit write to a tile does.
+                tiles.get_tile_mut(pos);
+                let Some(tile) = tiles.tiles.remove(&pos) else {
+                    continue;
                 };
+                let cov = cov_tiles.as_mut().map(|cov| {
+                    cov.remove(&pos)
+                        .unwrap_or_else(|| vec![0.0f32; tile_pixels].into_boxed_slice())
+                });
+                let base = base_tiles.and_then(|b| b.get(&pos)).map(|t| &**t);
                 jobs.push(TileJob {
-                    ptr,
-                    cov_ptr,
-                    base_ptr,
+                    pos,
+                    tile,
+                    cov,
+                    base,
                     tile_x0,
                     tile_y0,
                 });
             }
         }
 
-        let sel_addr = sel_ptr as usize;
+        // What every tile of the dab is painted with.
+        #[derive(Clone, Copy)]
+        struct Dab<'a> {
+            lcx: f32,
+            lcy: f32,
+            r2: f32,
+            inv_r2: f32,
+            lut_scale: f32,
+            falloff_lut: &'a [f32; FALLOFF_LUT_N],
+            max_src_a: f32,
+            ox: i32,
+            oy: i32,
+            sel: &'a crate::core::selection::Selection,
+            channel_wm: Option<[bool; 4]>,
+            opacity: f32,
+            mask_target: f32,
+            paint_mask: bool,
+            is_eraser: bool,
+            src_r: f32,
+            src_g: f32,
+            src_b: f32,
+            br: u8,
+            bg: u8,
+            bb: u8,
+            lx0: u32,
+            ly0: u32,
+            lx1: u32,
+            ly1: u32,
+            tile_size: u32,
+        }
 
-        let fill = |job: &TileJob| {
-            let tile = unsafe { &mut *(job.ptr as *mut crate::core::tile::Tile) };
+        // One copy per combination of the three switches the pixel loop
+        // tests most: each copy runs without the branches the others need.
+        fn fill_tile<const BUFFERED: bool, const LOCK_ALPHA: bool, const HAS_SEL: bool>(
+            dab: &Dab,
+            job: &mut TileJob,
+        ) {
+            let Dab {
+                lcx,
+                lcy,
+                r2,
+                inv_r2,
+                lut_scale,
+                falloff_lut,
+                max_src_a,
+                ox,
+                oy,
+                sel,
+                channel_wm,
+                opacity,
+                mask_target,
+                paint_mask,
+                is_eraser,
+                src_r,
+                src_g,
+                src_b,
+                br,
+                bg,
+                bb,
+                lx0,
+                ly0,
+                lx1,
+                ly1,
+                tile_size,
+            } = *dab;
+            let (buffered, lock_alpha, has_sel) = (BUFFERED, LOCK_ALPHA, HAS_SEL);
+            let pixels = &mut std::sync::Arc::make_mut(&mut job.tile).pixels;
+            let mut cov_tile = job.cov.as_deref_mut();
+            let base = job.base;
+            // Stands in for the coverage of an unbuffered dab, which has none.
+            let mut no_cov = [0.0f32; crate::core::tile::TILE_SIZE as usize];
             let tile_x0 = job.tile_x0;
             let tile_y0 = job.tile_y0;
             let px_min = tile_x0.max(lx0);
@@ -504,256 +575,310 @@ impl BrushTool {
             if px_max <= px_min || py_max <= py_min {
                 return;
             }
-            unsafe {
-                for py in py_min..py_max {
-                    let dy = py as f32 + 0.5 - lcy;
-                    let dy2 = dy * dy;
-                    let row_offset = (py - tile_y0) * tile_size;
-                    let canvas_py = (py as i32 + oy) as u32;
+            for py in py_min..py_max {
+                let dy = py as f32 + 0.5 - lcy;
+                let dy2 = dy * dy;
+                if dy2 > r2 {
+                    continue;
+                }
+                // Only the pixels of this row the dab can reach, with one to
+                // spare on each side: the test on `d2` below still decides.
+                let half = (r2 - dy2).sqrt();
+                let x_min = ((lcx - 0.5 - half).floor() - 1.0).max(px_min as f32) as u32;
+                let x_max = ((lcx - 0.5 + half).ceil() + 2.0).min(px_max as f32) as u32;
+                if x_max <= x_min {
+                    continue;
+                }
+                let row_offset = (py - tile_y0) * tile_size;
+                let canvas_py = (py as i32 + oy) as u32;
+                // The row's pixels and coverage, so the loop below indexes
+                // nothing.
+                let first = (row_offset + x_min - tile_x0) as usize;
+                let last = (row_offset + x_max - tile_x0) as usize;
+                let Some(row_pix) = pixels.get_mut(first * 4..last * 4) else {
+                    continue;
+                };
+                let row_cov = match cov_tile.as_deref_mut() {
+                    Some(cov) => cov.get_mut(first..last),
+                    None => no_cov.get_mut(..last - first),
+                };
+                let Some(row_cov) = row_cov else {
+                    continue;
+                };
+                let row_base = match base {
+                    Some(b) => b.pixels.get(first * 4..last * 4),
+                    None => EMPTY_ROW.get(..(last - first) * 4),
+                };
+                let Some(row_base) = row_base else {
+                    continue;
+                };
 
-                    for px in px_min..px_max {
-                        let dx = px as f32 + 0.5 - lcx;
-                        let d2 = dx * dx + dy2;
-                        if d2 > r2 {
-                            continue;
-                        }
-                        let idx = ((d2 * inv_r2) * lut_scale) as usize;
-                        let alpha = *falloff_lut.get_unchecked(idx.min(FALLOFF_LUT_N - 1));
+                for (((px, pix), cov), bpx) in (x_min..x_max)
+                    .zip(row_pix.chunks_exact_mut(4))
+                    .zip(row_cov)
+                    .zip(row_base.chunks_exact(4))
+                {
+                    let dx = px as f32 + 0.5 - lcx;
+                    let d2 = dx * dx + dy2;
+                    if d2 > r2 {
+                        continue;
+                    }
+                    let idx = ((d2 * inv_r2) * lut_scale) as usize;
+                    let alpha = falloff_lut[idx.min(FALLOFF_LUT_N - 1)];
 
-                        let mut src_a = alpha * max_src_a;
+                    let mut src_a = alpha * max_src_a;
+                    if src_a < 0.001 {
+                        continue;
+                    }
+
+                    if has_sel {
+                        let canvas_px = (px as i32 + ox) as u32;
+                        src_a *= sel.sample(canvas_px, canvas_py);
                         if src_a < 0.001 {
                             continue;
                         }
+                    }
 
-                        if has_sel {
-                            let canvas_px = (px as i32 + ox) as u32;
-                            let sel = &*(sel_addr as *const crate::core::selection::Selection);
-                            src_a *= sel.sample(canvas_px, canvas_py);
-                            if src_a < 0.001 {
-                                continue;
-                            }
-                        }
-
-                        let col = px - tile_x0;
-                        let i = ((row_offset + col) * 4) as usize;
-
-                        if let Some(wm) = channel_wm {
-                            // Partial channel selection: paint the colour's
-                            // luma into the enabled channels (the eraser
-                            // carries the background colour here). Alpha and
-                            // the other channels stay — buffered dabs rewrite
-                            // them from the stroke-start base, which keeps
-                            // overlapping dabs idempotent.
-                            if buffered {
-                                let cov = &mut *((job.cov_ptr as *mut f32)
-                                    .add((row_offset + col) as usize));
-                                *cov += src_a * (1.0 - *cov);
-                                let s = (*cov * opacity).clamp(0.0, 1.0);
-                                let (b_r, b_g, b_b, b_a) = if job.base_ptr != 0 {
-                                    (*(job.base_ptr as *const crate::core::tile::Tile))
-                                        .get_pixel(col, py - tile_y0)
-                                } else {
-                                    (0, 0, 0, 0)
-                                };
-                                let base = [b_r, b_g, b_b];
-                                for (c, &b8) in base.iter().enumerate() {
-                                    let out = if wm[c] {
-                                        let b = b8 as f32 / 255.0;
-                                        ((b + (mask_target - b) * s) * 255.0).round() as u8
-                                    } else {
-                                        b8
-                                    };
-                                    *tile.pixels.get_unchecked_mut(i + c) = out;
-                                }
-                                *tile.pixels.get_unchecked_mut(i + 3) = b_a;
-                            } else {
-                                for c in 0..3 {
-                                    if wm[c] {
-                                        let d = *tile.pixels.get_unchecked(i + c) as f32 / 255.0;
-                                        *tile.pixels.get_unchecked_mut(i + c) =
-                                            ((d + (mask_target - d) * src_a) * 255.0).round() as u8;
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
+                    if let Some(wm) = channel_wm {
+                        // Partial channel selection: paint the colour's
+                        // luma into the enabled channels (the eraser
+                        // carries the background colour here). Alpha and
+                        // the other channels stay — buffered dabs rewrite
+                        // them from the stroke-start base, which keeps
+                        // overlapping dabs idempotent.
                         if buffered {
-                            // PS model: accumulate flow into the stroke's
-                            // coverage, then composite base ⊕ (color, cov ×
-                            // opacity). Re-deriving from the stroke-start
-                            // snapshot on every dab makes overlap idempotent —
-                            // one stroke can never exceed its opacity.
-                            let cov =
-                                &mut *((job.cov_ptr as *mut f32).add((row_offset + col) as usize));
                             *cov += src_a * (1.0 - *cov);
                             let s = (*cov * opacity).clamp(0.0, 1.0);
-                            let (b_r, b_g, b_b, b_a) = if job.base_ptr != 0 {
-                                (*(job.base_ptr as *const crate::core::tile::Tile))
-                                    .get_pixel(col, py - tile_y0)
-                            } else {
-                                (0, 0, 0, 0)
-                            };
-
-                            if paint_mask {
-                                let bgray = b_r as f32 / 255.0;
-                                let out = bgray + (mask_target - bgray) * s;
-                                let out8 = (out * 255.0).round().clamp(0.0, 255.0) as u8;
-                                *tile.pixels.get_unchecked_mut(i) = out8;
-                                *tile.pixels.get_unchecked_mut(i + 1) = out8;
-                                *tile.pixels.get_unchecked_mut(i + 2) = out8;
-                                *tile.pixels.get_unchecked_mut(i + 3) = 255;
-                            } else if is_eraser {
-                                let base_a = b_a as f32 / 255.0;
-                                let out_a = base_a * (1.0 - s);
-                                if out_a < 0.001 {
-                                    *tile.pixels.get_unchecked_mut(i) = 0;
-                                    *tile.pixels.get_unchecked_mut(i + 1) = 0;
-                                    *tile.pixels.get_unchecked_mut(i + 2) = 0;
-                                    *tile.pixels.get_unchecked_mut(i + 3) = 0;
+                            let (b_r, b_g, b_b, b_a) = (bpx[0], bpx[1], bpx[2], bpx[3]);
+                            let base = [b_r, b_g, b_b];
+                            for (c, &b8) in base.iter().enumerate() {
+                                let out = if wm[c] {
+                                    let b = b8 as f32 / 255.0;
+                                    ((b + (mask_target - b) * s) * 255.0).round() as u8
                                 } else {
-                                    *tile.pixels.get_unchecked_mut(i) = b_r;
-                                    *tile.pixels.get_unchecked_mut(i + 1) = b_g;
-                                    *tile.pixels.get_unchecked_mut(i + 2) = b_b;
-                                    *tile.pixels.get_unchecked_mut(i + 3) =
-                                        (out_a * 255.0).round() as u8;
-                                }
-                            } else {
-                                let base_a = b_a as f32 / 255.0;
-                                let dst_weight = base_a * (1.0 - s);
-                                if lock_alpha {
-                                    if base_a < 0.001 {
-                                        continue;
-                                    }
-                                    let denom = s + dst_weight;
-                                    if denom < 0.001 {
-                                        continue;
-                                    }
-                                    let base_r = b_r as f32 / 255.0;
-                                    let base_g = b_g as f32 / 255.0;
-                                    let base_b = b_b as f32 / 255.0;
-                                    let out_r = (src_r * s + base_r * dst_weight) / denom;
-                                    let out_g = (src_g * s + base_g * dst_weight) / denom;
-                                    let out_b = (src_b * s + base_b * dst_weight) / denom;
-                                    *tile.pixels.get_unchecked_mut(i) =
-                                        (out_r * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 1) =
-                                        (out_g * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 2) =
-                                        (out_b * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 3) = b_a;
-                                } else {
-                                    let out_a = s + dst_weight;
-                                    if out_a < 0.001 {
-                                        continue;
-                                    }
-                                    let base_r = b_r as f32 / 255.0;
-                                    let base_g = b_g as f32 / 255.0;
-                                    let base_b = b_b as f32 / 255.0;
-                                    let out_r = (src_r * s + base_r * dst_weight) / out_a;
-                                    let out_g = (src_g * s + base_g * dst_weight) / out_a;
-                                    let out_b = (src_b * s + base_b * dst_weight) / out_a;
-                                    *tile.pixels.get_unchecked_mut(i) =
-                                        (out_r * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 1) =
-                                        (out_g * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 2) =
-                                        (out_b * 255.0).round() as u8;
-                                    *tile.pixels.get_unchecked_mut(i + 3) =
-                                        (out_a * 255.0).round() as u8;
+                                    b8
+                                };
+                                pix[c] = out;
+                            }
+                            pix[3] = b_a;
+                        } else {
+                            for c in 0..3 {
+                                if wm[c] {
+                                    let d = pix[c] as f32 / 255.0;
+                                    pix[c] =
+                                        ((d + (mask_target - d) * src_a) * 255.0).round() as u8;
                                 }
                             }
-                            continue;
                         }
+                        continue;
+                    }
+
+                    if buffered {
+                        // PS model: accumulate flow into the stroke's
+                        // coverage, then composite base ⊕ (color, cov ×
+                        // opacity). Re-deriving from the stroke-start
+                        // snapshot on every dab makes overlap idempotent —
+                        // one stroke can never exceed its opacity.
+                        *cov += src_a * (1.0 - *cov);
+                        let s = (*cov * opacity).clamp(0.0, 1.0);
+                        let (b_r, b_g, b_b, b_a) = (bpx[0], bpx[1], bpx[2], bpx[3]);
 
                         if paint_mask {
-                            // Standard source-over lerp so repeated strokes keep
-                            // moving the mask toward the brush value (the old
-                            // max/min cap froze low-opacity paint at target*a
-                            // forever — soft brushes could never cover).
-                            let dst = *tile.pixels.get_unchecked(i) as f32 / 255.0;
-                            let out = dst + (mask_target - dst) * src_a;
+                            let bgray = b_r as f32 / 255.0;
+                            let out = bgray + (mask_target - bgray) * s;
                             let out8 = (out * 255.0).round().clamp(0.0, 255.0) as u8;
-                            *tile.pixels.get_unchecked_mut(i) = out8;
-                            *tile.pixels.get_unchecked_mut(i + 1) = out8;
-                            *tile.pixels.get_unchecked_mut(i + 2) = out8;
-                            *tile.pixels.get_unchecked_mut(i + 3) = 255;
+                            pix[0] = out8;
+                            pix[1] = out8;
+                            pix[2] = out8;
+                            pix[3] = 255;
+                        } else if is_eraser {
+                            let base_a = b_a as f32 / 255.0;
+                            let out_a = base_a * (1.0 - s);
+                            if out_a < 0.001 {
+                                pix[0] = 0;
+                                pix[1] = 0;
+                                pix[2] = 0;
+                                pix[3] = 0;
+                            } else {
+                                pix[0] = b_r;
+                                pix[1] = b_g;
+                                pix[2] = b_b;
+                                pix[3] = (out_a * 255.0).round() as u8;
+                            }
+                        } else {
+                            // Locked alpha paints only where the layer was not
+                            // transparent (alpha 0 is the only byte under 0.001).
+                            if lock_alpha && b_a == 0 {
+                                continue;
+                            }
+                            let base_a = b_a as f32 / 255.0;
+                            let dst_weight = base_a * (1.0 - s);
+                            if lock_alpha {
+                                let denom = s + dst_weight;
+                                if denom < 0.001 {
+                                    continue;
+                                }
+                                let base_r = b_r as f32 / 255.0;
+                                let base_g = b_g as f32 / 255.0;
+                                let base_b = b_b as f32 / 255.0;
+                                let out_r = (src_r * s + base_r * dst_weight) / denom;
+                                let out_g = (src_g * s + base_g * dst_weight) / denom;
+                                let out_b = (src_b * s + base_b * dst_weight) / denom;
+                                pix[0] = (out_r * 255.0).round() as u8;
+                                pix[1] = (out_g * 255.0).round() as u8;
+                                pix[2] = (out_b * 255.0).round() as u8;
+                                pix[3] = b_a;
+                            } else {
+                                let out_a = s + dst_weight;
+                                if out_a < 0.001 {
+                                    continue;
+                                }
+                                let base_r = b_r as f32 / 255.0;
+                                let base_g = b_g as f32 / 255.0;
+                                let base_b = b_b as f32 / 255.0;
+                                let out_r = (src_r * s + base_r * dst_weight) / out_a;
+                                let out_g = (src_g * s + base_g * dst_weight) / out_a;
+                                let out_b = (src_b * s + base_b * dst_weight) / out_a;
+                                pix[0] = (out_r * 255.0).round() as u8;
+                                pix[1] = (out_g * 255.0).round() as u8;
+                                pix[2] = (out_b * 255.0).round() as u8;
+                                pix[3] = (out_a * 255.0).round() as u8;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if paint_mask {
+                        // Standard source-over lerp so repeated strokes keep
+                        // moving the mask toward the brush value (the old
+                        // max/min cap froze low-opacity paint at target*a
+                        // forever — soft brushes could never cover).
+                        let dst = pix[0] as f32 / 255.0;
+                        let out = dst + (mask_target - dst) * src_a;
+                        let out8 = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+                        pix[0] = out8;
+                        pix[1] = out8;
+                        pix[2] = out8;
+                        pix[3] = 255;
+                        continue;
+                    }
+
+                    if is_eraser {
+                        let dst_a8 = pix[3];
+                        if dst_a8 == 0 {
+                            continue;
+                        }
+                        let dst_a = dst_a8 as f32 / 255.0;
+                        let out_a = (dst_a - src_a).clamp(0.0, 1.0);
+                        if out_a < 0.001 {
+                            pix[0] = 0;
+                            pix[1] = 0;
+                            pix[2] = 0;
+                            pix[3] = 0;
+                        } else {
+                            pix[3] = (out_a * 255.0).round() as u8;
+                        }
+                    } else {
+                        let dst_a8 = pix[3];
+
+                        if src_a >= 0.999 && !lock_alpha {
+                            pix[0] = br;
+                            pix[1] = bg;
+                            pix[2] = bb;
+                            pix[3] = 255;
                             continue;
                         }
 
-                        if is_eraser {
-                            let dst_a8 = *tile.pixels.get_unchecked(i + 3);
-                            if dst_a8 == 0 {
-                                continue;
-                            }
-                            let dst_a = dst_a8 as f32 / 255.0;
-                            let out_a = (dst_a - src_a).clamp(0.0, 1.0);
-                            if out_a < 0.001 {
-                                *tile.pixels.get_unchecked_mut(i) = 0;
-                                *tile.pixels.get_unchecked_mut(i + 1) = 0;
-                                *tile.pixels.get_unchecked_mut(i + 2) = 0;
-                                *tile.pixels.get_unchecked_mut(i + 3) = 0;
-                            } else {
-                                *tile.pixels.get_unchecked_mut(i + 3) =
-                                    (out_a * 255.0).round() as u8;
-                            }
-                        } else {
-                            let dst_a8 = *tile.pixels.get_unchecked(i + 3);
+                        let dst_a = dst_a8 as f32 / 255.0;
+                        let inv_src_a = 1.0 - src_a;
+                        let dst_weight = dst_a * inv_src_a;
+                        let mut out_a = src_a + dst_weight;
 
-                            if src_a >= 0.999 && !lock_alpha {
-                                *tile.pixels.get_unchecked_mut(i) = br;
-                                *tile.pixels.get_unchecked_mut(i + 1) = bg;
-                                *tile.pixels.get_unchecked_mut(i + 2) = bb;
-                                *tile.pixels.get_unchecked_mut(i + 3) = 255;
-                                continue;
-                            }
-
-                            let dst_a = dst_a8 as f32 / 255.0;
-                            let inv_src_a = 1.0 - src_a;
-                            let dst_weight = dst_a * inv_src_a;
-                            let mut out_a = src_a + dst_weight;
-
-                            if lock_alpha {
-                                out_a = dst_a;
-                            }
-
-                            if out_a < 0.001 {
-                                continue;
-                            }
-
-                            let dst_r8 = *tile.pixels.get_unchecked(i);
-                            let dst_g8 = *tile.pixels.get_unchecked(i + 1);
-                            let dst_b8 = *tile.pixels.get_unchecked(i + 2);
-
-                            let dst_r = dst_r8 as f32 / 255.0;
-                            let dst_g = dst_g8 as f32 / 255.0;
-                            let dst_b = dst_b8 as f32 / 255.0;
-
-                            let denom = src_a + dst_weight;
-                            if denom < 0.001 {
-                                continue;
-                            }
-                            let out_r = (src_r * src_a + dst_r * dst_weight) / denom;
-                            let out_g = (src_g * src_a + dst_g * dst_weight) / denom;
-                            let out_b = (src_b * src_a + dst_b * dst_weight) / denom;
-
-                            // .round() — plain truncation drifts every blend
-                            // toward black/transparent, leaving dark streaks.
-                            *tile.pixels.get_unchecked_mut(i) = (out_r * 255.0).round() as u8;
-                            *tile.pixels.get_unchecked_mut(i + 1) = (out_g * 255.0).round() as u8;
-                            *tile.pixels.get_unchecked_mut(i + 2) = (out_b * 255.0).round() as u8;
-                            *tile.pixels.get_unchecked_mut(i + 3) = (out_a * 255.0).round() as u8;
+                        if lock_alpha {
+                            out_a = dst_a;
                         }
+
+                        if out_a < 0.001 {
+                            continue;
+                        }
+
+                        let dst_r8 = pix[0];
+                        let dst_g8 = pix[1];
+                        let dst_b8 = pix[2];
+
+                        let dst_r = dst_r8 as f32 / 255.0;
+                        let dst_g = dst_g8 as f32 / 255.0;
+                        let dst_b = dst_b8 as f32 / 255.0;
+
+                        let denom = src_a + dst_weight;
+                        if denom < 0.001 {
+                            continue;
+                        }
+                        let out_r = (src_r * src_a + dst_r * dst_weight) / denom;
+                        let out_g = (src_g * src_a + dst_g * dst_weight) / denom;
+                        let out_b = (src_b * src_a + dst_b * dst_weight) / denom;
+
+                        // .round() — plain truncation drifts every blend
+                        // toward black/transparent, leaving dark streaks.
+                        pix[0] = (out_r * 255.0).round() as u8;
+                        pix[1] = (out_g * 255.0).round() as u8;
+                        pix[2] = (out_b * 255.0).round() as u8;
+                        pix[3] = (out_a * 255.0).round() as u8;
                     }
                 }
             }
+        }
+
+        let dab = Dab {
+            lcx,
+            lcy,
+            r2,
+            inv_r2,
+            lut_scale,
+            falloff_lut: &falloff_lut,
+            max_src_a,
+            ox,
+            oy,
+            sel,
+            channel_wm,
+            opacity,
+            mask_target,
+            paint_mask,
+            is_eraser,
+            src_r,
+            src_g,
+            src_b,
+            br,
+            bg,
+            bb,
+            lx0,
+            ly0,
+            lx1,
+            ly1,
+            tile_size,
+        };
+        let fill = |job: &mut TileJob| match (buffered, lock_alpha, has_sel) {
+            (false, false, false) => fill_tile::<false, false, false>(&dab, job),
+            (false, false, true) => fill_tile::<false, false, true>(&dab, job),
+            (false, true, false) => fill_tile::<false, true, false>(&dab, job),
+            (false, true, true) => fill_tile::<false, true, true>(&dab, job),
+            (true, false, false) => fill_tile::<true, false, false>(&dab, job),
+            (true, false, true) => fill_tile::<true, false, true>(&dab, job),
+            (true, true, false) => fill_tile::<true, true, false>(&dab, job),
+            (true, true, true) => fill_tile::<true, true, true>(&dab, job),
         };
 
         if jobs.len() >= 4 {
             use rayon::prelude::*;
-            jobs.par_iter().for_each(fill);
+            jobs.par_iter_mut().for_each(fill);
         } else {
-            jobs.iter().for_each(fill);
+            jobs.iter_mut().for_each(fill);
+        }
+        for job in jobs {
+            tiles.tiles.insert(job.pos, job.tile);
+            if let (Some(cov_tiles), Some(cov)) = (cov_tiles.as_mut(), job.cov) {
+                cov_tiles.insert(job.pos, cov);
+            }
         }
         let canvas_x0 = (lx0 as i32 + ox).max(0) as u32;
         let canvas_y0 = (ly0 as i32 + oy).max(0) as u32;
@@ -819,7 +944,7 @@ impl BrushTool {
         }
 
         let has_sel = canvas.selection.active;
-        let sel_ptr: *const crate::core::selection::Selection = &canvas.selection;
+        let sel = &canvas.selection;
 
         let tile_size = crate::core::tile::TILE_SIZE;
         let Some(tiles) = canvas.layer_stack.layers[layer_idx].get_paint_tiles_mut() else {
@@ -868,7 +993,6 @@ impl BrushTool {
                         if has_sel {
                             let canvas_px = (px as i32 + ox) as u32;
                             let canvas_py = (py as i32 + oy) as u32;
-                            let sel = unsafe { &*sel_ptr };
                             src_a *= sel.sample(canvas_px, canvas_py);
                             if src_a < 0.001 {
                                 continue;
@@ -1749,5 +1873,155 @@ mod tests {
         assert!(soft_round_alpha((r * 0.9).powi(2), r, 1.0) > 0.99);
         assert!(soft_round_alpha((r * 0.995).powi(2), r, 1.0) < 1.0);
         assert_eq!(soft_round_alpha(r * r, r, 1.0), 0.0);
+    }
+
+    /// FNV-1a over the paint target's tiles in position order.
+    fn paint_target_digest(canvas: &mut Canvas) -> u64 {
+        let idx = canvas.layer_stack.active_idx;
+        let Some(tiles) = canvas.layer_stack.layers[idx].get_paint_tiles_mut() else {
+            return 0;
+        };
+        let mut keys: Vec<_> = tiles.tiles.keys().copied().collect();
+        keys.sort_by_key(|p| (p.y, p.x));
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for pos in keys {
+            for b in pos.x.to_le_bytes().iter().chain(&pos.y.to_le_bytes()) {
+                h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+            for &b in &tiles.tiles[&pos].pixels {
+                h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    /// Speed and pixel digest of strokes across the paths of
+    /// `paint_cpu_dab_impl` (buffered / direct, eraser, lock alpha, channel
+    /// gate, layer mask, soft selection). The digests must not move when the
+    /// code is restructured without meaning to change what it paints.
+    ///
+    /// `CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+    ///  cargo test --release --lib --target-dir target/probe
+    ///  probe_brush_strokes -- --ignored --nocapture`
+    #[test]
+    #[ignore = "probe: prints timings and digests"]
+    fn probe_brush_strokes() {
+        let (w, h) = (3000u32, 2000u32);
+        let fresh = || {
+            let mut canvas = Canvas::new_blank(w, h);
+            let idx = canvas.layer_stack.active_idx;
+            if let Some(tiles) = canvas.layer_stack.layers[idx].get_paint_tiles_mut() {
+                for y in (0..h).step_by(7) {
+                    for x in (0..w).step_by(5) {
+                        tiles.set_pixel(x, y, (x % 251) as u8, (y % 241) as u8, 90, 200);
+                    }
+                }
+            }
+            canvas
+        };
+        let stroke = |canvas: &mut Canvas, settings: &BrushSettings, buffered: bool| {
+            let mut buf = if buffered {
+                StrokeBuffer::begin(canvas)
+            } else {
+                None
+            };
+            let n = 400;
+            let t = std::time::Instant::now();
+            for k in 0..n {
+                let f = k as f32 / n as f32;
+                let x = 100.0 + f * (w as f32 - 200.0);
+                let y = h as f32 * 0.5 + (f * 12.0).sin() * h as f32 * 0.3;
+                match buf.as_mut() {
+                    Some(s) => BrushTool::paint_cpu_dab_stroked(settings, canvas, x, y, s),
+                    None => BrushTool::paint_cpu_dab(settings, canvas, x, y),
+                }
+            }
+            t.elapsed()
+        };
+        let base = BrushSettings {
+            hardness: 0.3,
+            opacity: 0.8,
+            flow: 0.6,
+            color: [220, 40, 90, 255],
+            ..BrushSettings::default()
+        };
+        for size in [20.0f32, 150.0, 600.0] {
+            let settings = BrushSettings {
+                size,
+                ..base.clone()
+            };
+            let cases: [(&str, fn(&mut Canvas), BrushSettings, bool); 7] = [
+                ("buffered", |_| {}, settings.clone(), true),
+                ("direct", |_| {}, settings.clone(), false),
+                (
+                    "eraser",
+                    |_| {},
+                    BrushSettings {
+                        is_eraser: true,
+                        ..settings.clone()
+                    },
+                    true,
+                ),
+                (
+                    "lock alpha",
+                    |c| {
+                        let i = c.layer_stack.active_idx;
+                        c.layer_stack.layers[i].lock_alpha = true;
+                    },
+                    settings.clone(),
+                    true,
+                ),
+                (
+                    "channel gate",
+                    |c| c.channels.select_color(1, false),
+                    settings.clone(),
+                    true,
+                ),
+                (
+                    "layer mask",
+                    |c| {
+                        let i = c.layer_stack.active_idx;
+                        c.layer_stack.layers[i].add_mask(true);
+                        c.layer_stack.layers[i].paint_target =
+                            crate::core::layer::PaintTarget::Mask;
+                    },
+                    settings.clone(),
+                    true,
+                ),
+                (
+                    "soft selection",
+                    |c| {
+                        let (cw, ch) = (c.width, c.height);
+                        c.selection.select_rect(0, 0, cw, ch);
+                        for y in 0..ch {
+                            for x in 0..cw {
+                                c.selection.mask[(y * cw + x) as usize] =
+                                    ((x / 3 + y / 5) % 256) as u8;
+                            }
+                        }
+                    },
+                    settings.clone(),
+                    true,
+                ),
+            ];
+            for (name, setup, s, buffered) in cases {
+                let mut canvas = fresh();
+                setup(&mut canvas);
+                let mut best = std::time::Duration::MAX;
+                let mut digest = 0;
+                for _ in 0..3 {
+                    let mut c = fresh();
+                    setup(&mut c);
+                    best = best.min(stroke(&mut c, &s, buffered));
+                    digest = paint_target_digest(&mut c);
+                }
+                stroke(&mut canvas, &s, buffered);
+                assert_eq!(digest, paint_target_digest(&mut canvas));
+                println!(
+                    "brush size {size:>4} {name:<15} best of 3: {:>8.2} ms  digest {digest:016x}",
+                    best.as_secs_f64() * 1e3
+                );
+            }
+        }
     }
 }

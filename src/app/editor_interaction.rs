@@ -23,6 +23,9 @@ pub struct EditorInteraction {
     pub(in crate::app) pending_stroke: Option<crate::core::canvas::StrokeParams>,
     /// In-progress guide drag (create from ruler, or move an existing guide).
     pub(in crate::app) guide_op: Option<GuideOp>,
+    /// Guide picked with the Move tool (its document, its index there):
+    /// Delete removes it. See `App::selected_guide`.
+    pub(in crate::app) selected_guide: Option<(crate::core::document::DocumentId, usize)>,
     /// Smart-guide lines from Free Transform snapping (④); drawn like the Move
     /// tool's. Cleared when no transform handle is being dragged.
     pub(in crate::app) transform_snap_guides: Vec<crate::core::snapping::SnapLine>,
@@ -40,9 +43,20 @@ pub struct EditorInteraction {
     /// header stores its whole subtree; paste remaps ids so the folder + children
     /// come across intact.
     pub(in crate::app) clipboard: Option<Vec<crate::core::layer::Layer>>,
+    /// Where the visible content of `clipboard` sat on its source canvas
+    /// (`x, y, w, h`): the rectangle iai mirrored to the OS clipboard. `None`
+    /// when the block had nothing to mirror.
+    pub(in crate::app) clipboard_mirror_rect: Option<(i32, i32, u32, u32)>,
+    /// Size of the canvas `clipboard` was copied from. Paste keeps the copied
+    /// position on a canvas of this size and centres the block on any other.
+    pub(in crate::app) clipboard_source_canvas: Option<(u32, u32)>,
+    /// Resolution of the document `clipboard` was copied from: the New Canvas
+    /// dialog opened on that copy takes it along with its size.
+    pub(in crate::app) clipboard_source_ppi: Option<f32>,
     /// Size of an OS clipboard image that populated the New Canvas dialog. Paste
     /// uses this as a short-lived hint so the follow-up Ctrl+V prefers the copied
-    /// external image over any older internal layer clipboard.
+    /// external image over any older internal layer clipboard. When that image
+    /// is iai's own mirror, the layers are pasted instead.
     pub(in crate::app) clipboard_image_new_doc_hint: Option<(u32, u32)>,
     /// Content hash of the image iai itself last wrote to the OS clipboard (on
     /// copy, or when sending an edit to the browser extension). Paste compares

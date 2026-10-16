@@ -91,43 +91,19 @@ impl App {
             }
         }
         if let Some(idx) = actions.layers.duplicate_layer.take() {
-            let is_grp = self
-                .docs
-                .active()
-                .canvas
-                .layer_stack
-                .layers
-                .get(idx)
-                .is_some_and(|l| l.is_group());
             undoable_layer_op!("Duplicate Layer", {
                 let ls = &mut self.docs.active_mut().canvas.layer_stack;
-                if is_grp {
-                    ls.duplicate_group(idx);
-                } else if !ls.duplicate_selected_from(idx) {
-                    let copy = ls.duplicate_layer(idx);
+                // A folder is duplicated with its contents, alone or as part
+                // of a multi-selection.
+                if !ls.duplicate_selected_from(idx) {
+                    let copy = ls.duplicate_node(idx);
                     ls.select_only(copy);
                 }
             });
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         }
         if actions.layers.layer_via_copy {
-            let active = self.docs.active().canvas.layer_stack.active_idx;
-            if self
-                .docs
-                .active()
-                .canvas
-                .layer_stack
-                .layers
-                .get(active)
-                .is_some_and(|l| l.is_group())
-            {
-                undoable_layer_op!("Duplicate Group", {
-                    self.docs
-                        .active_mut()
-                        .canvas
-                        .layer_stack
-                        .duplicate_group(active);
-                });
+            if self.docs.active_mut().canvas.duplicate_active_group() {
                 self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
             } else {
                 let had_selection = self.docs.active().canvas.selection.active;

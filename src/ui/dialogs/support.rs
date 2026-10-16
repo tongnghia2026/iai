@@ -472,7 +472,12 @@ mod tests {
         assert!(shown.click("Đóng").0.chrome.close_support);
         assert!(shown.key(egui::Key::Escape).chrome.close_support);
 
-        let shown = staged(Some(SupportDialog::Updated));
+        // What a build brings can be a long list: on a screen tall enough
+        // for it, once the window has grown to it, the ask follows.
+        let shown = staged_on(Some(SupportDialog::Updated), egui::vec2(900.0, 2400.0));
+        for _ in 0..60 {
+            shown.frame(vec![]);
+        }
         assert!(shown.says("Đã cập nhật xong") && shown.says(SUPPORT_ASK));
     }
 

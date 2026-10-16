@@ -59,6 +59,66 @@ mod flow_text_zoom_tests {
     }
 }
 
+#[cfg(test)]
+mod guide_pick_tests {
+    use crate::app::state::App;
+    use crate::core::document::{Guide, GuideOrientation};
+    use crate::tools::ToolId;
+
+    fn app_with_two_guides() -> App {
+        let mut app = App::new();
+        app.shell.ui.show_guides = true;
+        app.edit.tools.select(ToolId::Move);
+        app.docs.active_mut().guides = vec![
+            Guide {
+                orientation: GuideOrientation::Horizontal,
+                pos: 40.0,
+            },
+            Guide {
+                orientation: GuideOrientation::Vertical,
+                pos: 70.0,
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn delete_removes_the_picked_guide_and_only_it() {
+        let mut app = app_with_two_guides();
+        let layers = app.docs.active().canvas.layer_stack.layers.len();
+        app.edit.selected_guide = Some((app.docs.active().id, 1));
+        assert_eq!(app.selected_guide(), Some(1));
+        assert!(app.delete_selected_guide());
+        let guides = &app.docs.active().guides;
+        assert_eq!(guides.len(), 1);
+        assert_eq!(guides[0].orientation, GuideOrientation::Horizontal);
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), layers);
+        // Nothing picked any more: the next Delete is the usual one.
+        assert_eq!(app.selected_guide(), None);
+        assert!(!app.delete_selected_guide());
+    }
+
+    #[test]
+    fn a_picked_guide_counts_only_where_it_can_be_seen_and_moved() {
+        let mut app = app_with_two_guides();
+        let doc = app.docs.active().id;
+        app.edit.selected_guide = Some((doc, 0));
+        app.edit.tools.select(ToolId::Brush);
+        assert_eq!(app.selected_guide(), None);
+        app.edit.tools.select(ToolId::Move);
+        app.shell.ui.lock_guides = true;
+        assert_eq!(app.selected_guide(), None);
+        app.shell.ui.lock_guides = false;
+        app.shell.ui.show_guides = false;
+        assert!(!app.delete_selected_guide());
+        app.shell.ui.show_guides = true;
+        // Another document's guide of the same number is not this one.
+        app.edit.selected_guide = Some((crate::core::document::DocumentId(doc.0 + 1), 0));
+        assert_eq!(app.selected_guide(), None);
+        assert_eq!(app.docs.active().guides.len(), 2);
+    }
+}
+
 /// Logo shown by the OS (title bar / taskbar / Alt-Tab).
 fn load_window_icon() -> Option<winit::window::Icon> {
     let bytes = include_bytes!("../../../logo_iAi.png");
@@ -83,6 +143,7 @@ fn load_window_icon() -> Option<winit::window::Icon> {
 /// raw HWND so the event loop can actually park while minimized instead of
 /// free-spinning redraws against a hidden surface.
 #[cfg(windows)]
+#[allow(unsafe_code)] // Win32: IsIconic
 pub(in crate::app) fn window_is_minimized(window: &Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match window.window_handle().map(|h| h.as_raw()) {
@@ -354,6 +415,32 @@ impl App {
             })
     }
 
+    /// The guide picked with the Move tool, while it can still be acted on:
+    /// on the active document, shown, unlocked, and the Move tool in hand.
+    pub(crate) fn selected_guide(&self) -> Option<usize> {
+        let (doc, idx) = self.edit.selected_guide?;
+        let active = self.docs.active();
+        (doc == active.id
+            && idx < active.guides.len()
+            && self.shell.ui.show_guides
+            && !self.shell.ui.lock_guides
+            && self.edit.tools.active_id() == crate::tools::ToolId::Move)
+            .then_some(idx)
+    }
+
+    /// Delete with a guide picked: that guide goes, nothing else.
+    pub(crate) fn delete_selected_guide(&mut self) -> bool {
+        let Some(idx) = self.selected_guide() else {
+            return false;
+        };
+        self.docs.active_mut().guides.remove(idx);
+        self.edit.selected_guide = None;
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     /// Poll startup font loading without presenting an intermediate splash. The
     /// window stays hidden until the first normal Welcome frame has been rendered.
     fn finish_startup_if_ready(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -565,7 +652,7 @@ impl ApplicationHandler for App {
             .as_ref()
             .is_some_and(|w| w.id() == id)
         {
-            let _work = crate::diag::ui_work(crate::diag::Phase::of(&event, true));
+            let _work = crate::diag::ui_work(crate::diag_ui::phase_of(&event, true));
             self.develop_window_event(event_loop, event);
             return;
         }
@@ -583,7 +670,7 @@ impl ApplicationHandler for App {
 
         // Flight recorder: the watcher process times this handler from here to
         // its return, and the journal keeps a line for what the user just did.
-        let _work = crate::diag::ui_work(crate::diag::Phase::of(&event, false));
+        let _work = crate::diag::ui_work(crate::diag_ui::phase_of(&event, false));
         if self.journal_mark_key(&event) {
             return;
         }
@@ -1241,6 +1328,7 @@ impl ApplicationHandler for App {
             || self.edit.transform_state.is_some()
             || self.edit.pending_transform_commit.is_some()
             || self.jobs.select_subject.is_busy()
+            || self.engine_busy()
             || self.jobs.repair_ai.is_some()
             || self.ai_api_running()
             || lama_downloading
@@ -1366,6 +1454,7 @@ impl ApplicationHandler for App {
                 || !self.jobs.pending_loads.is_empty()
                 || self.edit.pending_transform_commit.is_some()
                 || self.jobs.select_subject.is_busy()
+                || self.engine_busy()
                 || self.jobs.repair_ai.is_some()
                 || self.ai_api_running()
                 || crate::core::lama::is_downloading()
@@ -1409,6 +1498,7 @@ impl ApplicationHandler for App {
             || !self.jobs.pending_loads.is_empty()
             || self.edit.pending_transform_commit.is_some()
             || self.jobs.select_subject.is_busy()
+            || self.engine_busy()
             || self.jobs.repair_ai.is_some()
             || self.ai_api_running()
             || crate::core::lama::is_downloading()

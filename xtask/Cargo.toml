@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+description = "Checks of the iAi workspace: the layer order of its crates and its lint budget."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

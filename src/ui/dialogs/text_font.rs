@@ -4,6 +4,7 @@
 //! left unchanged. Applied as a single undo step.
 
 use super::*;
+use crate::core::text::SystemFonts;
 use crate::core::text::{TextCase, TextFontFamily};
 use crate::ui::intent::TextBatchFormat;
 

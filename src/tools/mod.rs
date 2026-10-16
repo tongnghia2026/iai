@@ -599,6 +599,14 @@ impl ToolManager {
     pub fn arrow_mut(&mut self) -> &mut arrow::ArrowTool {
         &mut self.arrow
     }
+    /// The master Snap toggle as the tools that snap hold it: the Move tool,
+    /// and the vector drawing tools so an arrow / line joins other objects
+    /// at their corners and edges.
+    pub fn set_snap(&mut self, on: bool) {
+        self.move_tool.snap_enabled = on;
+        self.arrow.snap_enabled = on;
+        self.pen.snap_enabled = on;
+    }
     pub fn smudge(&self) -> &smudge::SmudgeTool {
         &self.smudge
     }

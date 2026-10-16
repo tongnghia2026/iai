@@ -371,6 +371,7 @@ impl App {
             // Reflect the new default in the running session too, so the change
             // is visible immediately (the magnet still toggles it per-session).
             self.shell.ui.snap_enabled = new.snap_default;
+            self.edit.tools.set_snap(new.snap_default);
         }
         if new.default_unit != old.default_unit {
             self.shell.canvas_unit = new.default_unit;
@@ -761,30 +762,31 @@ impl App {
             self.shell.ui.transform_interpolation = interp;
         }
 
-        if let Some((name, width, height, unit, dpi)) = actions.dialogs.save_preset.take() {
-            let preset = crate::core::presets::SizePreset {
+        use crate::core::presets::{SizePreset, SizePresetList};
+        if let Some((name, width, height, unit, dpi)) = actions.dialogs.save_canvas_preset.take() {
+            let preset = SizePreset {
                 name,
                 width,
                 height,
                 unit,
                 dpi,
             };
-            std::sync::Arc::make_mut(&mut self.shell.user_presets).push(preset);
-            crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
+            self.change_size_presets(SizePresetList::NewCanvas, |list| list.push(preset));
         }
-        if actions.dialogs.open_delete_preset_dialog {
-            self.shell.ui.show_delete_preset_dialog = true;
+        if let Some(list) = actions.dialogs.open_delete_preset_dialog.take() {
+            self.shell.ui.delete_preset_dialog = Some(list);
         }
         if actions.dialogs.close_delete_preset_dialog {
-            self.shell.ui.show_delete_preset_dialog = false;
+            self.shell.ui.delete_preset_dialog = None;
         }
-        if let Some(idx) = actions.dialogs.delete_preset.take() {
-            if idx < self.shell.user_presets.len() {
-                std::sync::Arc::make_mut(&mut self.shell.user_presets).remove(idx);
-                crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
-            }
-            if self.shell.user_presets.is_empty() {
-                self.shell.ui.show_delete_preset_dialog = false;
+        if let Some((list, idx)) = actions.dialogs.delete_preset.take() {
+            self.change_size_presets(list, |presets| {
+                if idx < presets.len() {
+                    presets.remove(idx);
+                }
+            });
+            if self.size_presets(list).is_empty() {
+                self.shell.ui.delete_preset_dialog = None;
             }
         }
         if let Some((w, h, unit, dpi)) = actions.dialogs.open_preset_dialog.take() {
@@ -806,15 +808,14 @@ impl App {
         if actions.dialogs.preset_dialog_confirm {
             let name = self.shell.ui.preset_dialog_name.trim().to_string();
             if !name.is_empty() {
-                let preset = crate::core::presets::SizePreset {
+                let preset = SizePreset {
                     name,
                     width: self.shell.ui.preset_dialog_w,
                     height: self.shell.ui.preset_dialog_h,
                     unit: self.shell.ui.preset_dialog_unit.clone(),
                     dpi: self.shell.ui.preset_dialog_dpi,
                 };
-                std::sync::Arc::make_mut(&mut self.shell.user_presets).push(preset);
-                crate::core::presets::SizePreset::save_all(&self.shell.user_presets);
+                self.change_size_presets(SizePresetList::Crop, |list| list.push(preset));
             }
             self.shell.ui.show_preset_dialog = false;
         }
@@ -850,6 +851,31 @@ impl App {
 
     /// Open Select ▸ Color Range: seed the target colour from the foreground so
     /// the dialog previews something at once, then build the first thumbnail.
+    /// One of the two lists of sizes the user saved.
+    pub(crate) fn size_presets(
+        &self,
+        list: crate::core::presets::SizePresetList,
+    ) -> &[crate::core::presets::SizePreset] {
+        match list {
+            crate::core::presets::SizePresetList::Crop => &self.shell.crop_presets,
+            crate::core::presets::SizePresetList::NewCanvas => &self.shell.canvas_presets,
+        }
+    }
+
+    /// Change one list of saved sizes, and save it; the other is left as it is.
+    fn change_size_presets(
+        &mut self,
+        list: crate::core::presets::SizePresetList,
+        change: impl FnOnce(&mut Vec<crate::core::presets::SizePreset>),
+    ) {
+        let presets = match list {
+            crate::core::presets::SizePresetList::Crop => &mut self.shell.crop_presets,
+            crate::core::presets::SizePresetList::NewCanvas => &mut self.shell.canvas_presets,
+        };
+        change(std::sync::Arc::make_mut(presets));
+        crate::core::presets::SizePreset::save_all(list, presets);
+    }
+
     pub(crate) fn open_color_range_dialog(&mut self) {
         if self.has_only_welcome_placeholder() {
             self.shell.status_msg = "Hãy mở một ảnh trước".to_string();
@@ -993,5 +1019,45 @@ impl App {
         } else {
             "Color Range: không có điểm ảnh nào khớp màu".to_string()
         };
+    }
+}
+
+#[cfg(test)]
+mod size_preset_tests {
+    use crate::app::state::App;
+    use crate::core::presets::SizePresetList::{Crop, NewCanvas};
+    use crate::ui::UiActions;
+
+    #[test]
+    fn the_crop_tool_and_the_new_canvas_dialog_keep_presets_of_their_own() {
+        let mut app = App::new();
+        let crop = app.shell.crop_presets.clone();
+        assert!(!crop.is_empty() && app.shell.canvas_presets.is_empty());
+        let mut run = |set: &dyn Fn(&mut UiActions)| {
+            let mut actions = UiActions::default();
+            set(&mut actions);
+            app.handle_misc_dialog_actions(&mut actions);
+        };
+        // Saved in the New Canvas dialog: in its list only.
+        run(&|a| {
+            a.dialogs.save_canvas_preset = Some(("A3".into(), 29.7, 42.0, "cm".into(), 300.0))
+        });
+        // Deleted there: the Crop tool keeps all of its own.
+        run(&|a| a.dialogs.open_delete_preset_dialog = Some(NewCanvas));
+        run(&|a| a.dialogs.delete_preset = Some((NewCanvas, 0)));
+        drop(run);
+        assert!(app.shell.canvas_presets.is_empty());
+        assert_eq!(app.shell.crop_presets, crop);
+        // With nothing left to delete, the window closes.
+        assert_eq!(app.shell.ui.delete_preset_dialog, None);
+
+        let mut actions = UiActions::default();
+        actions.dialogs.save_canvas_preset = Some(("A4".into(), 21.0, 29.7, "cm".into(), 300.0));
+        app.handle_misc_dialog_actions(&mut actions);
+        let mut actions = UiActions::default();
+        actions.dialogs.delete_preset = Some((Crop, 0));
+        app.handle_misc_dialog_actions(&mut actions);
+        assert_eq!(app.shell.crop_presets[..], crop[1..]);
+        assert_eq!(app.shell.canvas_presets.len(), 1);
     }
 }

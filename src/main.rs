@@ -8,9 +8,14 @@ fn main() {
     if iai::update::print_build_info_if_requested() {
         return;
     }
+    // `iai.exe mcp` / `iai.exe run`: for AI agents and scripts, no window.
+    if let Some(code) = iai::agent::run_if_asked() {
+        std::process::exit(code);
+    }
     iai::update::finish_previous();
     iai::crash::install_panic_handler();
-    iai::diag::start();
+    let build = iai::update::this_build();
+    iai::diag::start(&format!("{} ({})", build.commit, build.day()));
 
     if let Err(e) = iai::bootstrap::run() {
         iai::crash::report_fatal(&e.to_string());

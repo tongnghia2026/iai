@@ -1,4 +1,6 @@
 //! Cursor ownership shared by native tool cursors and the GPU brush ring.
+// Which window has the focus is asked of Win32.
+#![allow(unsafe_code)]
 
 #[derive(Default)]
 pub(super) struct CursorOwnership {

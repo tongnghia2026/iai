@@ -374,7 +374,6 @@ impl CloneTool {
 
         let tile_size = crate::core::tile::TILE_SIZE;
         let has_sel = canvas.selection.active;
-        let sel_ptr: *const crate::core::selection::Selection = &canvas.selection;
         let lock_alpha = canvas.layer_stack.layers[dst_layer_idx].lock_alpha;
         // Channels-panel write gate: each enabled channel copies its own
         // plate from the source pixel; the others and alpha stay untouched.
@@ -444,9 +443,7 @@ impl CloneTool {
 
                         if has_sel {
                             let canvas_px = (px as i32 + dst_ox) as u32;
-                            unsafe {
-                                src_a_factor *= (*sel_ptr).sample(canvas_px, canvas_py);
-                            }
+                            src_a_factor *= canvas.selection.sample(canvas_px, canvas_py);
                             if src_a_factor < 0.001 {
                                 continue;
                             }

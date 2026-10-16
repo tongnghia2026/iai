@@ -102,6 +102,64 @@ pub(crate) fn new_canvas_dimension_drag<'a>(
         })
 }
 
+/// The New Canvas dialog's built-in presets: name, width, height, resolution
+/// and the unit the size is shown in. Paper is shown in cm, screens in px.
+const NEW_CANVAS_PRESETS: &[(&str, f32, f32, f32, crate::core::units::Unit)] = {
+    use crate::core::units::Unit::{Centimeters, Pixels};
+    &[
+        ("800x600", 800.0, 600.0, 72.0, Pixels),
+        ("1280x720", 1280.0, 720.0, 72.0, Pixels),
+        ("1920x1080", 1920.0, 1080.0, 72.0, Pixels),
+        ("2560x1440", 2560.0, 1440.0, 72.0, Pixels),
+        ("4K", 3840.0, 2160.0, 72.0, Pixels),
+        ("A4 72dpi", 21.0, 29.7, 72.0, Centimeters),
+        ("A4 150dpi", 21.0, 29.7, 150.0, Centimeters),
+        ("A4 300dpi", 21.0, 29.7, 300.0, Centimeters),
+        ("Square 1K", 1024.0, 1024.0, 72.0, Pixels),
+        ("Instagram", 1080.0, 1080.0, 72.0, Pixels),
+    ]
+};
+
+/// The last row of the New Canvas dialog's own presets.
+pub(crate) const DELETE_PRESET: &str = "Delete preset\u{2026}";
+
+/// `(width, height)` turned to stand upright, or to lie `wide`.
+fn oriented((w, h): (f32, f32), wide: bool) -> (f32, f32) {
+    if (w > h) == wide || w == h {
+        (w, h)
+    } else {
+        (h, w)
+    }
+}
+
+/// One of the two orientation buttons: a sheet standing upright, or lying
+/// `wide`, highlighted while the page is `on` that way.
+fn orientation_button(ui: &mut egui::Ui, wide: bool, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    let (fill, ink) = if on {
+        (visuals.selection.bg_fill, visuals.strong_text_color())
+    } else if response.hovered() {
+        (visuals.widgets.hovered.weak_bg_fill, visuals.text_color())
+    } else {
+        (visuals.widgets.inactive.weak_bg_fill, visuals.text_color())
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    let sheet = if wide {
+        egui::vec2(18.0, 12.0)
+    } else {
+        egui::vec2(12.0, 18.0)
+    };
+    painter.rect_stroke(
+        egui::Rect::from_center_size(rect.center(), sheet),
+        1.0,
+        egui::Stroke::new(1.5_f32, ink),
+        egui::StrokeKind::Inside,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let mut new_name = data.dialogs.new_name.clone();
     let mut new_dpi = data.dialogs.new_dpi;
@@ -119,7 +177,13 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         d.get_temp::<bool>(egui::Id::new("nd_cmyk"))
             .unwrap_or(false)
     });
-    let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
+    // Its "Delete preset" window, over it, takes the keys and the clicks.
+    let deleting = data.dialogs.delete_preset_dialog.is_some();
+    let (enter_pressed, esc_pressed) = if deleting {
+        (false, false)
+    } else {
+        consume_dialog_enter_escape(ctx)
+    };
     let mut do_create = enter_pressed;
     let mut do_cancel = esc_pressed;
 
@@ -132,6 +196,9 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         .min_width(360.0)
         .order(DIALOG_ORDER)
         .show(ctx, |ui| {
+            if deleting {
+                ui.disable();
+            }
             ui.add_space(8.0);
 
             egui::Grid::new("new_canvas_grid")
@@ -210,6 +277,26 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     }
                     ui.end_row();
 
+                    ui.label("Orientation:");
+                    ui.horizontal(|ui| {
+                        for wide in [false, true] {
+                            let shown = (new_w_disp, new_h_disp);
+                            let turned = oriented(shown, wide);
+                            let hint = if wide { "Khổ ngang" } else { "Khổ dọc" };
+                            let on = turned == shown && shown.0 != shown.1;
+                            if orientation_button(ui, wide, on)
+                                .on_hover_text(hint)
+                                .clicked()
+                                && turned != shown
+                            {
+                                (new_w_disp, new_h_disp) = turned;
+                                actions.doc.new_w_input = Some(new_w_disp);
+                                actions.doc.new_h_input = Some(new_h_disp);
+                            }
+                        }
+                    });
+                    ui.end_row();
+
                     ui.label("Resolution:");
                     let res_response = ui.add(
                         egui::DragValue::new(&mut new_dpi)
@@ -286,28 +373,13 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     egui::ComboBox::from_id_salt("preset_select")
                         .selected_text("Built-in presets...")
                         .show_ui(ui, |ui| {
-                            let presets: &[(&str, u32, u32, f32)] = &[
-                                ("800x600", 800, 600, 72.0),
-                                ("1280x720", 1280, 720, 72.0),
-                                ("1920x1080", 1920, 1080, 72.0),
-                                ("2560x1440", 2560, 1440, 72.0),
-                                ("4K", 3840, 2160, 72.0),
-                                ("A4 72dpi", 595, 842, 72.0),
-                                ("A4 150dpi", 1240, 1754, 150.0),
-                                ("A4 300dpi", 2480, 3508, 300.0),
-                                ("Square 1K", 1024, 1024, 72.0),
-                                ("Instagram", 1080, 1080, 72.0),
-                            ];
-                            for (name, w, h, dpi) in presets {
-                                if ui.selectable_label(false, *name).clicked() {
-                                    new_w_disp = *w as f32;
-                                    new_h_disp = *h as f32;
-                                    new_dpi = *dpi;
-                                    new_unit = crate::core::units::Unit::Pixels;
-                                    actions.doc.new_w_input = Some(new_w_disp);
-                                    actions.doc.new_h_input = Some(new_h_disp);
-                                    actions.doc.new_dpi = Some(*dpi);
-                                    actions.doc.new_unit = Some(new_unit);
+                            for &(name, w, h, dpi, unit) in NEW_CANVAS_PRESETS {
+                                if ui.selectable_label(false, name).clicked() {
+                                    (new_w_disp, new_h_disp, new_dpi, new_unit) = (w, h, dpi, unit);
+                                    actions.doc.new_w_input = Some(w);
+                                    actions.doc.new_h_input = Some(h);
+                                    actions.doc.new_dpi = Some(dpi);
+                                    actions.doc.new_unit = Some(unit);
                                 }
                             }
                         });
@@ -316,28 +388,29 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     ui.label("My Presets:");
                     ui.horizontal(|ui| {
                         let mut apply_idx: Option<usize> = None;
-                        let mut del_idx: Option<usize> = None;
+                        let saved = &data.dialogs.canvas_presets;
                         egui::ComboBox::from_id_salt("user_preset_select")
                             .selected_text("Saved presets...")
                             .width(160.0)
+                            .height(ctx.content_rect().height())
                             .show_ui(ui, |ui| {
-                                for (i, preset) in data.dialogs.user_presets.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        if ui.selectable_label(false, &preset.name).clicked() {
-                                            apply_idx = Some(i);
-                                        }
-                                        if ui
-                                            .small_button(ph::X)
-                                            .on_hover_text("Delete preset")
-                                            .clicked()
-                                        {
-                                            del_idx = Some(i);
-                                        }
-                                    });
+                                for (i, preset) in saved.iter().enumerate() {
+                                    if ui.selectable_label(false, &preset.name).clicked() {
+                                        apply_idx = Some(i);
+                                    }
+                                }
+                                // Deleting is a window of its own: nothing is
+                                // lost to a click beside a name.
+                                if !saved.is_empty() {
+                                    ui.separator();
+                                    if ui.selectable_label(false, DELETE_PRESET).clicked() {
+                                        actions.dialogs.open_delete_preset_dialog =
+                                            Some(crate::core::presets::SizePresetList::NewCanvas);
+                                    }
                                 }
                             });
                         if let Some(i) = apply_idx {
-                            let p = &data.dialogs.user_presets[i];
+                            let p = &saved[i];
                             new_w_disp = p.width;
                             new_h_disp = p.height;
                             new_dpi = p.dpi;
@@ -346,9 +419,6 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                             actions.doc.new_dpi = Some(p.dpi);
                             actions.doc.new_w_input = Some(new_w_disp);
                             actions.doc.new_h_input = Some(new_h_disp);
-                        }
-                        if let Some(i) = del_idx {
-                            actions.dialogs.delete_preset = Some(i);
                         }
 
                         let mut preset_name = ctx.data_mut(|d| {
@@ -367,7 +437,7 @@ pub(crate) fn new_canvas_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                         }
                         if ui.button("Save").clicked() && !preset_name.trim().is_empty() {
                             let unit_str = new_unit.name().to_string();
-                            actions.dialogs.save_preset = Some((
+                            actions.dialogs.save_canvas_preset = Some((
                                 preset_name.trim().to_string(),
                                 new_w_disp,
                                 new_h_disp,
@@ -1544,5 +1614,123 @@ pub(crate) fn export_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     }
     if do_cancel {
         actions.dialogs.show_export_dialog = Some(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::units::Unit;
+    use crate::ui::dialogs::stage::Stage;
+
+    /// The New Canvas dialog on an A4 page, as Ctrl+N opens it.
+    fn a4() -> Stage {
+        let mut data = UiData::default();
+        let d = &mut data.dialogs;
+        (d.new_w_input, d.new_h_input, d.new_dpi, d.new_unit) =
+            (21.0, 29.7, 300.0, Unit::Centimeters);
+        Stage::new(data, new_canvas_dialog)
+    }
+
+    #[test]
+    fn a_page_is_turned_by_its_two_orientation_buttons() {
+        assert_eq!(oriented((21.0, 29.7), true), (29.7, 21.0));
+        assert_eq!(oriented((21.0, 29.7), false), (21.0, 29.7));
+        assert_eq!(oriented((29.7, 21.0), false), (21.0, 29.7));
+        assert_eq!(oriented((10.0, 10.0), true), (10.0, 10.0));
+
+        // The buttons stand in the second column of their row, upright first.
+        let shown = a4();
+        let texts = shown.texts();
+        let at = |label: &str| texts.iter().find(|(t, _)| t == label).unwrap().1;
+        let (row, column) = (at("Orientation:").y + 7.0, at("White").x - 4.0);
+        let click = |x: f32| {
+            let at = egui::pos2(column + x, row);
+            let press = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            shown.frame(vec![egui::Event::PointerMoved(at)]);
+            shown.frame(vec![press(true)]);
+            let doc = shown.frame(vec![press(false)]).1.doc;
+            (doc.new_w_input, doc.new_h_input)
+        };
+        // Upright already: the upright button changes nothing.
+        assert_eq!(click(15.0), (None, None));
+        assert_eq!(click(53.0), (Some(29.7), Some(21.0)));
+    }
+
+    #[test]
+    fn its_own_presets_have_no_delete_beside_a_name_but_a_row_of_their_own() {
+        use crate::core::presets::{SizePreset, SizePresetList};
+        let preset = |name: &str| SizePreset {
+            name: name.into(),
+            width: 29.7,
+            height: 42.0,
+            unit: "cm".into(),
+            dpi: 300.0,
+        };
+        let mut shown = a4();
+        shown.data.dialogs.canvas_presets = std::sync::Arc::new(vec![preset("A3")]);
+        shown.data.dialogs.crop_presets = std::sync::Arc::new(vec![preset("3x4")]);
+        shown.click("Saved presets...");
+        assert!(shown.says("A3") && !shown.says("3x4") && !shown.says(ph::X));
+        assert_eq!(
+            shown
+                .click(DELETE_PRESET)
+                .0
+                .dialogs
+                .open_delete_preset_dialog,
+            Some(SizePresetList::NewCanvas)
+        );
+        // Picked from the list, a preset fills the size.
+        shown.click("Saved presets...");
+        let doc = shown.click("A3").0.doc;
+        assert_eq!((doc.new_w_input, doc.new_h_input), (Some(29.7), Some(42.0)));
+
+        // With its delete window open over it, Esc is that window's.
+        shown.data.dialogs.delete_preset_dialog = Some(SizePresetList::NewCanvas);
+        assert_eq!(shown.key(egui::Key::Escape).dialogs.show_new_dialog, None);
+        shown.data.dialogs.delete_preset_dialog = None;
+        assert_eq!(
+            shown.key(egui::Key::Escape).dialogs.show_new_dialog,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn paper_presets_are_in_cm_and_screens_in_px() {
+        for &(name, w, h, dpi, unit) in NEW_CANVAS_PRESETS {
+            if name.starts_with("A4") {
+                assert_eq!((w, h, unit), (21.0, 29.7, Unit::Centimeters), "{name}");
+                let px = |v| new_canvas_pixels(v, unit, dpi);
+                if dpi == 300.0 {
+                    assert_eq!((px(w), px(h)), (2480, 3508));
+                }
+            } else {
+                assert_eq!(unit, Unit::Pixels, "{name}");
+            }
+        }
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog is drawn into
+    /// `tao_moi.png` there, on an A4 page.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot_of_the_new_canvas_dialog() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let data = a4().data;
+        let image = crate::ui::snapshot::render(560.0, 520.0, 1.5, None, |ctx| {
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |_| {});
+            new_canvas_dialog(ctx, &data, &mut UiActions::default());
+        });
+        image
+            .save(std::path::Path::new(&dir).join("tao_moi.png"))
+            .unwrap();
     }
 }

@@ -863,10 +863,10 @@ pub fn build(
     // Clicks and value edits, as egui reports them, go to the flight recorder;
     // so does the text under a press, which is all a hand-painted control has.
     for event in &full_output.platform_output.events {
-        crate::diag::widget_event(event);
+        crate::diag_ui::widget_event(event);
     }
     if let Some(at) = pressed_at.filter(|_| egui_ctx.is_pointer_over_egui()) {
-        crate::diag::pressed_text(&full_output.shapes, at);
+        crate::diag_ui::pressed_text(&full_output.shapes, at);
     }
     if let Some(state) = egui_state {
         state.handle_platform_output(window, full_output.platform_output);
@@ -974,18 +974,20 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
 
         topoptions::build(ctx, data, &mut actions);
 
+        // The docked band goes in before the tabs and the rulers: as in
+        // Photoshop it reaches up to the options bar, and they stop at it.
+        if data.sel.show_refine_panel {
+            refine_select::build(ctx, data, &mut actions);
+        } else {
+            panels::build(ctx, data, &mut actions);
+        }
+
         tabbar::build(ctx, data, &mut actions);
 
         toolbar::build(ctx, data, &mut actions);
 
         if data.chrome.show_rulers && data.doc.kind == crate::core::document::DocumentKind::Canvas {
             draw_rulers(ctx, data, &mut actions);
-        }
-
-        if data.sel.show_refine_panel {
-            refine_select::build(ctx, data, &mut actions);
-        } else {
-            panels::build(ctx, data, &mut actions);
         }
 
         statusbar::build(ctx, data, &mut actions);
@@ -1020,7 +1022,11 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
                     data.chrome.toolbar_w + ruler_off,
                     28.0 + 26.0 + 32.0 + ruler_off,
                 ),
-                egui::pos2(screen.max.x - data.chrome.panel_r_w, screen.max.y - 22.0),
+                // Above the page bar too: a guide stops where the page tabs begin.
+                egui::pos2(
+                    screen.max.x - data.chrome.panel_r_w,
+                    work_area_bottom(ctx, data),
+                ),
             )
         };
 
@@ -1216,7 +1222,12 @@ fn draw_artboard_sheets(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui
     }
 }
 
-// Ruler guides (theme guide accent) + the in-progress one being dragged (brighter).
+/// Ruler guides in Photoshop's cyan blue: it stands out on a white page, on
+/// the dark workspace and on a photo alike, where the grey of the theme did not.
+const RULER_GUIDE_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 190, 255);
+
+// Ruler guides, thicker under the Move tool's pointer and thicker still when
+// picked (Delete removes that one), and the one being dragged out of a ruler.
 fn draw_ruler_guides(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
     let zoom = data.doc.zoom;
     let ox = data.doc.offset_x;
@@ -1224,18 +1235,17 @@ fn draw_ruler_guides(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::R
     if data.chrome.show_guides
         && (!data.chrome.guides.is_empty() || data.chrome.guide_preview.is_some())
     {
-        let pal = data.chrome.theme_mode.palette();
         let painter = ctx
             .layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("guides_overlay"),
             ))
             .with_clip_rect(canvas_viewport);
-        let normal = egui::Stroke::new(1.0_f32, pal.accent_guide);
-        // Highlighted (hovered / dragged): brighter + thicker so the user knows
-        // it can be grabbed.
-        let hot = egui::Stroke::new(2.0_f32, pal.accent_hover);
-        let preview = egui::Stroke::new(1.0_f32, pal.accent_guide);
+        let normal = egui::Stroke::new(1.0_f32, RULER_GUIDE_COLOR);
+        // Hovered / dragged: thicker, so the user knows it can be grabbed.
+        let hot = egui::Stroke::new(2.0_f32, RULER_GUIDE_COLOR);
+        let picked = egui::Stroke::new(3.0_f32, RULER_GUIDE_COLOR);
+        let preview = normal;
         let draw_guide =
             |orientation: GuideOrientation, pos: f32, stroke: egui::Stroke| match orientation {
                 GuideOrientation::Vertical => {
@@ -1260,7 +1270,9 @@ fn draw_ruler_guides(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::R
                 }
             };
         for (i, g) in data.chrome.guides.iter().enumerate() {
-            let stroke = if Some(i) == data.chrome.hovered_guide {
+            let stroke = if Some(i) == data.chrome.selected_guide {
+                picked
+            } else if Some(i) == data.chrome.hovered_guide {
                 hot
             } else {
                 normal
@@ -2330,60 +2342,74 @@ fn draw_preset_dialog(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiActions
     }
 }
 
+/// "Delete preset": the presets of one list, the Crop tool's or the New
+/// Canvas dialog's; one is picked, then deleted by the button. Over the New
+/// Canvas dialog when that is where it was asked for.
 fn draw_delete_preset_dialog(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    if data.dialogs.show_delete_preset_dialog {
-        let (enter_pressed, esc_pressed) = dialogs::consume_dialog_enter_escape(ctx);
-        if enter_pressed || esc_pressed {
-            actions.dialogs.close_delete_preset_dialog = true;
-        }
+    use crate::core::presets::SizePresetList;
+    let Some(list) = data.dialogs.delete_preset_dialog else {
+        return;
+    };
+    let (presets, title) = match list {
+        SizePresetList::Crop => (&data.dialogs.crop_presets, "Delete Crop Preset"),
+        SizePresetList::NewCanvas => (&data.dialogs.canvas_presets, "Delete Canvas Preset"),
+    };
+    let (enter_pressed, esc_pressed) = dialogs::consume_dialog_enter_escape(ctx);
+    if enter_pressed || esc_pressed {
+        actions.dialogs.close_delete_preset_dialog = true;
+    }
+    let picked_id = egui::Id::new("delete_preset_picked");
+    let mut picked: Option<usize> = ctx
+        .data_mut(|d| d.get_temp(picked_id))
+        .filter(|&i: &usize| i < presets.len());
 
-        egui::Window::new("Delete Crop Preset")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                if data.dialogs.user_presets.is_empty() {
-                    ui.label(egui::RichText::new("No saved presets.").color(egui::Color32::GRAY));
-                } else {
-                    ui.label("Select a preset to delete:");
-                    ui.separator();
-                    let mut del_idx: Option<usize> = None;
-                    egui::ScrollArea::vertical()
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            for (i, preset) in data.dialogs.user_presets.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.label(&preset.name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let del_btn = egui::Button::new(
-                                                egui::RichText::new(ph::X)
-                                                    .color(egui::Color32::from_rgb(220, 80, 80)),
-                                            )
-                                            .min_size(egui::vec2(22.0, 18.0));
-                                            if ui
-                                                .add(del_btn)
-                                                .on_hover_text("Delete this preset")
-                                                .clicked()
-                                            {
-                                                del_idx = Some(i);
-                                            }
-                                        },
-                                    );
-                                });
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(egui::Order::Tooltip)
+        .show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            if presets.is_empty() {
+                ui.label(egui::RichText::new("No saved presets.").color(egui::Color32::GRAY));
+            } else {
+                ui.label("Chọn preset cần xóa:");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(ui.ctx().content_rect().height() * 0.6)
+                    .show(ui, |ui| {
+                        for (i, preset) in presets.iter().enumerate() {
+                            let row = egui::Button::selectable(picked == Some(i), &preset.name)
+                                .min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add(row).clicked() {
+                                picked = Some(i);
                             }
-                        });
-                    if let Some(i) = del_idx {
-                        actions.dialogs.delete_preset = Some(i);
+                        }
+                    });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let delete = egui::Button::new(
+                    egui::RichText::new(format!("{}  Xóa", ph::TRASH))
+                        .color(egui::Color32::from_rgb(220, 80, 80)),
+                );
+                if ui.add_enabled(picked.is_some(), delete).clicked() {
+                    if let Some(i) = picked.take() {
+                        actions.dialogs.delete_preset = Some((list, i));
                     }
                 }
-                ui.separator();
                 if ui.button("Close").clicked() {
                     actions.dialogs.close_delete_preset_dialog = true;
                 }
             });
-    }
+        });
+    let closing = actions.dialogs.close_delete_preset_dialog;
+    ctx.data_mut(|d| match picked.filter(|_| !closing) {
+        Some(i) => {
+            d.insert_temp(picked_id, i);
+        }
+        None => d.remove::<usize>(picked_id),
+    });
 }
 
 fn draw_crop_idle_border(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
@@ -4310,6 +4336,17 @@ fn paint_clone_source_thumbnail(
     );
 }
 
+/// The bottom of the work area: where the status bar begins, and over it the
+/// page bar of an open document. A list dropping from the top stops there.
+pub(crate) fn work_area_bottom(ctx: &egui::Context, data: &UiData) -> f32 {
+    let page_bar = if data.doc.has_doc {
+        artboard_bar::BAR_H
+    } else {
+        0.0
+    };
+    ctx.content_rect().bottom() - statusbar::HEIGHT - page_bar
+}
+
 /// Rulers use TopBottomPanel + SidePanel — placed right after menu/topoptions,
 /// NOT covering any panel.
 #[allow(deprecated)]
@@ -4498,12 +4535,13 @@ fn paint_v_ticks(painter: &egui::Painter, rect: egui::Rect, data: &UiData) {
             );
             let label = crate::core::units::format_value(val, data.doc.canvas_unit);
 
-            painter.text(
-                egui::pos2(rect.min.x + 2.0, sy + 2.0),
-                egui::Align2::LEFT_TOP,
-                label,
-                font.clone(),
-                pal.text_secondary,
+            // Turned a quarter to the left, reading upward, just under its
+            // tick as in Photoshop: a long number fits the ruler's width.
+            let galley = painter.layout_no_wrap(label, font.clone(), pal.text_secondary);
+            let at = egui::pos2(rect.min.x + 2.0, sy + 2.0 + galley.size().x);
+            painter.add(
+                egui::epaint::TextShape::new(at, galley, pal.text_secondary)
+                    .with_angle(-std::f32::consts::FRAC_PI_2),
             );
 
             if cy.abs() < 1e-3 {
@@ -4649,5 +4687,174 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
 
     if !open {
         actions.dialogs.paint_color_dialog_cancel = true;
+    }
+}
+
+#[cfg(test)]
+mod delete_preset_tests {
+    use super::*;
+    use crate::core::presets::{SizePreset, SizePresetList};
+    use crate::ui::dialogs::stage::Stage;
+
+    fn preset(name: &str) -> SizePreset {
+        SizePreset {
+            name: name.into(),
+            width: 1.0,
+            height: 1.0,
+            unit: "cm".into(),
+            dpi: 300.0,
+        }
+    }
+
+    #[test]
+    fn a_preset_is_deleted_only_once_picked_and_then_its_button_clicked() {
+        let mut data = UiData::default();
+        data.dialogs.canvas_presets = std::sync::Arc::new(vec![preset("A4"), preset("A3")]);
+        data.dialogs.crop_presets = std::sync::Arc::new(vec![preset("3x4")]);
+        data.dialogs.delete_preset_dialog = Some(SizePresetList::NewCanvas);
+        let shown = Stage::new(data, |ctx, data, actions| {
+            #[allow(deprecated)]
+            egui::CentralPanel::default()
+                .show(ctx, |ui| draw_delete_preset_dialog(ui, data, actions));
+        });
+        // The New Canvas dialog's own presets, not the Crop tool's.
+        assert!(shown.says("Delete Canvas Preset") && !shown.says("3x4"));
+        // Nothing picked: the button deletes nothing; a click on a name only
+        // picks it.
+        assert_eq!(shown.click("Xóa").0.dialogs.delete_preset, None);
+        assert_eq!(shown.click("A3").0.dialogs.delete_preset, None);
+        assert_eq!(
+            shown.click("Xóa").0.dialogs.delete_preset,
+            Some((SizePresetList::NewCanvas, 1))
+        );
+        assert!(shown.click("Close").0.dialogs.close_delete_preset_dialog);
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the window is drawn over the New
+    /// Canvas dialog it was opened from, into `xoa_preset.png` there.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot_of_the_delete_preset_dialog() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = UiData::default();
+        data.dialogs.canvas_presets = std::sync::Arc::new(vec![preset("A4"), preset("A3")]);
+        data.dialogs.delete_preset_dialog = Some(SizePresetList::NewCanvas);
+        (data.dialogs.new_w_input, data.dialogs.new_h_input) = (21.0, 29.7);
+        let image = crate::ui::snapshot::render(560.0, 520.0, 1.5, None, |ctx| {
+            let mut actions = UiActions::default();
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |ui| {
+                dialogs::new_canvas_dialog(ui.ctx(), &data, &mut actions);
+                draw_delete_preset_dialog(ui, &data, &mut actions);
+            });
+        });
+        image
+            .save(std::path::Path::new(&dir).join("xoa_preset.png"))
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ruler_tests {
+    use super::*;
+
+    /// A large page at a small zoom, so the rulers count past 1000.
+    fn page() -> UiData {
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        (data.doc.canvas_w, data.doc.canvas_h, data.doc.canvas_dpi) = (8000, 12000, 300.0);
+        (data.doc.zoom, data.doc.offset_x, data.doc.offset_y) = (0.05, 60.0, 40.0);
+        data
+    }
+
+    #[test]
+    fn the_numbers_of_the_vertical_ruler_are_turned_to_fit_its_width() {
+        let data = page();
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 700.0),
+                )),
+                ..Default::default()
+            },
+            |ui| draw_rulers(ui.ctx(), &data, &mut UiActions::default()),
+        );
+        let labels: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.angle != 0.0 => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|t| t.galley.text() == "10000"));
+        for text in labels {
+            assert_eq!(text.angle, -std::f32::consts::FRAC_PI_2);
+            // Across the ruler it takes a line's height; along it, its length.
+            let across = text.pos.x + text.galley.size().y;
+            assert!(
+                across <= RULER_SIZE,
+                "{} reaches {across}",
+                text.galley.text()
+            );
+        }
+    }
+
+    #[test]
+    fn guides_are_drawn_blue_and_the_picked_one_stands_out() {
+        use crate::core::document::{Guide, GuideOrientation};
+        let mut data = page();
+        data.chrome.show_guides = true;
+        data.chrome.guides = [100.0, 200.0, 300.0]
+            .map(|pos| Guide {
+                orientation: GuideOrientation::Vertical,
+                pos,
+            })
+            .to_vec();
+        (data.chrome.hovered_guide, data.chrome.selected_guide) = (Some(1), Some(2));
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 700.0));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ui| draw_ruler_guides(ui, &data, viewport),
+        );
+        let widths: Vec<f32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { stroke, .. } => {
+                    assert_eq!(stroke.color, RULER_GUIDE_COLOR);
+                    Some(stroke.width)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(widths, [1.0, 2.0, 3.0]);
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the rulers are drawn into
+    /// `thuoc.png` there.
+    #[test]
+    #[ignore]
+    fn probe_panel_snapshot_of_the_rulers() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let data = page();
+        let image = crate::ui::snapshot::render(420.0, 520.0, 1.5, None, |ctx| {
+            draw_rulers(ctx, &data, &mut UiActions::default());
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |_| {});
+        });
+        image
+            .save(std::path::Path::new(&dir).join("thuoc.png"))
+            .unwrap();
     }
 }

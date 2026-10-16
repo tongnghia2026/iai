@@ -10,17 +10,26 @@
 use super::{PdfNavData, UiActions, UiData};
 use egui;
 
-// The solid horizontal scrollbar needs its own row below the page tabs. The old
-// 26 px strip used egui's floating scrollbar, which expanded over a tab on hover
-// and intercepted both left- and right-clicks.
-const BAR_H: f32 = 42.0;
+// A slim strip: small text and buttons, and a thin scrollbar on a row of its
+// own below the page tabs, taken only when the tabs overflow. A floating
+// scrollbar expanded over a tab on hover and intercepted both left- and
+// right-clicks.
+pub(super) const BAR_H: f32 = 26.0;
 
 fn separate_page_scrollbar(ui: &mut egui::Ui) {
     let scroll = &mut ui.style_mut().spacing.scroll;
     scroll.floating = false;
-    scroll.bar_width = 6.0;
-    scroll.bar_inner_margin = 6.0;
-    scroll.bar_outer_margin = 1.0;
+    scroll.bar_width = 4.0;
+    scroll.bar_inner_margin = 2.0;
+    scroll.bar_outer_margin = 0.0;
+}
+
+/// The strip's text and buttons, smaller than the panels' own.
+fn compact(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    style.override_font_id = Some(egui::FontId::proportional(11.5));
+    style.spacing.button_padding = egui::vec2(5.0, 1.0);
+    style.spacing.interact_size.y = 16.0;
 }
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
@@ -54,6 +63,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 .inner_margin(egui::Margin::symmetric(6, 0)),
         )
         .show(ctx, |ui| {
+            compact(ui);
             // Switching the framed page during a modal op (crop/transform) would
             // move the view out from under it, so the bar is disabled until
             // commit/cancel.
@@ -153,6 +163,7 @@ fn build_flow_text(
                 .inner_margin(egui::Margin::symmetric(6, 0)),
         )
         .show(ctx, |ui| {
+            compact(ui);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for (label, target, enabled, tip) in [
@@ -485,6 +496,7 @@ fn build_pdf(
                 .inner_margin(egui::Margin::symmetric(6, 0)),
         )
         .show(ctx, |ui| {
+            compact(ui);
             let strip = ui.add_enabled_ui(!data.chrome.is_tool_modal, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -581,4 +593,35 @@ fn build_pdf(
                 actions.chrome.modal_denied = true;
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the page bar over the status bar
+    /// is drawn into `thanh_trang.png` there, with three pages and with forty.
+    #[test]
+    #[ignore]
+    fn probe_panel_snapshot_of_the_page_bar() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        for (name, pages) in [("thanh_trang", 3), ("thanh_trang_nhieu", 40)] {
+            let mut data = UiData::default();
+            data.doc.has_doc = true;
+            data.doc.page_count = pages;
+            data.doc.active_artboard = 1;
+            let image = crate::ui::snapshot::render(900.0, 140.0, 1.5, None, |ctx| {
+                let mut actions = UiActions::default();
+                crate::ui::statusbar::build(ctx, &data, &mut actions);
+                build(ctx, &data, &mut actions);
+                #[allow(deprecated)]
+                egui::CentralPanel::default().show(ctx, |_| {});
+            });
+            image
+                .save(std::path::Path::new(&dir).join(format!("{name}.png")))
+                .unwrap();
+        }
+    }
 }

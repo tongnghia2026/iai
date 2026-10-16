@@ -99,7 +99,7 @@ impl Cfa {
         if width == 0 || height == 0 {
             return Ok(cfa);
         }
-        if TILE % width != 0 || TILE % height != 0 {
+        if !TILE.is_multiple_of(width) || !TILE.is_multiple_of(height) {
             return Err(format!("CFA pattern of {width}x{height} is not supported"));
         }
         if colors.len() != width * height {
@@ -170,23 +170,29 @@ enum Store<T> {
     },
 }
 
-// What is lent is never written to once the library has handed it over, and
-// the library takes it back from any thread (see `ffi::Lender`).
+// SAFETY: what is lent is never written to once the library has handed it
+// over, and the library takes it back from any thread (see `ffi::Lender`).
+#[allow(unsafe_code)]
 unsafe impl<T: Send + Sync> Send for Samples<T> {}
+// SAFETY: as for `Send`.
+#[allow(unsafe_code)]
 unsafe impl<T: Send + Sync> Sync for Samples<T> {}
 
+// Lent samples are read in place.
+#[allow(unsafe_code)]
 impl<T> Deref for Samples<T> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
         match &self.0 {
             Store::Owned(samples) => samples,
-            // `ffi::receive` checked the pointer and the length it lends.
+            // SAFETY: `ffi::receive` checked the pointer and the length it lends.
             Store::Lent { ptr, len, .. } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
         }
     }
 }
 
+#[allow(unsafe_code)]
 impl<T> Samples<T> {
     /// # Safety
     /// `len` samples lie at `ptr`, aligned, and stay there unchanged until

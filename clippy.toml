@@ -1,0 +1,6 @@
+# Tests may unwrap, expect and panic: a failing test is meant to stop there.
+# Everywhere else these are counted by `cargo xtask lints`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

@@ -298,7 +298,15 @@ impl App {
                 cw,
                 ch,
             );
-            let done = output_refined_selection(canvas, &refined, mode, decontaminate);
+            use crate::core::canvas::selection_output::{output_selection, SelectionOutput};
+            let output = match mode {
+                RefineOutputMode::LayerMask => Some(SelectionOutput::LayerMask),
+                RefineOutputMode::NewLayer => Some(SelectionOutput::NewLayer),
+                RefineOutputMode::NewLayerWithMask => Some(SelectionOutput::NewLayerWithMask),
+                RefineOutputMode::Selection => None,
+            };
+            let done = output
+                .is_some_and(|output| output_selection(canvas, &refined, output, decontaminate));
             if done {
                 cmd.capture_after(&canvas.layer_stack, cw, ch);
                 group.commands.push(Box::new(cmd));
@@ -331,204 +339,6 @@ impl App {
         self.close_refine_ui();
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         self.apply_canvas_event(CanvasEvent::SelectionChanged);
-    }
-}
-
-/// Layer mask (in the layer's own pixel space) revealing `sel`.
-fn layer_mask_from_selection(
-    sel: &crate::core::selection::Selection,
-    layer: &crate::core::layer::Layer,
-    cw: u32,
-    ch: u32,
-) -> Option<crate::core::layer::LayerMask> {
-    use rayon::prelude::*;
-    let (lw, lh) = (layer.width, layer.height);
-    let len = crate::core::canvas::Canvas::guarded_flat_rgba_len(lw, lh)?;
-    let (ox, oy) = layer.offset;
-    let mut rgba = vec![0u8; len];
-    rgba.par_chunks_mut(lw as usize * 4)
-        .enumerate()
-        .for_each(|(ly, row)| {
-            let cy = ly as i64 + oy as i64;
-            for (lx, px) in row.chunks_exact_mut(4).enumerate() {
-                let cx = lx as i64 + ox as i64;
-                let m = if cx >= 0 && cy >= 0 && cx < cw as i64 && cy < ch as i64 {
-                    sel.mask[cy as usize * cw as usize + cx as usize]
-                } else {
-                    0
-                };
-                px.copy_from_slice(&[m, m, m, 255]);
-            }
-        });
-    Some(crate::core::layer::LayerMask {
-        tiles: crate::core::tile::TileMap::from_rgba(&rgba, lw, lh),
-        width: lw,
-        height: lh,
-        enabled: true,
-        inverted: false,
-        bake_offset: (0, 0),
-        bake_frame_offset: (0, 0),
-    })
-}
-
-fn install_mask(layer: &mut crate::core::layer::Layer, mask: crate::core::layer::LayerMask) {
-    layer.mask = Some(mask);
-    layer.mask_active = true;
-    layer.mask_linked = true;
-    layer.paint_target = crate::core::layer::PaintTarget::Mask;
-}
-
-/// Write the refined selection to the layers. The new-layer outputs copy the
-/// active layer above it and hide the original, as Photoshop does. Returns
-/// false when nothing could be written.
-fn output_refined_selection(
-    canvas: &mut crate::core::canvas::Canvas,
-    sel: &crate::core::selection::Selection,
-    mode: RefineOutputMode,
-    decontaminate: Option<f32>,
-) -> bool {
-    let (cw, ch) = (canvas.width, canvas.height);
-    if sel.mask.len() < cw as usize * ch as usize {
-        return false;
-    }
-    canvas.layer_stack.normalize_active_idx();
-    let idx = canvas.layer_stack.active_idx;
-    let Some(src) = canvas.layer_stack.layers.get(idx) else {
-        return false;
-    };
-    match mode {
-        RefineOutputMode::Selection => false,
-        RefineOutputMode::LayerMask => {
-            let Some(mask) = layer_mask_from_selection(sel, src, cw, ch) else {
-                return false;
-            };
-            install_mask(&mut canvas.layer_stack.layers[idx], mask);
-            true
-        }
-        RefineOutputMode::NewLayer | RefineOutputMode::NewLayerWithMask => {
-            // Cutting the pixels needs a raster layer; others keep a mask.
-            let with_mask = mode == RefineOutputMode::NewLayerWithMask || !src.is_raster();
-            let new_idx = canvas.layer_stack.duplicate_layer(idx);
-            if new_idx == idx {
-                return false;
-            }
-            let layer = &mut canvas.layer_stack.layers[new_idx];
-            if with_mask {
-                let Some(mask) = layer_mask_from_selection(sel, layer, cw, ch) else {
-                    return false;
-                };
-                install_mask(layer, mask);
-            } else {
-                super::clipboard::mask_copied_layer_by_selection(layer, sel, cw, ch);
-            }
-            if let Some(amount) = decontaminate {
-                decontaminate_layer(layer, sel, cw, ch, amount);
-            }
-            canvas.layer_stack.layers[idx].visible = false;
-            canvas.layer_stack.active_idx = new_idx;
-            true
-        }
-    }
-}
-
-/// Decontaminate Colors: edge pixels take on the colour of nearby fully
-/// selected pixels, the more the softer the selection is there.
-fn decontaminate_layer(
-    layer: &mut crate::core::layer::Layer,
-    sel: &crate::core::selection::Selection,
-    cw: u32,
-    ch: u32,
-    amount: f32,
-) {
-    use crate::core::tile::TILE_SIZE;
-    const SEARCH_R: i64 = 8;
-    let amount = amount.clamp(0.0, 1.0);
-    if amount <= 0.001 {
-        return;
-    }
-    let (cw, ch) = (cw as i64, ch as i64);
-    let mask_at = |x: i64, y: i64| -> u8 {
-        if x >= 0 && y >= 0 && x < cw && y < ch {
-            sel.mask[(y * cw + x) as usize]
-        } else {
-            0
-        }
-    };
-    let (ox, oy) = (layer.offset.0 as i64, layer.offset.1 as i64);
-    let source = layer.tiles.clone();
-    let (lw, lh) = (layer.width as i64, layer.height as i64);
-    let positions: Vec<_> = layer.tiles.tiles.keys().copied().collect();
-    for pos in positions {
-        let Some(tile) = layer.tiles.tiles.get_mut(&pos) else {
-            continue;
-        };
-        let tile = std::sync::Arc::make_mut(tile);
-        let mut touched = false;
-        for ty in 0..TILE_SIZE as i64 {
-            for tx in 0..TILE_SIZE as i64 {
-                let (lx, ly) = (
-                    pos.x as i64 * TILE_SIZE as i64 + tx,
-                    pos.y as i64 * TILE_SIZE as i64 + ty,
-                );
-                let (cx, cy) = (lx + ox, ly + oy);
-                let m = mask_at(cx, cy);
-                let i = ((ty * TILE_SIZE as i64 + tx) * 4) as usize;
-                if m == 0 || tile.pixels[i + 3] == 0 {
-                    continue;
-                }
-                let near_edge = m < 255
-                    || mask_at(cx - 1, cy) < 245
-                    || mask_at(cx + 1, cy) < 245
-                    || mask_at(cx, cy - 1) < 245
-                    || mask_at(cx, cy + 1) < 245;
-                if !near_edge {
-                    continue;
-                }
-                let mut sum = [0u64; 3];
-                let mut count = 0u64;
-                for sy in -SEARCH_R..=SEARCH_R {
-                    for sx in -SEARCH_R..=SEARCH_R {
-                        if sx * sx + sy * sy > SEARCH_R * SEARCH_R
-                            || mask_at(cx + sx, cy + sy) < 220
-                        {
-                            continue;
-                        }
-                        let (sx, sy) = (lx + sx, ly + sy);
-                        if sx < 0 || sy < 0 || sx >= lw || sy >= lh {
-                            continue;
-                        }
-                        let (r, g, b, a) = source.get_pixel16(sx as u32, sy as u32);
-                        if a == 0 {
-                            continue;
-                        }
-                        sum[0] += r as u64;
-                        sum[1] += g as u64;
-                        sum[2] += b as u64;
-                        count += 1;
-                    }
-                }
-                if count == 0 {
-                    continue;
-                }
-                let mix = (amount * (1.0 - m as f32 / 255.0).sqrt()).clamp(0.0, 1.0);
-                let (r, g, b, _) = source.get_pixel16(lx as u32, ly as u32);
-                let cur = [r, g, b];
-                for c in 0..3 {
-                    let fg = sum[c] as f32 / count as f32;
-                    let v16 = (cur[c] as f32 * (1.0 - mix) + fg * mix)
-                        .round()
-                        .clamp(0.0, 65535.0);
-                    tile.pixels[i + c] = (v16 / 257.0).round() as u8;
-                    if let Some(p16) = tile.pixels16.as_mut() {
-                        p16[i + c] = v16 as u16;
-                    }
-                }
-                touched = true;
-            }
-        }
-        if touched {
-            tile.revision = crate::core::tile::next_tile_revision();
-        }
     }
 }
 

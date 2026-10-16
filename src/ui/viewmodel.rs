@@ -367,8 +367,6 @@ pub struct SelectionViewModel {
     pub has_selection: bool,
     pub select_subject_busy: bool,
     pub select_subject_status_msg: String,
-    pub select_subject_model: crate::core::select_subject::SelectSubjectModel,
-    pub yolo_people_only: bool,
     pub show_refine_panel: bool,
     pub refine_params: crate::core::refine::RefineParams,
     pub refine_can_undo: bool,
@@ -481,6 +479,10 @@ pub struct DialogViewModel {
     pub portrait_session: bool,
     pub portrait_status: String,
     pub portrait_ready: bool,
+    /// The retouch under way has nothing to add to the photo yet: its
+    /// analysis has not come (or found no face) and its sliders are those
+    /// the photo holds already. "Xếp ảnh in" lays the photo out as it is.
+    pub portrait_adds_nothing: bool,
     pub portrait_faces: Vec<bool>,
     /// Whether the analysis found hair to lighten or recolour.
     pub portrait_hair: bool,
@@ -515,15 +517,6 @@ pub struct DialogViewModel {
     pub id_photo_error: bool,
     pub id_photo_busy: bool,
     pub id_photo_made: bool,
-    /// The "Áo" box: the garment in it (its picture and name), whether
-    /// the photo wears it, whether it is being put on, and its status
-    /// line with whether that is an error.
-    pub garment_thumb: Option<egui::TextureId>,
-    pub garment_name: String,
-    pub garment_worn: bool,
-    pub garment_busy: bool,
-    pub garment_status: String,
-    pub garment_error: bool,
     /// The folder chosen in "Xếp ảnh in": its name and how many photos it holds.
     pub print_folder: Option<(String, usize)>,
     /// Active document is a multi-page PDF session (enables page-scope options).
@@ -624,10 +617,13 @@ pub struct DialogViewModel {
     pub paint_color_dialog_original: [u8; 4],
     pub paint_color_dialog_live_preview: bool,
     pub paint_color_dialog_center_next: bool,
-    pub user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
+    /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.
+    pub crop_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
+    pub canvas_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     pub adjustment_presets: std::sync::Arc<crate::core::presets::AdjustmentPresets>,
     pub show_preset_dialog: bool,
-    pub show_delete_preset_dialog: bool,
+    /// The list "Delete preset" deletes from, while its window is open.
+    pub delete_preset_dialog: Option<crate::core::presets::SizePresetList>,
     pub preset_dialog_name: String,
     pub preset_dialog_w: f32,
     pub preset_dialog_h: f32,
@@ -656,6 +652,8 @@ pub struct ChromeViewModel {
     pub guide_preview: Option<(crate::core::document::GuideOrientation, f32)>,
     /// Index of the guide under the cursor / being dragged — drawn highlighted.
     pub hovered_guide: Option<usize>,
+    /// Index of the guide picked with the Move tool, which Delete removes.
+    pub selected_guide: Option<usize>,
     /// Smart-guide lines from the Move tool's snapping (magenta = align, red = page edge).
     pub snap_guides: Vec<crate::core::snapping::SnapLine>,
     /// Artboards (print pages) of the active document, in document space. Drawn as
@@ -678,6 +676,8 @@ pub struct ChromeViewModel {
     pub news: std::sync::Arc<crate::author_news::Loaded>,
     /// Word to the author: where the message being sent stands.
     pub mail: MailView,
+    /// AI agents' access to the window.
+    pub agent: AgentView,
     /// Pro on this machine, as its dialogs and the Help menu show it.
     #[cfg(feature = "pro")]
     pub pro: ProView,
@@ -725,6 +725,19 @@ pub enum SupportDialog {
     Pro,
     /// "Cấp mã Pro": the author signs a key.
     ProIssue,
+    /// "Cho AI điều khiển iAi": the switch, and what an agent is set up with.
+    Agent,
+}
+
+/// AI agents' access to the window, as its dialog shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentView {
+    /// Agents on this machine may run commands in the window.
+    pub on: bool,
+    /// Why turning it on failed.
+    pub error: Option<String>,
+    /// This program, for the agent's settings.
+    pub exe: String,
 }
 
 /// Where the app's self-update stands (see `crate::update`).
@@ -1103,8 +1116,6 @@ impl Default for UiData {
                 has_selection: false,
                 select_subject_busy: false,
                 select_subject_status_msg: String::new(),
-                select_subject_model: crate::core::select_subject::SelectSubjectModel::BiRefNetTiny,
-                yolo_people_only: false,
                 show_refine_panel: false,
                 refine_params: crate::core::refine::RefineParams::default(),
                 refine_can_undo: false,
@@ -1179,6 +1190,7 @@ impl Default for UiData {
                 portrait_session: false,
                 portrait_status: String::new(),
                 portrait_ready: false,
+                portrait_adds_nothing: false,
                 portrait_faces: Vec::new(),
                 portrait_hair: false,
                 portrait_body: None,
@@ -1195,12 +1207,6 @@ impl Default for UiData {
                 id_photo_error: false,
                 id_photo_busy: false,
                 id_photo_made: false,
-                garment_thumb: None,
-                garment_name: String::new(),
-                garment_worn: false,
-                garment_busy: false,
-                garment_status: String::new(),
-                garment_error: false,
                 print_folder: None,
                 portrait_restore_settings: None,
                 portrait_restore_faces: None,
@@ -1278,10 +1284,11 @@ impl Default for UiData {
                 paint_color_dialog_original: [0, 0, 0, 255],
                 paint_color_dialog_live_preview: true,
                 paint_color_dialog_center_next: false,
-                user_presets: std::sync::Arc::new(Vec::new()),
+                crop_presets: std::sync::Arc::new(Vec::new()),
+                canvas_presets: std::sync::Arc::new(Vec::new()),
                 adjustment_presets: std::sync::Arc::new(Default::default()),
                 show_preset_dialog: false,
-                show_delete_preset_dialog: false,
+                delete_preset_dialog: None,
                 preset_dialog_name: String::new(),
                 preset_dialog_w: 0.0,
                 preset_dialog_h: 0.0,
@@ -1305,6 +1312,7 @@ impl Default for UiData {
                 guides: Vec::new(),
                 guide_preview: None,
                 hovered_guide: None,
+                selected_guide: None,
                 snap_guides: Vec::new(),
                 artboards: Vec::new(),
                 toolbar_w: 48.0,
@@ -1315,6 +1323,7 @@ impl Default for UiData {
                 support: None,
                 news: Default::default(),
                 mail: Default::default(),
+                agent: AgentView::default(),
                 #[cfg(feature = "pro")]
                 pro: ProView::default(),
             },

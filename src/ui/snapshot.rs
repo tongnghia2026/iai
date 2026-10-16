@@ -36,6 +36,17 @@ pub(crate) fn render(
     hover: Option<egui::Pos2>,
     mut add: impl FnMut(&egui::Context),
 ) -> image::RgbaImage {
+    render_ui(width, height, scale, hover, |ui| add(ui.ctx()))
+}
+
+/// `render` for what draws into the frame's root `Ui`, as `ui::frame` does.
+pub(crate) fn render_ui(
+    width: f32,
+    height: f32,
+    scale: f32,
+    hover: Option<egui::Pos2>,
+    mut add: impl FnMut(&mut egui::Ui),
+) -> image::RgbaImage {
     let ctx = egui::Context::default();
     ctx.set_fonts(fonts());
     super::theme::apply_theme(&ctx, super::theme::ThemeMode::Dark);
@@ -51,7 +62,7 @@ pub(crate) fn render(
         if let Some(pos) = hover {
             input.events.push(egui::Event::PointerMoved(pos));
         }
-        let output = ctx.run_ui(input, |ui| add(ui.ctx()));
+        let output = ctx.run_ui(input, |ui| add(ui));
         for (id, delta) in &output.textures_delta.set {
             let ImageData::Color(image) = &delta.image;
             match delta.pos {

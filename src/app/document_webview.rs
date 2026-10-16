@@ -39,6 +39,7 @@ fn should_focus_parent_after_releasing_webview(
     had_webview && !window_occluded && !window_minimized
 }
 
+#[allow(unsafe_code)] // Win32: SetFocus
 fn focus_parent_window(parent: &Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 

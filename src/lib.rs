@@ -17,16 +17,18 @@
 //! command/history and raster math. It must not reach up into `app`, `ui`,
 //! winit, wgpu or the format registry.
 
+pub mod agent;
 pub mod app;
 pub mod author_mail;
 pub mod author_news;
 pub mod bootstrap;
 pub mod core;
 pub mod crash;
-pub mod diag;
+pub use iai_diag as diag;
+pub mod diag_ui;
 pub mod extension;
 pub mod file_io;
-pub mod formats;
+pub use iai_formats as formats;
 pub mod gpu;
 #[cfg(feature = "pro")]
 pub mod pro;

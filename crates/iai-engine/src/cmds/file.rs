@@ -1,0 +1,553 @@
+//! Files: a new blank document, open, save, export a picture.
+
+use std::path::{Path, PathBuf};
+
+use iai_canvas::canvas::{Canvas, MAX_DIMENSION};
+use iai_canvas::document::{file_modified_at, Document, FlowTextBacking, FlowTextDocumentState};
+use iai_formats::iai::IaiLoad;
+use iai_formats::{ExportOptions, FormatRegistry};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use super::common::{not_enabled, parse_color};
+use crate::{
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session,
+    Validate,
+};
+
+/// A document as the file commands report it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Opened {
+    pub doc: u32,
+    pub title: String,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub dpi: f32,
+    pub pages: usize,
+}
+
+fn opened(d: &Document) -> Opened {
+    Opened {
+        doc: d.id.0,
+        title: d.tab_title().to_string(),
+        width_px: d.canvas.width,
+        height_px: d.canvas.height,
+        dpi: d.canvas.metadata.resolution_ppi,
+        pages: d.page_count(),
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewParams {
+    #[schemars(range(min = 1, max = 30000))]
+    pub width_px: u32,
+    #[schemars(range(min = 1, max = 30000))]
+    pub height_px: u32,
+    /// Pixels per inch: with the size in pixels, the size on paper.
+    #[serde(default = "dpi_72")]
+    #[schemars(range(min = 1.0, max = 9600.0))]
+    pub dpi: f32,
+    /// "white" (default), "black", "transparent" or a colour "#RRGGBB".
+    pub background: Option<String>,
+    /// The tab's name.
+    #[schemars(length(min = 1, max = 200))]
+    pub title: Option<String>,
+}
+
+fn dpi_72() -> f32 {
+    72.0
+}
+
+impl Validate for NewParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if let Some(b) = &self.background {
+            if !matches!(b.as_str(), "white" | "black" | "transparent") {
+                parse_color("background", b)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+static NEW: CommandMeta = CommandMeta {
+    id: "file.new",
+    label_vi: "Tạo ảnh mới",
+    label_en: "New Document",
+    doc: "Open a new blank document in a tab of its own and show it.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct NewDocument;
+
+impl Command for NewDocument {
+    type Params = NewParams;
+    type Output = Opened;
+    fn meta(&self) -> &'static CommandMeta {
+        &NEW
+    }
+    fn plan(&self, s: &mut Session<'_>, p: NewParams) -> Result<Plan<Opened>, CmdError> {
+        let (w, h) = (p.width_px, p.height_px);
+        let mut canvas = Canvas::new(w, h);
+        let background = p.background.as_deref().unwrap_or("white");
+        if let Some(bg) = canvas.layer_stack.layers.first_mut() {
+            match background {
+                "white" => bg.is_background = true,
+                "black" => {
+                    bg.tiles = iai_raster::tile::TileMap::new_black(w, h);
+                    bg.is_background = true;
+                }
+                "transparent" => {
+                    bg.tiles = iai_raster::tile::TileMap::new(w, h);
+                    bg.name = "Layer 1".to_string();
+                    bg.is_background = false;
+                    bg.locked = false;
+                }
+                colour => {
+                    let [r, g, b, a] = parse_color("background", colour)?;
+                    bg.tiles = iai_raster::tile::TileMap::new_solid(w, h, r, g, b, a);
+                    bg.is_background = true;
+                }
+            }
+        }
+        canvas.flatten_full();
+        canvas.metadata.resolution_ppi = p.dpi;
+        let id = s.new_document_id();
+        let mut doc = Document::from_canvas(id, canvas, None);
+        if let Some(title) = p.title {
+            doc.title = title;
+        }
+        doc.mark_saved();
+        let out = opened(&doc);
+        s.add_document(doc);
+        s.notice(format!("Ảnh mới {w}×{h}"), format!("New document {w}×{h}"));
+        Ok(Plan::Done(out))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OpenParams {
+    /// The file: an image (JPEG, PNG, TIFF, WebP, BMP, PSD, camera RAW), a
+    /// PDF (every page, rasterised) or an iAi document (.iai).
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: String,
+}
+impl Validate for OpenParams {}
+
+static OPEN: CommandMeta = CommandMeta {
+    id: "file.open",
+    label_vi: "Mở file",
+    label_en: "Open File",
+    doc: "Open a file as a new document (tab) and show it. A PDF opens as one document with a \
+          page per PDF page. Large and RAW files take seconds: `background: true` gives a job id.",
+    effects: &[Effect::Edit, Effect::ReadFiles],
+    featured: true,
+};
+
+pub struct OpenFile;
+
+/// What a file decodes to, before it is a document.
+enum Decoded {
+    Pages {
+        pages: Vec<Canvas>,
+        active: usize,
+        master: Option<Box<Canvas>>,
+    },
+    Text(FlowTextBacking),
+}
+
+fn decode(path: &Path) -> Result<Decoded, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if ext == "iai" {
+        return match iai_formats::iai::load(path)? {
+            IaiLoad::Canvas(canvas) => Ok(Decoded::Pages {
+                pages: vec![canvas],
+                active: 0,
+                master: None,
+            }),
+            IaiLoad::ArtboardDoc(doc) => Ok(Decoded::Pages {
+                active: doc.active_page,
+                pages: doc.pages,
+                master: doc.master.map(Box::new),
+            }),
+            IaiLoad::FlowTextDocument(backing) => Ok(Decoded::Text(backing)),
+            IaiLoad::PdfProject(_) => {
+                Err("an iAi PDF project opens in the app window (File > Open)".to_string())
+            }
+        };
+    }
+    let pages = FormatRegistry::new().import_many(path)?;
+    if pages.is_empty() {
+        return Err("the file holds no image".to_string());
+    }
+    Ok(Decoded::Pages {
+        pages,
+        active: 0,
+        master: None,
+    })
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+impl Command for OpenFile {
+    type Params = OpenParams;
+    type Output = Opened;
+    fn meta(&self) -> &'static CommandMeta {
+        &OPEN
+    }
+    fn plan(&self, _: &mut Session<'_>, p: OpenParams) -> Result<Plan<Opened>, CmdError> {
+        let path = PathBuf::from(&p.path);
+        if !path.is_file() {
+            return Err(CmdError::new(
+                ErrorCode::NotFound,
+                format!("no file at {}", path.display()),
+            )
+            .vi(format!("Không có file {}", file_name(&path))));
+        }
+        Ok(Plan::Job(Job {
+            doc: None,
+            label_vi: format!("Mở {}", file_name(&path)),
+            work: Box::new(move |cx| {
+                cx.progress(0.1, format!("Đang đọc {}…", file_name(&path)));
+                let decoded = decode(&path).map_err(|e| {
+                    CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
+                        .vi(format!("Không mở được {}: {e}", file_name(&path)))
+                })?;
+                cx.check_cancelled()?;
+                Ok(Box::new(move |s: &mut Session<'_>| {
+                    let id = s.new_document_id();
+                    let mut doc = match decoded {
+                        Decoded::Text(backing) => {
+                            let mut doc = Document::new_flow_text(id);
+                            doc.flow_text = Some(FlowTextDocumentState::from_backing(backing));
+                            doc
+                        }
+                        Decoded::Pages {
+                            pages,
+                            active,
+                            master,
+                        } => {
+                            let mut slots: Vec<Option<Canvas>> =
+                                pages.into_iter().map(Some).collect();
+                            let active = active.min(slots.len().saturating_sub(1));
+                            let canvas = slots
+                                .get_mut(active)
+                                .and_then(Option::take)
+                                .ok_or_else(|| CmdError::internal("no page"))?;
+                            let mut doc = Document::from_canvas(id, canvas, None);
+                            if slots.len() > 1 {
+                                doc.pages = slots;
+                                doc.active_artboard = active;
+                            }
+                            doc.master = master;
+                            doc
+                        }
+                    };
+                    doc.title = path
+                        .file_stem()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Untitled".to_string());
+                    doc.file_modified_at = file_modified_at(&path);
+                    doc.path = Some(path.clone());
+                    doc.mark_saved();
+                    let out = opened(&doc);
+                    s.add_document(doc);
+                    s.notice(
+                        format!("Đã mở {}", file_name(&path)),
+                        format!("Opened {}", file_name(&path)),
+                    );
+                    Ok(out)
+                }) as Apply<Opened>)
+            }),
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SaveParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Where to write; the document's own file when omitted. A document of
+    /// several pages, or of text, is written as .iai only.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: Option<String>,
+}
+impl Validate for SaveParams {}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Saved {
+    pub doc: u32,
+    pub path: String,
+    pub bytes: u64,
+}
+
+static SAVE: CommandMeta = CommandMeta {
+    id: "file.save",
+    label_vi: "Lưu",
+    label_en: "Save",
+    doc: "Write a document to its file, or to `path` (then it becomes its file). .iai keeps \
+          layers and pages; an image format (.png, .jpg, .tif, .webp) flattens them. Use \
+          `file.export` for a copy that leaves the document's file alone.",
+    effects: &[Effect::WriteFiles],
+    featured: true,
+};
+
+pub struct SaveFile;
+
+/// What a save writes, detached from the live document.
+enum Content {
+    Image(Canvas),
+    Pages {
+        pages: Vec<Canvas>,
+        active: usize,
+        master: Option<Canvas>,
+    },
+    Text(FlowTextBacking),
+}
+
+fn detached(canvas: &Canvas) -> Canvas {
+    let mut snapshot = canvas.export_snapshot();
+    snapshot.channels.alpha = canvas.channels.alpha.clone();
+    snapshot
+}
+
+fn write(content: &Content, path: &Path, opts: &ExportOptions) -> Result<(), String> {
+    match content {
+        Content::Image(canvas) => FormatRegistry::new().export(canvas, path, opts),
+        Content::Pages {
+            pages,
+            active,
+            master,
+        } => {
+            let refs: Vec<&Canvas> = pages.iter().collect();
+            iai_formats::iai::write_artboard_doc(path, &refs, *active, master.as_ref())
+        }
+        Content::Text(FlowTextBacking::Legacy(document)) => {
+            iai_formats::iai::write_flow_text_doc(path, document.as_ref())
+        }
+        Content::Text(FlowTextBacking::CanvasEditor(document)) => {
+            iai_formats::iai::write_canvas_editor_doc(path, document)
+        }
+    }
+}
+
+fn has_writer(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| iai_formats::ExportFormat::from_extension(e).is_some())
+}
+
+impl Command for SaveFile {
+    type Params = SaveParams;
+    type Output = Saved;
+    fn meta(&self) -> &'static CommandMeta {
+        &SAVE
+    }
+    fn plan(&self, s: &mut Session<'_>, p: SaveParams) -> Result<Plan<Saved>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let d = s.document(Some(doc))?;
+        let path = match (&p.path, &d.path) {
+            (Some(path), _) => PathBuf::from(path),
+            (None, Some(path)) => path.clone(),
+            (None, None) => {
+                return Err(CmdError::bad_param(
+                    "path",
+                    "a file name: the document has never been saved",
+                ))
+            }
+        };
+        let is_iai = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("iai"));
+        if d.pdf_document.is_some() {
+            return Err(not_enabled(
+                "a PDF opened page by page is saved from the app window",
+                "Dự án PDF được lưu trong cửa sổ app",
+            ));
+        }
+        let content = if let Some(flow) = &d.flow_text {
+            Content::Text(flow.backing().clone())
+        } else if !d.pages.is_empty() {
+            let pages = d.all_page_canvases().into_iter().map(detached).collect();
+            Content::Pages {
+                pages,
+                active: d.active_artboard,
+                master: d.master_canvas().map(detached),
+            }
+        } else {
+            if !is_iai && !has_writer(&path) {
+                return Err(CmdError::bad_param(
+                    "path",
+                    "a file ending in .iai, .png, .jpg, .tif, .webp, .bmp or .pdf",
+                ));
+            }
+            Content::Image(detached(&d.canvas))
+        };
+        if !matches!(content, Content::Image(_)) && !is_iai {
+            return Err(CmdError::bad_param(
+                "path",
+                "a .iai file: this document has several pages or is text",
+            ));
+        }
+        let marks: Vec<_> = std::iter::once(d.canvas.history_checkpoint()).collect();
+        Ok(Plan::Job(Job {
+            doc: Some(doc),
+            label_vi: format!("Lưu {}", file_name(&path)),
+            work: Box::new(move |cx| {
+                cx.progress(0.1, format!("Đang lưu {}…", file_name(&path)));
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir)?;
+                }
+                write(&content, &path, &ExportOptions::default()).map_err(|e| {
+                    CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
+                        .vi(format!("Không lưu được {}: {e}", file_name(&path)))
+                })?;
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                Ok(Box::new(move |s: &mut Session<'_>| {
+                    let d = s.document_mut(Some(doc))?;
+                    d.path = Some(path.clone());
+                    d.file_modified_at = file_modified_at(&path);
+                    // Saved only if nothing changed while it was written.
+                    if marks.first() == Some(&d.canvas.history_checkpoint()) {
+                        d.mark_saved();
+                    }
+                    let shown = path.display().to_string();
+                    s.emit(EngineEvent::Saved {
+                        doc,
+                        path: shown.clone(),
+                    });
+                    s.notice(
+                        format!("Đã lưu {}", file_name(&path)),
+                        format!("Saved {}", file_name(&path)),
+                    );
+                    Ok(Saved {
+                        doc,
+                        path: shown,
+                        bytes,
+                    })
+                }) as Apply<Saved>)
+            }),
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExportParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Where to write; the format comes from the ending: .png, .jpg, .tif,
+    /// .webp, .bmp.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: String,
+    /// Fit the longer side to this many pixels (only ever smaller).
+    #[schemars(range(min = 16, max = 30000))]
+    pub long_edge_px: Option<u32>,
+    /// Sharpen for the output size, 0 (off) to 100.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 100))]
+    pub sharpen: u8,
+    /// Embed the colour profile (default).
+    #[serde(default = "yes")]
+    pub embed_icc: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Validate for ExportParams {}
+
+static EXPORT: CommandMeta = CommandMeta {
+    id: "file.export",
+    label_vi: "Xuất ảnh",
+    label_en: "Export Image",
+    doc: "Write the shown page, flattened, to an image file (.png, .jpg, .tif, .webp, .bmp), \
+          optionally made smaller and sharpened for the web. The document is left as it is. For \
+          PDF use `export.pdf`.",
+    effects: &[Effect::WriteFiles],
+    featured: false,
+};
+
+pub struct ExportImage;
+
+impl Command for ExportImage {
+    type Params = ExportParams;
+    type Output = Saved;
+    fn meta(&self) -> &'static CommandMeta {
+        &EXPORT
+    }
+    fn plan(&self, s: &mut Session<'_>, p: ExportParams) -> Result<Plan<Saved>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let path = PathBuf::from(&p.path);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if !matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "bmp"
+        ) {
+            return Err(CmdError::bad_param(
+                "path",
+                "a file ending in .png, .jpg, .tif, .webp or .bmp",
+            ));
+        }
+        let canvas = detached(s.canvas(Some(doc))?);
+        if canvas.width > MAX_DIMENSION || canvas.height > MAX_DIMENSION {
+            return Err(CmdError::new(
+                ErrorCode::TooLarge,
+                "the page is too large to export",
+            ));
+        }
+        let opts = ExportOptions {
+            embed_icc: p.embed_icc,
+            resize_long_edge: p.long_edge_px,
+            output_sharpen: p.sharpen.min(100),
+            ..ExportOptions::default()
+        };
+        Ok(Plan::Job(Job {
+            doc: None,
+            label_vi: format!("Xuất {}", file_name(&path)),
+            work: Box::new(move |cx| {
+                cx.progress(0.1, format!("Đang xuất {}…", file_name(&path)));
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir)?;
+                }
+                FormatRegistry::new()
+                    .export(&canvas, &path, &opts)
+                    .map_err(|e| {
+                        CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
+                            .vi(format!("Không xuất được {}: {e}", file_name(&path)))
+                    })?;
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                Ok(Box::new(move |s: &mut Session<'_>| {
+                    s.notice(
+                        format!("Đã xuất {}", file_name(&path)),
+                        format!("Exported {}", file_name(&path)),
+                    );
+                    Ok(Saved {
+                        doc,
+                        path: path.display().to_string(),
+                        bytes,
+                    })
+                }) as Apply<Saved>)
+            }),
+        }))
+    }
+}

@@ -14,11 +14,9 @@ pub struct BackgroundJobs {
     /// poll_file_dialog() reads the result via this channel, avoiding blocking the main loop.
     pub(in crate::app) pending_file_dialog:
         Option<std::sync::mpsc::Receiver<crate::file_io::FileDialogResult>>,
-    /// Native PDF save dialog plus PDF construction/write work. Both run away
-    /// from the winit thread so a large document cannot freeze the application.
-    /// `None` is a cancelled dialog; `Some` carries the final user-facing status.
-    pub(in crate::app) pending_pdf_export:
-        Option<std::sync::mpsc::Receiver<Option<Result<String, String>>>>,
+    /// A PDF export: its save dialog, then the `export.pdf` job writing it.
+    /// Holds the window (modal lock) until it is written.
+    pub(in crate::app) pending_pdf_export: Option<PdfExport>,
     /// Picking + decoding an image to insert into a flowing-text document. The
     /// worker runs the native dialog and decodes the file; `poll_flow_text_image`
     /// hands the result to the document editor. `Some(None)` = cancelled.
@@ -346,4 +344,15 @@ pub(in crate::app) struct RawPrefetchJob {
     #[allow(clippy::type_complexity)]
     pub(in crate::app) rx:
         std::sync::mpsc::Receiver<Result<std::sync::Arc<crate::core::raw_spill::RawSpill>, String>>,
+}
+
+/// Where a PDF export is.
+pub(in crate::app) enum PdfExport {
+    /// The save dialog is open; the command's params wait for its path.
+    Asking {
+        rx: std::sync::mpsc::Receiver<Option<PathBuf>>,
+        args: serde_json::Value,
+    },
+    /// `export.pdf` writes it.
+    Writing(iai_engine::JobId),
 }

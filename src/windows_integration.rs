@@ -1,4 +1,6 @@
 //! Per-user Windows integration. No administrator rights are required.
+// Explorer integration: Win32 registry and shell calls.
+#![allow(unsafe_code)]
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;

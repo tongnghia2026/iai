@@ -589,8 +589,6 @@ pub struct SelectionIntent {
     /// Color Range dialog: apply the current colour + fuzziness as a selection.
     pub apply_color_range: bool,
     pub trigger_select_subject: bool,
-    pub set_select_subject_model: Option<crate::core::select_subject::SelectSubjectModel>,
-    pub set_yolo_people_only: Option<bool>,
     pub open_refine_panel: bool,
     /// New Refine Selection slider settings (rendered live when quick).
     pub set_refine_params: Option<crate::core::refine::RefineParams>,
@@ -827,25 +825,6 @@ pub struct DialogIntent {
     /// Make the ID photo as asked, or make the one just made again.
     #[cfg(feature = "pro")]
     pub run_id_photo: Option<crate::core::id_photo::IdPhotoRequest>,
-    /// The "Áo" box as the dialog shows it this frame: its rectangle
-    /// ([x0, y0, x1, y1], window points) and the sliders a retouch starts
-    /// over from when a garment dropped there is put on.
-    pub garment_box: Option<([f32; 4], crate::core::portrait_recipe::PortraitSettings)>,
-    /// Take the active layer as the garment and put it on the photo.
-    pub take_garment: Option<crate::core::portrait_recipe::PortraitSettings>,
-    /// Empty the box and take the garment off the photo.
-    pub remove_garment: Option<crate::core::portrait_recipe::PortraitSettings>,
-    /// Hand the photo's garment layer to Free Transform.
-    pub adjust_garment: bool,
-    /// Finish a dressed photo set right by hand: make the shade between the
-    /// garment and the person again, retouch the neck and lay the photo's
-    /// light on the garment, with "Da cổ" and "Khớp áo với ảnh" at this
-    /// much (0: the usual).
-    pub finish_dressed: Option<(f32, f32)>,
-    /// Ask for the shop's sheet of garments and open it in a tab.
-    pub open_garment_sheet: bool,
-    /// Show the sheet the garment came from, to pick another there.
-    pub change_garment: bool,
     /// Live-preview request: sliders, faces switched on, preview on/off, and
     /// whether to tint the detected areas instead.
     pub set_portrait_preview: Option<(
@@ -890,9 +869,11 @@ pub struct DialogIntent {
     pub dismiss_document_editor_error: bool,
     /// Acknowledge the "could not save" modal.
     pub dismiss_save_error: bool,
-    pub save_preset: Option<(String, f32, f32, String, f32)>,
-    pub delete_preset: Option<usize>,
-    pub open_delete_preset_dialog: bool,
+    /// The New Canvas dialog's Save: name, width, height, unit, resolution.
+    pub save_canvas_preset: Option<(String, f32, f32, String, f32)>,
+    /// Delete the preset at this place in its list.
+    pub delete_preset: Option<(crate::core::presets::SizePresetList, usize)>,
+    pub open_delete_preset_dialog: Option<crate::core::presets::SizePresetList>,
     pub close_delete_preset_dialog: bool,
     pub open_preset_dialog: Option<(f32, f32, String, f32)>,
     pub preset_dialog_name_changed: Option<String>,
@@ -957,6 +938,8 @@ pub struct ChromeIntent {
     /// The author signs a Pro key (see `crate::pro::issue`).
     #[cfg(feature = "pro")]
     pub pro_issue: Option<crate::pro::issue::Ask>,
+    /// Let AI agents on this machine run commands in the window, or stop.
+    pub agent_control: Option<bool>,
     pub cursor_left: bool,
     pub cursor_entered: bool,
     pub window_minimize: bool,

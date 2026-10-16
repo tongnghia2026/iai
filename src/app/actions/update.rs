@@ -115,6 +115,9 @@ impl App {
         if std::mem::take(&mut actions.chrome.close_support) {
             self.shell.ui.support_dialog = None;
         }
+        if let Some(on) = actions.chrome.agent_control.take() {
+            self.set_agent_control(on);
+        }
         // The first start of a new build: what is new in it and the ask for
         // support, once the user is free to read them.
         if self.shell.updated_notice && self.free_for_update() {

@@ -8,10 +8,7 @@ use std::path::PathBuf;
 
 /// Log path: `%APPDATA%\IAI\iai_crash.log`, falling back to the temp directory.
 pub fn crash_log_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("IAI").join("iai_crash.log")
+    crate::diag::data_dir().join("iai_crash.log")
 }
 
 /// Append a timestamped line to the crash log. Never panics — best effort only.
@@ -61,6 +58,7 @@ pub fn report_fatal(text: &str) {
 /// End the process at once, without running any library's unload code. For
 /// an exit that leaves a thread inside a driver call: unloading the driver
 /// under that thread can wait on it for ever.
+#[allow(unsafe_code)] // Win32: TerminateProcess
 pub fn end_process_now() -> ! {
     #[cfg(windows)]
     {
@@ -96,6 +94,11 @@ pub fn install_panic_handler() {
         // message there, which is harmless.
         crate::diag::panic(&full);
         log_crash(&full);
+        // A command the engine runs is caught: the document is put back and
+        // the app goes on, so this is no crash to report.
+        if iai_engine::catching_panics() {
+            return;
+        }
         report_fatal(&full);
         default_hook(info);
     }));

@@ -315,6 +315,19 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyW) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::FileClose, event_loop, repeat);
             }
+            // A guide picked with the Move tool: Delete removes the guide,
+            // never the layer or the pixels it runs over.
+            PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
+                if pressed
+                    && !repeat
+                    && !self.edit.input.alt_held
+                    && !self.edit.input.ctrl_held
+                    && self.edit.text_edit.is_none()
+                    && self.edit.transform_state.is_none()
+                    && self.selected_guide().is_some() =>
+            {
+                self.delete_selected_guide();
+            }
             // Multi-page PDF: Shift+Delete covers the same hard rectangular
             // selection on every page without rendering/caching every page.
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
@@ -430,9 +443,7 @@ impl App {
                     self.repeat_last_step();
                 } else if has_selection {
                     // Ctrl+D with an active pixel selection = Deselect (Photoshop).
-                    self.docs.active_mut().canvas.deselect();
-                    self.upload_selection_mask();
-                    self.push_selection_uniforms();
+                    let _ = self.run_now("select.none");
                 } else {
                     // Ctrl+D with no selection = Repeat the last duplicate step.
                     self.repeat_last_step();
@@ -463,9 +474,7 @@ impl App {
                 }
             }
             PhysicalKey::Code(KeyCode::F7) if pressed && self.edit.input.shift_held => {
-                self.docs.active_mut().canvas.invert_selection();
-                self.upload_selection_mask();
-                self.push_selection_uniforms();
+                let _ = self.run_now("select.invert");
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -1443,11 +1452,6 @@ impl App {
                     }
                     ToolId::PerspectiveCrop => {
                         let t = self.edit.tools.perspective_crop_mut();
-                        // Freeze DPI once a size is typed (see actions.rs) so
-                        // cm/inch values stay put across different-DPI images.
-                        if t.manual_size.is_none() {
-                            t.dpi = dpi;
-                        }
                         t.sync_manual_pixels(cw as f32, ch as f32);
                         t.begin_placing();
                     }
@@ -1544,13 +1548,7 @@ impl App {
             Command::EditCopy => self.do_copy(),
             Command::EditPaste => self.do_paste(),
             Command::SelectAll => {
-                let (cw, ch) = {
-                    let d = self.docs.active();
-                    (d.canvas.width, d.canvas.height)
-                };
-                self.docs.active_mut().canvas.selection.select_all();
-                self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
-                self.shell.status_msg = format!("Selected all ({}×{})", cw, ch);
+                let _ = self.run_now("select.all");
                 self.redraw_main();
             }
             Command::FreeTransform => {

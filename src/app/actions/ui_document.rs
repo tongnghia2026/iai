@@ -110,39 +110,23 @@ impl App {
         // + offset/mask/selection remap), and flatten_full skips the flat buffer on
         // large canvases — so they run under Viewport Streaming with no >25M px gate.
         if actions.doc.flip_horizontal {
-            self.docs.active_mut().canvas.flip_horizontal();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_proof_settings();
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+            let _ = self.run_with("image.flip", serde_json::json!({"axis": "horizontal"}));
         }
         if actions.doc.flip_vertical {
-            self.docs.active_mut().canvas.flip_vertical();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_proof_settings();
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+            let _ = self.run_with("image.flip", serde_json::json!({"axis": "vertical"}));
         }
-        if actions.doc.rotate_cw {
-            self.docs.active_mut().canvas.rotate_90_cw();
-            if let Some(gpu) = &mut self.win.gpu {
-                let w = self.docs.active().canvas.width;
-                let h = self.docs.active().canvas.height;
-                gpu.resize_canvas_texture(w, h);
-            }
-            self.push_canvas_uniforms();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        if actions.doc.rotate_cw
+            && self
+                .run_with("image.rotate", serde_json::json!({"angle": "90"}))
+                .is_ok()
+        {
             self.fit_canvas_to_screen();
         }
-        if actions.doc.rotate_ccw {
-            self.docs.active_mut().canvas.rotate_90_ccw();
-            if let Some(gpu) = &mut self.win.gpu {
-                let w = self.docs.active().canvas.width;
-                let h = self.docs.active().canvas.height;
-                gpu.resize_canvas_texture(w, h);
-            }
-            self.push_canvas_uniforms();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        if actions.doc.rotate_ccw
+            && self
+                .run_with("image.rotate", serde_json::json!({"angle": "-90"}))
+                .is_ok()
+        {
             self.fit_canvas_to_screen();
         }
         if let Some((w, h, _ox, _oy)) = actions.doc.canvas_resize.take() {
@@ -456,15 +440,9 @@ impl App {
     /// giant side-by-side buffer. A document-structure change (like a PDF
     /// project's pages), not part of the per-page canvas undo history.
     pub fn add_artboard(&mut self) {
-        self.sync_brush_gpu_to_cpu();
-        let idx = self.docs.active_doc_idx;
-        let new_index = self.docs.documents[idx].add_blank_page();
-        let count = self.docs.documents[idx].page_count();
-        // Swapped the active canvas → full GPU/view resync (same path as a tab or
-        // PDF-page switch), then frame the fresh page.
-        self.refresh_active_document();
-        self.fit_canvas_to_screen();
-        self.shell.status_msg = format!("Đã thêm trang {} / {count}", new_index + 1);
+        // The page shown changes: full GPU/view resync and a fresh frame (the
+        // engine's `PageShown`), the status line from the command.
+        let _ = self.run_now("page.add");
     }
 
     /// Switch the page-tab bar / canvas to page `index`: flush pending edits into
@@ -477,13 +455,10 @@ impl App {
         {
             return;
         }
-        self.sync_brush_gpu_to_cpu();
-        self.docs.documents[idx].switch_page(index);
-        // Swapped the active canvas → full GPU/view resync (same path as a tab or
-        // PDF-page switch), then frame the page.
-        self.refresh_active_document();
-        self.fit_canvas_to_screen();
-        self.shell.status_msg = format!("Trang {}", index + 1);
+        let _ = idx;
+        // Swapped the active canvas → full GPU/view resync and a fresh frame
+        // (the engine's `PageShown`).
+        let _ = self.run_with("page.select", serde_json::json!({"page": index}));
     }
 
     /// Open the page-tab rename dialog for page `index`, pre-filling its current

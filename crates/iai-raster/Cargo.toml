@@ -1,0 +1,19 @@
+[package]
+name = "iai-raster"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_raster"
+path = "src/lib.rs"
+
+[dependencies]
+iai-color = { path = "../iai-color" }
+bytemuck = { version = "1.0", features = ["derive"] }
+rayon = "1"
+
+[lints]
+workspace = true

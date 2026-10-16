@@ -1,0 +1,39 @@
+[package]
+name = "iai-engine"
+version = "0.1.0"
+edition = "2021"
+description = "The command engine of iAi: what the GUI, scripts and AI agents call."
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_engine"
+path = "src/lib.rs"
+
+[dependencies]
+iai-ai = { path = "../iai-ai" }
+iai-canvas = { path = "../iai-canvas" }
+iai-color = { path = "../iai-color" }
+iai-diag = { path = "../iai-diag" }
+iai-doc = { path = "../iai-doc" }
+iai-formats = { path = "../iai-formats" }
+iai-geom = { path = "../iai-geom" }
+iai-history = { path = "../iai-history" }
+iai-imaging = { path = "../iai-imaging" }
+iai-platform = { path = "../iai-platform" }
+iai-raster = { path = "../iai-raster" }
+iai-text = { path = "../iai-text" }
+iai-vector = { path = "../iai-vector" }
+base64 = "0.22"
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+image = "0.25"
+parking_lot = "0.12"
+rayon = "1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints]
+workspace = true

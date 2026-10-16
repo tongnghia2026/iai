@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The two lists of sizes the user saves: the Crop tool's and the New Canvas
+/// dialog's. Each is a file of its own, so deleting from one leaves the
+/// other as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizePresetList {
+    Crop,
+    NewCanvas,
+}
+
+impl SizePresetList {
+    /// The Crop tool keeps the file both lists once shared.
+    fn file_name(self) -> &'static str {
+        match self {
+            SizePresetList::Crop => "presets.json",
+            SizePresetList::NewCanvas => "new_canvas_presets.json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SizePreset {
     pub name: String,
     pub width: f32,
@@ -43,33 +62,56 @@ impl SizePreset {
         crate::core::units::to_pixels(self.height, self.unit_enum(), self.dpi, canvas_h).max(1.0)
     }
 
-    fn presets_path() -> Option<std::path::PathBuf> {
+    fn presets_path(list: SizePresetList) -> Option<std::path::PathBuf> {
         let dir = std::env::var("APPDATA")
             .map(|p| std::path::PathBuf::from(p).join("IAI"))
             .unwrap_or_else(|_| std::path::PathBuf::from(".iai"));
         std::fs::create_dir_all(&dir).ok()?;
-        Some(dir.join("presets.json"))
+        Some(dir.join(list.file_name()))
     }
 
-    pub fn save_all(presets: &[SizePreset]) {
-        if let Some(path) = Self::presets_path() {
+    /// Tests neither read nor write the owner's files.
+    pub fn save_all(list: SizePresetList, presets: &[SizePreset]) {
+        if cfg!(test) {
+            return;
+        }
+        if let Some(path) = Self::presets_path(list) {
             if let Ok(json) = serde_json::to_string_pretty(presets) {
                 let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
             }
         }
     }
 
-    pub fn load_all() -> Vec<SizePreset> {
-        if let Some(path) = Self::presets_path() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(presets) = serde_json::from_str::<Vec<SizePreset>>(&content) {
-                    if !presets.is_empty() {
-                        return presets;
-                    }
-                }
-            }
+    pub fn load_all(list: SizePresetList) -> Vec<SizePreset> {
+        if cfg!(test) {
+            return Self::from_files(list, None, None);
         }
-        Self::defaults()
+        let read = |list| Self::presets_path(list).and_then(|p| std::fs::read_to_string(p).ok());
+        let own = read(list);
+        // The New Canvas list starts as a copy of the one the two shared, and
+        // is its own from then on.
+        let starting = own.is_none() && list == SizePresetList::NewCanvas;
+        let shared = starting.then(|| read(SizePresetList::Crop)).flatten();
+        let presets = Self::from_files(list, own.as_deref(), shared.as_deref());
+        if starting {
+            Self::save_all(list, &presets);
+        }
+        presets
+    }
+
+    /// `list` as its file holds it (`own`), even emptied. With no file of its
+    /// own (or one that cannot be read), the Crop list is the defaults and
+    /// the New Canvas list what the shared file held (`shared`).
+    fn from_files(
+        list: SizePresetList,
+        own: Option<&str>,
+        shared: Option<&str>,
+    ) -> Vec<SizePreset> {
+        let parse = |text: Option<&str>| serde_json::from_str::<Vec<SizePreset>>(text?).ok();
+        parse(own).unwrap_or_else(|| match list {
+            SizePresetList::Crop => Self::defaults(),
+            SizePresetList::NewCanvas => parse(shared).unwrap_or_default(),
+        })
     }
 
     pub fn defaults() -> Vec<SizePreset> {
@@ -239,6 +281,35 @@ mod tests {
             "a fresh preset must stay pinned to the renderer it was authored with"
         );
         assert_eq!(back[0].settings, preset.settings);
+    }
+
+    #[test]
+    fn the_new_canvas_list_starts_as_a_copy_and_an_emptied_list_stays_empty() {
+        use SizePresetList::{Crop, NewCanvas};
+        let a4 = SizePreset {
+            name: "A4".into(),
+            width: 21.0,
+            height: 29.7,
+            unit: "cm".into(),
+            dpi: 300.0,
+        };
+        let shared = serde_json::to_string(&vec![a4.clone()]).unwrap();
+        let shared = Some(shared.as_str());
+        // Before the split: both lists are what the one file held.
+        assert_eq!(
+            SizePreset::from_files(Crop, shared, shared),
+            vec![a4.clone()]
+        );
+        assert_eq!(SizePreset::from_files(NewCanvas, None, shared), vec![a4]);
+        // Emptied, a list stays empty; it is not refilled with the defaults.
+        assert!(SizePreset::from_files(Crop, Some("[]"), None).is_empty());
+        assert!(SizePreset::from_files(NewCanvas, Some("[]"), shared).is_empty());
+        // Nothing saved yet anywhere.
+        assert_eq!(
+            SizePreset::from_files(Crop, None, None),
+            SizePreset::defaults()
+        );
+        assert!(SizePreset::from_files(NewCanvas, None, None).is_empty());
     }
 
     #[test]

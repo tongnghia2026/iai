@@ -265,31 +265,6 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         ui.add_space(8.0);
                     }
 
-                    // The author's music is one way to support the app: the
-                    // button opens the ways there are, for the user to pick
-                    // one. Its words give way to the icon on a narrow window.
-                    let hint = super::dialogs::SUPPORT_TITLE;
-                    let worded = ui.available_width() > 220.0;
-                    let text = if worded {
-                        format!("{}  {hint}", ph::MUSIC_NOTES)
-                    } else {
-                        ph::MUSIC_NOTES.to_string()
-                    };
-                    let mut music = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(text).size(11.5).color(pal.text_primary),
-                        )
-                        .fill(pal.accent_selected_bg)
-                        .corner_radius(10.0),
-                    );
-                    if !worded {
-                        music = music.on_hover_text(hint);
-                    }
-                    if music.clicked() {
-                        actions.chrome.open_support = Some(crate::ui::SupportDialog::Support);
-                    }
-                    ui.add_space(8.0);
-
                     let drag_w = ui.available_width();
                     if drag_w > 2.0 {
                         let (_, drag_resp) = ui.allocate_exact_size(
@@ -1823,6 +1798,16 @@ fn help_menu(
         ui.close();
     }
     ui.separator();
+    let agent = if data.chrome.agent.on {
+        format!("{} (đang bật)…", super::dialogs::AGENT_TITLE)
+    } else {
+        format!("{}…", super::dialogs::AGENT_TITLE)
+    };
+    if ui.button(agent).clicked() {
+        actions.chrome.open_support = Some(crate::ui::SupportDialog::Agent);
+        ui.close();
+    }
+    ui.separator();
     if ui.button("Kiểm tra cập nhật").clicked() {
         actions.chrome.update_check = true;
         ui.close();
@@ -2134,6 +2119,27 @@ mod tests {
         let image = bar.labels();
         assert!(image.iter().any(|label| label == "Develop..."), "{image:?}");
         assert!(!image.iter().any(|label| label.contains("retouch")));
+    }
+
+    #[cfg(feature = "pro")]
+    #[test]
+    fn only_the_machine_with_the_authors_key_has_the_key_desk_under_help() {
+        use crate::ui::SupportDialog;
+        let entry = format!("{}…", crate::ui::dialogs::ISSUE_TITLE);
+        let mut data = UiData::default();
+        let bar = Bar::new(&data);
+        bar.click("Help");
+        assert!(!bar.labels().contains(&entry));
+
+        data.chrome.pro.can_issue = true;
+        let bar = Bar::new(&data);
+        bar.click("Help");
+        let help = bar.labels();
+        assert!(help.contains(&entry), "{help:?}");
+        assert_eq!(
+            bar.click(&entry).chrome.open_support,
+            Some(SupportDialog::ProIssue)
+        );
     }
 
     #[cfg(not(feature = "pro"))]

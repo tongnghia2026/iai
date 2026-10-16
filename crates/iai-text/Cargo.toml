@@ -1,0 +1,26 @@
+[package]
+name = "iai-text"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_text"
+path = "src/lib.rs"
+
+[dependencies]
+iai-doc = { path = "../iai-doc" }
+iai-geom = { path = "../iai-geom" }
+iai-platform = { path = "../iai-platform" }
+iai-vector = { path = "../iai-vector" }
+ab_glyph = "0.2"
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+flate2 = "1"
+image = "0.25"
+lopdf = { version = "0.43", default-features = false }
+unicode-normalization = "0.1"
+
+[lints]
+workspace = true

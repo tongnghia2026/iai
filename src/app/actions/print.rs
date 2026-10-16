@@ -161,7 +161,7 @@ impl App {
         }
 
         std::thread::spawn(move || {
-            let result = crate::core::print::open_printer_settings(
+            let result = crate::core::printers::open_printer_settings(
                 &worker_printer,
                 settings.as_ref(),
                 owner_hwnd,
@@ -194,7 +194,7 @@ impl App {
             let name = &self.shell.print_selected_printer;
             if settings.matches_printer(name) {
                 if let Ok(updated) =
-                    crate::core::print::query_printer_with_settings(name, Some(settings))
+                    crate::core::printers::query_printer_with_settings(name, Some(settings))
                 {
                     if let Some(slot) = printers.iter_mut().find(|p| p.name == *name) {
                         slot.paper_points = updated.paper_points;
@@ -256,7 +256,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.jobs.pending_printer_refresh = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(crate::core::print::available_printers());
+            let _ = tx.send(crate::core::printers::available_printers());
         });
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -288,7 +288,7 @@ impl App {
             self.jobs.pending_printer_refresh = Some(rx);
             std::thread::spawn(move || {
                 if let Ok(updated) =
-                    crate::core::print::query_printer_with_settings(&name, settings.as_ref())
+                    crate::core::printers::query_printer_with_settings(&name, settings.as_ref())
                 {
                     match printers.iter_mut().find(|p| p.name == name) {
                         Some(slot) => {

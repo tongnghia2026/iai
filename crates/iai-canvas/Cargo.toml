@@ -1,0 +1,34 @@
+[package]
+name = "iai-canvas"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_canvas"
+path = "src/lib.rs"
+
+[dependencies]
+iai-ai = { path = "../iai-ai" }
+iai-color = { path = "../iai-color" }
+iai-develop = { path = "../iai-develop" }
+iai-doc = { path = "../iai-doc" }
+iai-geom = { path = "../iai-geom" }
+iai-history = { path = "../iai-history" }
+iai-imaging = { path = "../iai-imaging" }
+iai-platform = { path = "../iai-platform" }
+iai-raster = { path = "../iai-raster" }
+iai-text = { path = "../iai-text" }
+iai-vector = { path = "../iai-vector" }
+bytemuck = { version = "1.0", features = ["derive"] }
+flate2 = "1"
+image = "0.25"
+lcms2 = "6"
+lopdf = { version = "0.43", default-features = false }
+rayon = "1"
+serde_json = "1"
+
+[lints]
+workspace = true

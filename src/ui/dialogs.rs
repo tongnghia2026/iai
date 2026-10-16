@@ -1,4 +1,5 @@
 mod adjustment;
+mod agent;
 mod author_mail;
 mod document;
 mod filter;
@@ -20,6 +21,7 @@ mod text_font;
 mod update;
 mod vector_style;
 pub(crate) use adjustment::*;
+pub(crate) use agent::*;
 pub(crate) use author_mail::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
@@ -251,6 +253,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             Some(SupportDialog::ProIssue) => pro_issue_dialog(ctx, data, actions),
             #[cfg(not(feature = "pro"))]
             Some(SupportDialog::Pro | SupportDialog::ProIssue) => {}
+            Some(SupportDialog::Agent) => agent_dialog(ctx, data, actions),
             None => {}
         }
     }

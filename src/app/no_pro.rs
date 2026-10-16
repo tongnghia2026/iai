@@ -53,13 +53,7 @@ impl App {
 
     pub(crate) fn forget_portrait_analysis(&mut self, _doc_id: DocumentId) {}
 
-    // The garment of an ID photo, and the print sheets.
-
-    pub(crate) fn note_garment_drop(&mut self) {}
-
-    pub(crate) fn forget_garment_light(&mut self, _doc_id: DocumentId) {}
-
-    pub(crate) fn open_garment_sheets(&mut self, _paths: Vec<PathBuf>) {}
+    // The print sheets.
 
     pub(crate) fn set_print_folder(&mut self, _dir: PathBuf) {}
 

@@ -12,3 +12,6 @@ publish = false
 [lib]
 name = "iai_raw_api"
 path = "src/lib.rs"
+
+[lints]
+workspace = true

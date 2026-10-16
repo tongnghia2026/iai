@@ -83,8 +83,6 @@ pub enum FileDialogResult {
     PickedFolder(PathBuf),
     /// A folder of photos chosen in "Xếp ảnh in", to lay out on print sheets.
     PickedPrintFolder(PathBuf),
-    /// The shop's sheets of garments chosen from the "Áo" box of Ảnh thẻ.
-    OpenedGarmentSheets(Vec<PathBuf>),
     /// A sponsor's logo chosen to send to the author.
     PickedSponsorLogo(PathBuf),
     /// Files selected for insertion into an existing multi-page PDF document.
@@ -111,6 +109,7 @@ impl DialogParent {
     }
 }
 
+#[allow(unsafe_code)] // a window handle made from a raw HWND
 impl winit::raw_window_handle::HasWindowHandle for DialogParent {
     fn window_handle(
         &self,
@@ -126,6 +125,7 @@ impl winit::raw_window_handle::HasWindowHandle for DialogParent {
     }
 }
 
+#[allow(unsafe_code)] // the Windows display handle
 impl winit::raw_window_handle::HasDisplayHandle for DialogParent {
     fn display_handle(
         &self,
@@ -226,30 +226,6 @@ pub fn dialog_pick_folder(parent: Option<DialogParent>, title: &str) -> Option<P
         dialog = dialog.set_parent(&p);
     }
     dialog.pick_folder()
-}
-
-/// Pick the shop's sheets of garments (the "Áo" box of Ảnh thẻ), starting in
-/// `folder` when it is still there. CALL ON A WORKER THREAD.
-pub fn dialog_open_garment_sheets(
-    parent: Option<DialogParent>,
-    folder: Option<PathBuf>,
-) -> Option<Vec<PathBuf>> {
-    let mut dialog = rfd::FileDialog::new()
-        .add_filter(
-            "File áo",
-            &[
-                "psd", "psb", "iai", "png", "tif", "tiff", "jpg", "jpeg", "webp",
-            ],
-        )
-        .add_filter("All files", &["*"])
-        .set_title("Mở file áo");
-    if let Some(folder) = folder.filter(|folder| folder.is_dir()) {
-        dialog = dialog.set_directory(folder);
-    }
-    if let Some(p) = parent {
-        dialog = dialog.set_parent(&p);
-    }
-    dialog.pick_files()
 }
 
 /// Open the Save As dialog. CALL ON A WORKER THREAD.

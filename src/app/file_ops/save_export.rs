@@ -47,18 +47,12 @@ fn write_image(canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<Pat
     }
 }
 
-type PdfExportReceiver = std::sync::mpsc::Receiver<Option<Result<String, String>>>;
-
-/// Run both the native save dialog and the expensive PDF build on a worker.
-/// Keeping the dialog here also avoids re-entering winit/egui's UI thread.
-fn spawn_pdf_export<F>(
+/// Ask where to write the PDF, with the native save dialog on a worker (it
+/// must not re-enter winit/egui's UI thread). `None` when cancelled.
+fn spawn_pdf_dialog(
     parent: Option<file_io::DialogParent>,
     stem: String,
-    export: F,
-) -> PdfExportReceiver
-where
-    F: FnOnce(PathBuf) -> Result<String, String> + Send + 'static,
-{
+) -> Receiver<Option<PathBuf>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut dialog = rfd::FileDialog::new()
@@ -67,13 +61,13 @@ where
         if let Some(parent) = &parent {
             dialog = dialog.set_parent(parent);
         }
-        let result = dialog.save_file().map(|mut path| {
+        let path = dialog.save_file().map(|mut path| {
             if path.extension().is_none() {
                 path.set_extension("pdf");
             }
-            export(path)
+            path
         });
-        let _ = tx.send(result);
+        let _ = tx.send(path);
     });
     rx
 }
@@ -88,68 +82,6 @@ fn write_plate_png(path: &Path, plate: &[u8], width: u32, height: u32) -> Result
 
 fn requires_project_save_on_close(layer_count: usize, is_pdf_document: bool) -> bool {
     is_pdf_document || layer_count > 1
-}
-
-/// Downsample a four-channel page buffer for PDF output while preserving its
-/// physical page size. `target_dpi == 0` means keep the source resolution;
-/// export never upscales a page.
-fn prepare_pdf_pixels(
-    pixels: Vec<u8>,
-    width: u32,
-    height: u32,
-    source_dpi: f32,
-    target_dpi: u32,
-) -> Result<(Vec<u8>, u32, u32, f32), String> {
-    let source_dpi = source_dpi.max(1.0);
-    if target_dpi == 0 || target_dpi as f32 >= source_dpi {
-        return Ok((pixels, width, height, source_dpi));
-    }
-    let scale = target_dpi as f64 / source_dpi as f64;
-    let output_w = ((width as f64 * scale).round() as u32).max(1);
-    let output_h = ((height as f64 * scale).round() as u32).max(1);
-    let source = image::RgbaImage::from_raw(width, height, pixels)
-        .ok_or_else(|| "Bộ đệm trang PDF không đúng kích thước".to_string())?;
-    let output = image::imageops::resize(
-        &source,
-        output_w,
-        output_h,
-        image::imageops::FilterType::Lanczos3,
-    );
-    Ok((output.into_raw(), output_w, output_h, target_dpi as f32))
-}
-
-/// Encode a set of page snapshots into one multi-page PDF with native vector
-/// overlays, optional downsampling, press marks and an embedded ICC profile.
-/// Runs on the export worker thread (no `App` access), so both the single-doc
-/// page export and the "combine all tabs" export share one encoding path.
-fn build_snapshots_pdf(
-    snapshots: Vec<Canvas>,
-    target_dpi: u32,
-    marks: crate::core::print::PrintMarks,
-    icc: Option<Vec<u8>>,
-) -> Result<Vec<u8>, String> {
-    let count = snapshots.len();
-    let mut encoded = Vec::with_capacity(count);
-    let mut vectors = Vec::with_capacity(count);
-    for canvas in snapshots {
-        let selection = crate::core::print::collect_pdf_vectors(&canvas);
-        let rgba = crate::core::print::pdf_raster_base(&canvas, &selection);
-        let (rgba, width, height, dpi) = prepare_pdf_pixels(
-            rgba,
-            canvas.width,
-            canvas.height,
-            canvas.metadata.resolution_ppi,
-            target_dpi,
-        )
-        .map_err(|e| format!("Lỗi chuẩn bị trang PDF: {e}"))?;
-        let page = crate::core::print::encode_pdf_page(&rgba, width, height, dpi)
-            .map_err(|e| format!("Lỗi mã hoá trang PDF: {e}"))?
-            .with_vector_space(canvas.width, canvas.height);
-        encoded.push(page);
-        vectors.push(selection.objects);
-    }
-    crate::core::print::build_pdf_multipage_encoded(&encoded, &vectors, marks, icc.as_deref())
-        .map_err(|e| format!("Lỗi tạo PDF: {e}"))
 }
 
 impl App {
@@ -752,7 +684,7 @@ impl App {
     pub fn export_svg(&mut self) {
         self.sync_brush_gpu_to_cpu();
         let idx = self.docs.active_doc_idx;
-        let svg = match crate::core::svg::build_svg(&self.docs.documents[idx].canvas) {
+        let svg = match crate::formats::svg::build_svg(&self.docs.documents[idx].canvas) {
             Ok(svg) => svg,
             Err(e) => {
                 self.shell.status_msg = format!("SVG export error: {e}");
@@ -968,12 +900,31 @@ impl App {
     /// positions in the active document (or in the imported PDF's selected-page
     /// list), always written in document order.
     pub fn run_pdf_export(&mut self) {
-        use crate::ui::intent::PdfExportScope;
-
         if self.jobs.pending_pdf_export.is_some() || self.jobs.pending_file_dialog.is_some() {
             self.shell.status_msg = "Một tác vụ xuất tệp khác đang chạy".to_string();
             return;
         }
+        let Some((args, stem)) = self.pdf_export_args() else {
+            return;
+        };
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = file_io::dialog_parent(window);
+        let rx = spawn_pdf_dialog(parent, stem);
+        self.jobs.pending_pdf_export =
+            Some(crate::app::background_jobs::PdfExport::Asking { rx, args });
+        if let Some(window) = &self.win.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The Export PDF dialog's choices as `export.pdf` params (all but the
+    /// path), and the file name to offer. `None` when they ask for no page
+    /// (the dialog is shown again, the status line says why).
+    pub(in crate::app) fn pdf_export_args(&mut self) -> Option<(serde_json::Value, String)> {
+        use crate::ui::intent::PdfExportScope;
+
         let idx = self.docs.active_doc_idx;
         let flow_text_active = self
             .docs
@@ -989,424 +940,138 @@ impl App {
         if !flow_text_active && idx < self.docs.documents.len() {
             self.docs.documents[idx].reconcile_pdf_page_modified();
         }
-        // Batch: combine every open tab into a single PDF (each tab's page(s) →
-        // PDF pages, in tab order). Handled before the per-document page scope,
-        // which only describes the active document.
-        if self.shell.ui.pdf_export_scope == PdfExportScope::AllOpenDocuments {
-            let target_dpi = self.shell.ui.pdf_export_dpi;
-            self.export_all_open_documents_pdf(target_dpi);
-            return;
-        }
-        let Some(doc) = self.docs.documents.get(idx) else {
-            return;
-        };
-        let is_pdf = doc.pdf_document.is_some();
-        let flow_text_document = doc.flow_text.as_ref().and_then(|flow| flow.document_arc());
-        let page_count = if let Some(pdf) = doc.pdf_document.as_ref() {
-            pdf.selected_pages.len().max(1)
-        } else {
-            doc.page_count()
-        };
-        let current = if let Some(pdf) = doc.pdf_document.as_ref() {
-            pdf.selected_pages
-                .iter()
-                .position(|&page| page == pdf.active_page)
-                .unwrap_or(0)
-        } else if let Some(flow) = doc.flow_text.as_ref() {
-            flow.active_page()
-        } else {
-            doc.active_artboard.min(page_count.saturating_sub(1))
-        };
-        let pages = match self.shell.ui.pdf_export_scope {
-            PdfExportScope::AllPages => Ok((0..page_count).collect()),
-            PdfExportScope::CurrentPage => Ok(vec![current]),
-            PdfExportScope::Range => {
-                crate::ui::intent::parse_pdf_page_range(&self.shell.ui.pdf_export_range, page_count)
-            }
-            // Combining all tabs is dispatched above with an early return.
-            PdfExportScope::AllOpenDocuments => {
-                unreachable!("AllOpenDocuments is handled before the page-scope match")
-            }
-        };
-        let pages = match pages {
-            Ok(pages) if !pages.is_empty() => pages,
-            Ok(_) => {
-                self.shell.status_msg = "Không có trang nào để xuất PDF".to_string();
-                self.shell.ui.show_pdf_export_dialog = true;
-                return;
-            }
-            Err(error) => {
-                self.shell.status_msg = error;
-                self.shell.ui.show_pdf_export_dialog = true;
-                return;
-            }
-        };
+        let doc = self.docs.documents.get(idx)?;
+        let marks = self.shell.ui.export_pdf_marks;
+        let mut args = serde_json::json!({
+            "cropMarks": marks.crop_marks,
+            "registrationMarks": marks.registration_marks,
+            "bleedMm": marks.bleed_mm.clamp(0.0, 20.0),
+            "embedIcc": self.shell.ui.export_embed_icc,
+        });
         let target_dpi = self.shell.ui.pdf_export_dpi;
-        if let Some(document) = flow_text_document {
-            self.export_flow_text_pdf_selected(document, pages);
-        } else if is_pdf {
-            self.export_pdf_document_selected(idx, &pages, target_dpi);
+        if target_dpi > 0 {
+            args["dpi"] = target_dpi.clamp(36, 2400).into();
+        }
+        // Batch: combine every open tab into a single PDF (each tab's page(s) →
+        // PDF pages, in tab order). The page scope only describes the active
+        // document.
+        if self.shell.ui.pdf_export_scope == PdfExportScope::AllOpenDocuments {
+            args["allOpenDocuments"] = true.into();
         } else {
-            self.export_document_pages_pdf_selected(&pages, target_dpi);
-        }
-    }
-
-    /// Export the canonical flowing-text model through the application's shared
-    /// PDF job queue. The output remains vector/selectable and no canvas/GPU
-    /// snapshot is created.
-    fn export_flow_text_pdf_selected(
-        &mut self,
-        document: std::sync::Arc<crate::core::text_document::TextDocument>,
-        pages: Vec<usize>,
-    ) {
-        let idx = self.docs.active_doc_idx;
-        let stem = self
-            .docs
-            .documents
-            .get(idx)
-            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
-            .and_then(|path| path.file_stem())
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("tai-lieu")
-            .to_string();
-        let Some(window) = self.win.window.as_ref() else {
-            return;
-        };
-        let parent = file_io::dialog_parent(window);
-        let page_total = pages.len();
-        let rx = spawn_pdf_export(parent, stem, move |path| {
-            let mut font_system = cosmic_text::FontSystem::new();
-            let layout = crate::core::text_layout::DocumentLayout::build(
-                document.as_ref(),
-                96.0,
-                &mut font_system,
-            );
-            layout.write_text_pdf_pages(&mut font_system, &path, &pages)?;
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            Ok(format!("Đã xuất PDF văn bản {page_total} trang: {name}"))
-        });
-        self.jobs.pending_pdf_export = Some(rx);
-        self.shell.status_msg = format!("Đang xuất PDF văn bản {page_total} trang…");
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Export selected pages of the active artboard document as one PDF, with
-    /// native vector overlays, optional downsampling, ICC and press marks.
-    fn export_document_pages_pdf_selected(&mut self, page_indices: &[usize], target_dpi: u32) {
-        let idx = self.docs.active_doc_idx;
-        let Some(doc) = self.docs.documents.get(idx) else {
-            return;
-        };
-        let canvases = doc.all_page_canvases();
-        let mut snapshots = Vec::with_capacity(page_indices.len());
-        for &page_index in page_indices {
-            let snapshot = if let Some(merged) = doc.page_render_canvas(page_index) {
-                merged
-            } else if let Some(&canvas) = canvases.get(page_index) {
-                canvas.export_snapshot()
+            let page_count = if let Some(pdf) = doc.pdf_document.as_ref() {
+                pdf.selected_pages.len().max(1)
             } else {
-                self.shell.status_msg = format!("Trang {} không tồn tại", page_index + 1);
-                return;
+                doc.page_count()
             };
-            snapshots.push(snapshot);
+            let current = if let Some(pdf) = doc.pdf_document.as_ref() {
+                pdf.selected_pages
+                    .iter()
+                    .position(|&page| page == pdf.active_page)
+                    .unwrap_or(0)
+            } else if let Some(flow) = doc.flow_text.as_ref() {
+                flow.active_page()
+            } else {
+                doc.active_artboard.min(page_count.saturating_sub(1))
+            };
+            let pages = match self.shell.ui.pdf_export_scope {
+                PdfExportScope::CurrentPage => Ok(vec![current]),
+                PdfExportScope::Range => crate::ui::intent::parse_pdf_page_range(
+                    &self.shell.ui.pdf_export_range,
+                    page_count,
+                ),
+                PdfExportScope::AllPages | PdfExportScope::AllOpenDocuments => {
+                    Ok((0..page_count).collect())
+                }
+            };
+            let pages = match pages {
+                Ok(pages) if !pages.is_empty() => pages,
+                Ok(_) => {
+                    self.shell.status_msg = "Không có trang nào để xuất PDF".to_string();
+                    self.shell.ui.show_pdf_export_dialog = true;
+                    return None;
+                }
+                Err(error) => {
+                    self.shell.status_msg = error;
+                    self.shell.ui.show_pdf_export_dialog = true;
+                    return None;
+                }
+            };
+            args["doc"] = doc.id.0.into();
+            args["pages"] = pages.into();
         }
-        if snapshots.is_empty() {
-            self.shell.status_msg = "Không có trang nào để xuất PDF".to_string();
-            return;
-        }
-
-        let stem = self
-            .docs
-            .documents
-            .get(idx)
-            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
+        // The file name offered: the document's, or a neutral one.
+        let stem = doc
+            .pdf_document
+            .as_ref()
+            .map(|pdf| pdf.source.as_path())
+            .or(doc.path.as_deref())
+            .or(self.docs.current_file.as_deref())
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
-            .unwrap_or("document")
-            .to_string();
-
-        let Some(window) = self.win.window.as_ref() else {
-            return;
-        };
-        let parent = file_io::dialog_parent(window);
-        let marks = self.shell.ui.export_pdf_marks;
-        let icc = self
-            .shell
-            .ui
-            .export_embed_icc
-            .then(crate::core::cms::srgb_icc_bytes);
-        let n = snapshots.len();
-        let rx = spawn_pdf_export(parent, stem, move |path| {
-            let bytes = build_snapshots_pdf(snapshots, target_dpi, marks, icc)?;
-            crate::core::atomic_file::write_bytes_atomic(&path, &bytes)
-                .map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            Ok(format!("Đã xuất PDF {n} trang: {name}"))
-        });
-        self.jobs.pending_pdf_export = Some(rx);
-        self.shell.status_msg = format!("Đang xuất PDF {n} trang…");
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Combine every open document tab into one PDF — each tab contributes all of
-    /// its page canvases, in tab order — for the "many scanned photos → one PDF"
-    /// workflow. Flowing-text tabs (whose canvas is only a placeholder) are
-    /// skipped. The active tab's pending edits are already committed by
-    /// [`Self::run_pdf_export`] before this runs; inactive tabs are exported from
-    /// their CPU-resident canvases.
-    fn export_all_open_documents_pdf(&mut self, target_dpi: u32) {
-        let mut snapshots: Vec<Canvas> = Vec::new();
-        let mut included_docs = 0usize;
-        for doc in &self.docs.documents {
-            // A flowing-text tab has no raster page to place; leave it out rather
-            // than inserting its 1×1 compatibility canvas as a blank page.
-            if doc.is_flow_text() {
-                continue;
-            }
-            let canvases = doc.all_page_canvases();
-            let mut added_page = false;
-            for page_index in 0..canvases.len() {
-                let snapshot = if let Some(merged) = doc.page_render_canvas(page_index) {
-                    merged
-                } else if let Some(&canvas) = canvases.get(page_index) {
-                    canvas.export_snapshot()
-                } else {
-                    continue;
-                };
-                snapshots.push(snapshot);
-                added_page = true;
-            }
-            if added_page {
-                included_docs += 1;
-            }
-        }
-        if snapshots.is_empty() {
-            self.shell.status_msg = "Không có tài liệu nào để gộp PDF".to_string();
-            return;
-        }
-
-        // Suggest a filename from the active tab's folder/name, defaulting to a
-        // neutral batch name.
-        let idx = self.docs.active_doc_idx;
-        let stem = self
-            .docs
-            .documents
-            .get(idx)
-            .and_then(|doc| doc.path.as_deref().or(self.docs.current_file.as_deref()))
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
-            .unwrap_or("tai-lieu")
-            .to_string();
-
-        let Some(window) = self.win.window.as_ref() else {
-            return;
-        };
-        let parent = file_io::dialog_parent(window);
-        let marks = self.shell.ui.export_pdf_marks;
-        let icc = self
-            .shell
-            .ui
-            .export_embed_icc
-            .then(crate::core::cms::srgb_icc_bytes);
-        let page_total = snapshots.len();
-        let doc_total = included_docs;
-        let rx = spawn_pdf_export(parent, stem, move |path| {
-            let bytes = build_snapshots_pdf(snapshots, target_dpi, marks, icc)?;
-            crate::core::atomic_file::write_bytes_atomic(&path, &bytes)
-                .map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            Ok(format!(
-                "Đã gộp {doc_total} tài liệu ({page_total} trang) thành PDF: {name}"
-            ))
-        });
-        self.jobs.pending_pdf_export = Some(rx);
-        self.shell.status_msg = format!("Đang gộp {doc_total} tài liệu thành PDF…");
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
-        }
-    }
-
-    fn export_pdf_document_selected(
-        &mut self,
-        doc_idx: usize,
-        positions: &[usize],
-        target_dpi: u32,
-    ) -> bool {
-        const PDF_EXPORT_MAX_PIXELS: u64 = 50_000_000;
-        let Some(doc) = self.docs.documents.get(doc_idx) else {
-            return false;
-        };
-        let Some(pdf) = doc.pdf_document.as_ref() else {
-            return false;
-        };
-        let original_source = pdf.source.clone();
-        let source = pdf.effective_source().to_path_buf();
-        let global_edits = pdf.global_edits.clone();
-        let selected_pages: Vec<usize> = positions
-            .iter()
-            .filter_map(|&position| pdf.selected_pages.get(position).copied())
-            .collect();
-        if selected_pages.len() != positions.len() || selected_pages.is_empty() {
-            self.shell.status_msg = "Phạm vi trang PDF không hợp lệ".to_string();
-            return true;
-        }
-        let all_pages_selected = selected_pages.len() == pdf.page_count
-            && selected_pages.iter().copied().eq(0..pdf.page_count);
-        let clean = !doc.is_modified();
-        let Some(window) = self.win.window.as_ref() else {
-            return true;
-        };
-        let parent = file_io::dialog_parent(window);
-        let stem = original_source
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("document");
-        let mut snapshots = Vec::with_capacity(selected_pages.len());
-        for &page_index in &selected_pages {
-            let mut edited = if page_index == pdf.active_page && pdf.active_page_modified {
-                doc.pdf_page
-                    .as_ref()
-                    .map(|reference| (doc.canvas.export_snapshot(), reference.clone()))
+            .unwrap_or(if flow_text_active {
+                "tai-lieu"
             } else {
-                pdf.edited_pages
-                    .get(&page_index)
-                    .map(|page| (page.canvas.export_snapshot(), page.reference.clone()))
-            };
-            if let Some((canvas, _)) = edited.as_mut() {
-                if let Some(overlay) = crate::core::document::build_pdf_global_overlay_stack(
-                    &global_edits,
-                    page_index,
-                    canvas.width,
-                    canvas.height,
-                ) {
-                    canvas.layer_stack = canvas.layer_stack.with_overlay(&overlay);
-                }
-            }
-            snapshots.push((page_index, edited));
-        }
-        let baked_global_pages: Vec<usize> = snapshots
-            .iter()
-            .filter_map(|(page_index, edited)| edited.is_some().then_some(*page_index))
-            .collect();
-        let stem = stem.to_string();
-        let page_total = snapshots.len();
-        let rx = spawn_pdf_export(parent, stem, move |path| {
-            if clean && all_pages_selected && global_edits.is_empty() {
-                let bytes = std::fs::read(&source).map_err(|e| format!("Lỗi đọc PDF gốc: {e}"))?;
-                crate::core::atomic_file::write_bytes_atomic(&path, &bytes)
-                    .map_err(|e| format!("Lỗi sao chép PDF gốc: {e}"))?;
-                return Ok("Đã xuất PDF vector gốc".to_string());
-            }
-
-            let compatibility =
-                crate::formats::pdf::hybrid_overlay_compatibility(&source).unwrap_or_default();
-            let make_pages = |allow_overlay: bool| {
-                let mut pages = Vec::with_capacity(snapshots.len());
-                for (page_index, edited) in &snapshots {
-                    let content = if let Some((canvas, reference)) = edited {
-                        let overlay = (allow_overlay
-                            && compatibility.get(*page_index).copied().unwrap_or(false))
-                        .then(|| reference.safe_overlay_pdf_parts(canvas))
-                        .flatten();
-                        if let Some((rgba, vectors)) = overlay {
-                            crate::formats::pdf::HybridPageContent::Overlay {
-                                rgba,
-                                vectors,
-                                width: canvas.width,
-                                height: canvas.height,
-                                dpi: canvas.metadata.resolution_ppi,
-                            }
-                        } else {
-                            let rgba = canvas.export_flat_up_to(PDF_EXPORT_MAX_PIXELS).ok_or_else(
-                                || format!("Trang PDF {} quá lớn để xuất an toàn", page_index + 1),
-                            )?;
-                            let (rgba, width, height, dpi) = prepare_pdf_pixels(
-                                rgba,
-                                canvas.width,
-                                canvas.height,
-                                canvas.metadata.resolution_ppi,
-                                target_dpi,
-                            )?;
-                            crate::formats::pdf::HybridPageContent::Raster {
-                                rgba,
-                                width,
-                                height,
-                                dpi,
-                            }
-                        }
-                    } else {
-                        crate::formats::pdf::HybridPageContent::Original
-                    };
-                    pages.push(crate::formats::pdf::HybridPage {
-                        source_index: *page_index,
-                        content,
-                    });
-                }
-                Ok::<_, String>(pages)
-            };
-            let hybrid = make_pages(true)
-                .and_then(|pages| {
-                    crate::formats::pdf::build_hybrid_pdf_with_global_edits_baked(
-                        &source,
-                        &pages,
-                        &global_edits,
-                        &baked_global_pages,
-                    )
-                })
-                .or_else(|_| {
-                    make_pages(false).and_then(|pages| {
-                        crate::formats::pdf::build_hybrid_pdf_with_global_edits_baked(
-                            &source,
-                            &pages,
-                            &global_edits,
-                            &baked_global_pages,
-                        )
-                    })
-                })
-                .map_err(|e| format!("Lỗi tạo PDF: {e}"))?;
-            crate::core::atomic_file::write_bytes_atomic(&path, &hybrid.bytes)
-                .map_err(|e| format!("Lỗi ghi PDF: {e}"))?;
-            Ok(format!(
-                "Đã xuất PDF hybrid ({} vector, {} overlay, {} raster)",
-                hybrid.vector_pages, hybrid.overlay_pages, hybrid.raster_pages
-            ))
-        });
-        self.jobs.pending_pdf_export = Some(rx);
-        self.shell.status_msg = format!("Đang xuất PDF {page_total} trang…");
-        if let Some(window) = &self.win.window {
-            window.request_redraw();
-        }
-        true
+                "document"
+            })
+            .to_string();
+        Some((args, stem))
     }
 
-    /// Drain the background PDF worker without ever blocking the UI thread.
+    /// Once the save dialog answers, write the PDF with `export.pdf` on a
+    /// worker; never blocks the UI thread.
     pub(crate) fn poll_pdf_export(&mut self) {
-        let result = match self.jobs.pending_pdf_export.as_ref() {
-            Some(rx) => rx.try_recv(),
-            None => return,
+        use crate::app::background_jobs::PdfExport;
+        let Some(PdfExport::Asking { rx, .. }) = self.jobs.pending_pdf_export.as_ref() else {
+            return;
         };
-        match result {
-            Ok(result) => {
-                self.jobs.pending_pdf_export = None;
-                match result {
-                    None => self.shell.status_msg = "Đã hủy xuất PDF".to_string(),
-                    Some(Ok(message)) => self.shell.status_msg = message,
-                    Some(Err(error)) => self.report_save_error(error),
-                }
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+        let answer = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(TryRecvError::Empty) => {
                 if let Some(window) = &self.win.window {
                     window.request_redraw();
                 }
+                return;
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(TryRecvError::Disconnected) => {
                 self.jobs.pending_pdf_export = None;
                 self.shell.status_msg = "Tác vụ xuất PDF dừng ngoài dự kiến".to_string();
+                return;
             }
+        };
+        let Some(PdfExport::Asking { mut args, .. }) = self.jobs.pending_pdf_export.take() else {
+            return;
+        };
+        let Some(path) = answer else {
+            self.shell.status_msg = "Đã hủy xuất PDF".to_string();
+            return;
+        };
+        args["path"] = path.display().to_string().into();
+        match self.start_command("export.pdf", args) {
+            Some(iai_engine::Reply::Started { job }) => {
+                self.jobs.pending_pdf_export = Some(PdfExport::Writing(job));
+            }
+            Some(iai_engine::Reply::Done { .. }) => {}
+            None => {
+                let error = self.shell.status_msg.clone();
+                self.report_save_error(error);
+            }
+        }
+    }
+
+    /// `export.pdf` ended: the export no longer holds the window; a failure
+    /// is shown as a save failure is.
+    pub(crate) fn on_pdf_export_finished(
+        &mut self,
+        job: iai_engine::JobId,
+        error: Option<&iai_engine::CmdError>,
+    ) {
+        use crate::app::background_jobs::PdfExport;
+        if !matches!(self.jobs.pending_pdf_export, Some(PdfExport::Writing(j)) if j == job) {
+            return;
+        }
+        self.jobs.pending_pdf_export = None;
+        if let Some(e) = error {
+            self.report_save_error(crate::app::engine::error_line(e));
         }
     }
 
@@ -1479,8 +1144,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_pdf_pixels, requires_project_save_on_close, App, SaveWait};
+    use super::{requires_project_save_on_close, App, SaveWait};
     use crate::core::canvas::Canvas;
+    use crate::core::print::prepare_pdf_pixels;
 
     /// A fresh folder per test, removed when the test ends.
     struct Folder(std::path::PathBuf);
@@ -1691,6 +1357,73 @@ mod tests {
                 "{name}: not pointed at a file never written"
             );
         }
+    }
+
+    /// The Export PDF dialog as the window runs it: its choices, the save
+    /// dialog's answer, then `export.pdf` on a worker. The window is held
+    /// until the file is written; a page range picks the pages.
+    fn export_pdf_to(app: &mut App, path: &std::path::Path) {
+        use crate::app::background_jobs::PdfExport;
+        let (args, _stem) = app.pdf_export_args().expect("pages to export");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some(path.to_path_buf())).unwrap();
+        app.jobs.pending_pdf_export = Some(PdfExport::Asking { rx, args });
+        app.poll_pdf_export();
+        assert!(matches!(
+            app.jobs.pending_pdf_export,
+            Some(PdfExport::Writing(_))
+        ));
+        assert!(app.modal_lock_active(), "the export holds the window");
+        app.finish_commands(std::time::Duration::from_secs(60));
+        assert!(app.jobs.pending_pdf_export.is_none());
+    }
+
+    #[test]
+    fn a_pdf_is_exported_through_the_command_with_the_pages_asked_for() {
+        use crate::ui::intent::PdfExportScope;
+        let folder = Folder::new("pdf");
+        let mut app = app_with_image([10, 200, 30, 255]);
+        app.add_artboard();
+        app.add_artboard();
+        let all = folder.0.join("ba trang.pdf");
+        export_pdf_to(&mut app, &all);
+        assert_eq!(app.shell.status_msg, "Đã xuất PDF 3 trang: ba trang.pdf");
+        assert!(std::fs::read(&all).unwrap().starts_with(b"%PDF"));
+
+        app.shell.ui.pdf_export_scope = PdfExportScope::Range;
+        app.shell.ui.pdf_export_range = "1, 3".to_string();
+        let two = folder.0.join("hai.pdf");
+        export_pdf_to(&mut app, &two);
+        assert_eq!(app.shell.status_msg, "Đã xuất PDF 2 trang: hai.pdf");
+
+        app.shell.ui.pdf_export_scope = PdfExportScope::AllOpenDocuments;
+        let combined = folder.0.join("gop.pdf");
+        export_pdf_to(&mut app, &combined);
+        assert_eq!(
+            app.shell.status_msg,
+            "Đã gộp 1 tài liệu (3 trang) thành PDF: gop.pdf"
+        );
+
+        // A range naming no page asks again, and starts nothing.
+        app.shell.ui.pdf_export_scope = PdfExportScope::Range;
+        app.shell.ui.pdf_export_range = "7".to_string();
+        assert!(app.pdf_export_args().is_none());
+        assert!(app.shell.ui.show_pdf_export_dialog);
+    }
+
+    #[test]
+    fn a_pdf_that_cannot_be_written_raises_the_save_error() {
+        let mut app = app_with_image([10, 200, 30, 255]);
+        let folder = Folder::new("pdf_fail");
+        // A folder where the file should be.
+        let path = folder.0.join("la thu muc.pdf");
+        std::fs::create_dir_all(&path).unwrap();
+        export_pdf_to(&mut app, &path);
+        assert!(
+            app.shell.ui.save_error.is_some(),
+            "{}",
+            app.shell.status_msg
+        );
     }
 
     #[test]

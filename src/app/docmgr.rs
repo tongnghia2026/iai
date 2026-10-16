@@ -209,7 +209,6 @@ impl App {
         }
         let removed = self.docs.documents.remove(idx);
         self.forget_portrait_analysis(removed.id);
-        self.forget_garment_light(removed.id);
         self.drop_doc_ai_jobs(removed.id);
         self.docs.pdf_render_services.remove(&removed.id);
         self.clear_autosave_for(removed.id);
@@ -462,6 +461,23 @@ mod tests {
         // The confirmation itself must remain interactive; only unrelated
         // blocking dialogs participate in the global modal action lock.
         assert!(!app.modal_lock_active());
+    }
+
+    #[test]
+    fn a_pdf_page_rendering_on_a_page_switch_does_not_grey_the_window() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        let doc = app.docs.active().id;
+        app.jobs.pending_pdf_page_render = Some((doc, 1));
+        // Input waits for the page…
+        assert!(app.is_blocking_modal());
+        assert!(app.modal_lock_active());
+        // …but menus, panels and bars stay as they are: greying them for a
+        // tenth of a second flashed the window at every page.
+        assert!(!app.chrome_locked());
+        // A real modal still greys them.
+        app.shell.ui.document_editor_error = Some("snapshot failed".to_string());
+        assert!(app.chrome_locked());
     }
 
     #[test]

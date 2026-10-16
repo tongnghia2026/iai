@@ -23,3 +23,6 @@ iai-raw-api = { path = "../iai-raw-api" }
 rawloader = "0.37"
 # CR3 support and a much larger camera database than rawloader.
 rawler = "0.7"
+
+[lints]
+workspace = true

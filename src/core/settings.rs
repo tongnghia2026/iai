@@ -78,7 +78,7 @@ pub struct AppSettings {
     #[serde(default = "default_autosave_secs")]
     pub autosave_interval_secs: u32,
     /// Startup value of the snapping toggle (guides / layer move / transform).
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub snap_default: bool,
     /// Let the AI features (Select Subject, Smart Fill) run on the GPU via
     /// DirectML when a capable adapter is present.
@@ -106,7 +106,7 @@ impl Default for AppSettings {
             default_unit: default_unit(),
             autosave_enabled: default_true(),
             autosave_interval_secs: default_autosave_secs(),
-            snap_default: false,
+            snap_default: default_true(),
             ai_use_gpu: default_true(),
             shortcuts: Default::default(),
             brush_cursor: BrushCursorStyle::default(),

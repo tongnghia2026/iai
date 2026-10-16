@@ -1,8 +1,9 @@
 //! Application glue for document-owned process swatches.
 
 use crate::app::state::App;
+use crate::core::command_palette::ReplaceDocumentPalette;
 use crate::core::gateway::ChangeKind;
-use crate::core::palette::{DocumentSwatch, ReplaceDocumentPalette, MAX_DOCUMENT_SWATCHES};
+use crate::core::palette::{DocumentSwatch, MAX_DOCUMENT_SWATCHES};
 use crate::core::vector::color::ColorValue;
 
 impl App {

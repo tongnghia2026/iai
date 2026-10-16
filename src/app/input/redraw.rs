@@ -123,7 +123,8 @@ impl App {
             }
         }
 
-        self.poll_select_subject();
+        self.poll_agent_link();
+        self.poll_engine();
         self.poll_repair_ai();
         if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
             crate::core::lama::preload();

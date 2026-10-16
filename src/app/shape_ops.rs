@@ -61,44 +61,11 @@ impl App {
         data.corner_type = corner_type;
         data.sides = sides.clamp(3, 100);
         data.star_inner = star_inner.clamp(0.05, 0.95);
-        let Some(raster) = data.render() else {
-            return;
-        };
-
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
         let doc_idx = self.docs.active_doc_idx;
         let canvas = &mut self.docs.documents[doc_idx].canvas;
-        let before = LayerStructureCommand::capture_before("Shape", &canvas.layer_stack, cw, ch);
-        let idx = canvas.layer_stack.add_layer(cw, ch);
-
-        let mut tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-        // Keep the layer ink-valid on CMYK documents (mirror → ink).
-        if let Some(conv) = canvas.cmyk_converter() {
-            tiles.encode_ink_from_mirror(&conv);
+        if canvas.add_shape_layer(data, offset).is_none() {
+            return;
         }
-        let layer = &mut canvas.layer_stack.layers[idx];
-        layer.tiles = tiles;
-        layer.width = raster.width;
-        layer.height = raster.height;
-        layer.offset = offset;
-        layer.name = kind.label().to_string();
-        layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(data));
-
-        let mut cmd = before;
-        cmd.capture_after(&canvas.layer_stack, cw, ch);
-        canvas.record(Box::new(cmd));
-        // Make the new shape the sole selection so it (and a later Convert to
-        // Curves) shows the Move tool's on-canvas transform box without an extra
-        // click — the box only shows for a SELECTED layer (see
-        // `active_path_transform_box`). `add_layer` already set `active_idx`.
-        for l in &mut canvas.layer_stack.layers {
-            l.selected = false;
-        }
-        canvas.layer_stack.layers[idx].selected = true;
-        canvas.layer_revision += 1;
 
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
         if let Some(w) = &self.win.window {

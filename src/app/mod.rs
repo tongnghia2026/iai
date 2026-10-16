@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod agent_link;
 pub mod arrow_ops;
 pub mod autosave;
 pub mod background_jobs;
@@ -12,11 +13,10 @@ pub mod document_session;
 #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
 pub mod document_webview;
 pub mod editor_interaction;
+pub mod engine;
 #[cfg(feature = "pro")]
 pub mod ext_bridge;
 pub mod file_ops;
-#[cfg(feature = "pro")]
-pub mod garment_ops;
 #[cfg(feature = "pro")]
 pub mod id_photo_ops;
 pub mod input;

@@ -1,5 +1,7 @@
 //! The four C functions the app calls when this library is a file of its own
 //! (`iai_raw.dll`). `iai_raw_api::ffi` describes them, and what a frame is.
+// Functions exported to C, reading what C hands them.
+#![allow(unsafe_code)]
 
 use std::path::Path;
 
@@ -11,7 +13,8 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if ptr.is_null() || len == 0 {
         &[]
     } else {
-        std::slice::from_raw_parts(ptr, len)
+        // SAFETY: the caller vouches for `len` readable bytes at `ptr`.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 }
 
@@ -24,7 +27,8 @@ pub extern "C" fn iai_raw_abi() -> u32 {
 /// `path_len` readable bytes lie at `path`.
 #[no_mangle]
 pub unsafe extern "C" fn iai_raw_decode_file(path: *const u8, path_len: usize) -> *const Frame {
-    let decoded = match std::str::from_utf8(bytes(path, path_len)) {
+    // SAFETY: the caller vouches for `path_len` bytes at `path`.
+    let decoded = match std::str::from_utf8(unsafe { bytes(path, path_len) }) {
         Ok(path) => crate::decode_file(Path::new(path)),
         Err(_) => Err("the path of the file is not UTF-8".to_owned()),
     };
@@ -35,14 +39,16 @@ pub unsafe extern "C" fn iai_raw_decode_file(path: *const u8, path_len: usize) -
 /// `frame` is a pointer [`iai_raw_decode_file`] returned, given back once.
 #[no_mangle]
 pub unsafe extern "C" fn iai_raw_free(frame: *const Frame) {
-    ffi::take_back(frame)
+    // SAFETY: the caller hands back, once, a frame this library returned.
+    unsafe { ffi::take_back(frame) }
 }
 
 /// # Safety
 /// `file_len` readable bytes lie at `file`.
 #[no_mangle]
 pub unsafe extern "C" fn iai_raw_orientation(file: *const u8, file_len: usize) -> u32 {
-    u32::from(crate::orientation(bytes(file, file_len)).exif())
+    // SAFETY: the caller vouches for `file_len` bytes at `file`.
+    u32::from(crate::orientation(unsafe { bytes(file, file_len) }).exif())
 }
 
 #[cfg(test)]

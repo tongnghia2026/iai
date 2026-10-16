@@ -465,23 +465,13 @@ impl App {
             self.redo_pdf_global_clear();
         }
         if actions.sel.select_all {
-            let (cw, ch) = {
-                let d = self.docs.active();
-                (d.canvas.width, d.canvas.height)
-            };
-            self.docs.active_mut().canvas.selection.select_all();
-            self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
-            self.shell.status_msg = format!("Selected all ({}×{})", cw, ch);
+            let _ = self.run_now("select.all");
         }
         if actions.sel.deselect {
-            self.docs.active_mut().canvas.deselect();
-            self.upload_selection_mask();
-            self.push_selection_uniforms();
+            let _ = self.run_now("select.none");
         }
         if actions.sel.invert_selection {
-            self.docs.active_mut().canvas.invert_selection();
-            self.upload_selection_mask();
-            self.push_selection_uniforms();
+            let _ = self.run_now("select.invert");
         }
     }
 }

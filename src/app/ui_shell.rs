@@ -100,13 +100,17 @@ pub struct UiShell {
     /// The "Làm ảnh thẻ" job (and its wait for the background model).
     #[cfg(feature = "pro")]
     pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
-    /// The garment in the "Áo" box, and the photo that wears it.
-    #[cfg(feature = "pro")]
-    pub(in crate::app) garment: crate::app::garment_ops::GarmentSession,
     /// The folder of photos chosen in "Xếp ảnh in".
     #[cfg(feature = "pro")]
     pub(in crate::app) print_folder: Option<crate::app::actions::impose::PrintFolder>,
-    pub(in crate::app) user_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
+    /// AI agents on this machine may run commands in the window (Help ▸
+    /// "Cho AI điều khiển iAi"); off when `None`.
+    pub(in crate::app) agent_link: Option<crate::app::agent_link::AgentLink>,
+    /// Why turning it on failed, for the dialog to show.
+    pub(in crate::app) agent_link_error: Option<String>,
+    /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.
+    pub(in crate::app) crop_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
+    pub(in crate::app) canvas_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     /// Named Develop slider sets saved by the user (develop_presets.json).
     pub(in crate::app) develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,
     /// User-saved Levels/Curves presets (adjustment_presets.json).

@@ -2,9 +2,32 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
-13/10/2026
-- Nút «AI» trên thanh menu nay mở một cửa sổ hai thẻ, gom mọi tính năng AI về một chỗ: «AI online» (chỉnh ảnh bằng Gemini / ChatGPT) và «AI offline» (làm ảnh thẻ, thay áo, chỉnh chân dung, xếp ảnh in). «Auto retouch» trước nằm ở menu Image nay là thẻ «AI offline».
+16/10/2026
+- Mới: menu Help ▸ «Cho AI điều khiển iAi». Bật lên thì trợ lý AI trên máy (Claude Desktop, Claude Code) tự làm theo lời bạn nói: mở ảnh, tách nền, làm ảnh thẻ, xếp ảnh in, xuất PDF. Mỗi bước hiện ngay trên màn hình và Ctrl+Z được; AI không được in, không được ra mạng, chỉ đụng tới thư mục bạn cho phép.
+- Chuyển trang trong tài liệu PDF nhiều trang: thanh menu, bảng Layer và các thanh xung quanh không còn nháy.
+- Xếp ảnh in chạy nền: app không đứng hình trong lúc dựng tờ in. Hỏng giữa chừng thì ảnh trả về như cũ.
+- Chọn tất cả (Ctrl+A) nay là một bước Ctrl+Z như Photoshop, thanh dưới báo cỡ vùng chọn.
+- Phần bên trong của iAi được làm lại cho chắc chắn hơn. Thấy chỗ nào khác lạ, bấm Help ▸ «Góp ý, báo lỗi».
+- Đường gióng kéo ra từ thước nay màu xanh như Photoshop, nhìn rõ trên trang trắng lẫn trên ảnh. Muốn bỏ một đường: chọn công cụ Move, bấm vào đường đó (nó đậm lên) rồi nhấn Delete, khỏi phải kéo về thước.
+- Khung trên gọn lại: hết khe hở dưới thanh tùy chọn. Bảng Layer và dải màu bên phải cao lên sát thanh tùy chọn; thước ngang và thanh tab dừng ở mép bảng Layer như Photoshop.
+- Tạo trang mới (Ctrl+N) mở sẵn khổ A4, 300 dpi, đơn vị cm, có thêm hai nút chọn khổ dọc / khổ ngang. Vừa chép một ảnh thì bảng lấy đúng cỡ và độ phân giải của ảnh đó, đơn vị px. Các mẫu A4 trong danh sách nay hiện bằng cm.
+- Preset kích thước của công cụ Crop và của tạo trang mới (Ctrl+N) nay là hai danh sách riêng: xóa bên này không mất bên kia.
+- Xóa preset nay qua dòng «Delete preset…» cuối danh sách: mở một cửa sổ, chọn tên rồi bấm Xóa. Hết cảnh lỡ tay bấm trúng dấu x nằm sát tên.
+- Danh sách preset của Crop đưa các preset bạn đã lưu lên đầu, và dài theo số preset: lưu thêm thì nó tự dài ra, chạm tới thanh dưới cùng mới dừng lại. Khỏi phải lăn chuột tìm.
+- Thanh quản lý trang ở dưới thấp hẳn xuống, chừa thêm chỗ làm việc.
+- Số trên thước dọc xoay dọc theo thước như Photoshop, số dài (1000, 10000…) không còn bị mất.
+- Bắt dính (nút nam châm) bật sẵn khi mở app và bắt dính ngay từ lần kéo đầu tiên. Trước đây nút hiện bật mà kéo layer vẫn chưa bắt dính.
+- Cắt phối cảnh (Perspective Crop) mặc định đơn vị mm, 300 dpi.
+- Thanh menu gọn hơn: bỏ nút «Ủng hộ tác giả» ở góc trên, mục này vẫn có trong menu Help.
+- Chép nguyên một nhóm layer sang tab mới: chọn nhóm, bấm Ctrl+C, Ctrl+N rồi Ctrl+V. Nhóm sang tab mới vẫn là nhóm, đủ các layer bên trong (trước đây bị dán thành một ảnh phẳng).
+- Chép ảnh sang một trang có cỡ khác (ví dụ dán nhiều ảnh thẻ lên tờ A4): ảnh nào dán vào cũng nằm giữa trang. Trước đây ảnh đầu vào giữa, các ảnh sau dồn vào một góc. Dán trong cùng trang, hoặc sang trang cùng cỡ, thì vẫn giữ đúng vị trí cũ.
+- Nhóm đang chọn nay đi cả khối: kéo bằng công cụ Move, bấm phím mũi tên, hoặc giữ Alt rồi kéo để nhân bản cả nhóm. Nhóm đang mở trong bảng Layer thì bấm vào từng layer vẫn chọn riêng layer đó như cũ.
+- «Duplicate» và Ctrl+J khi chọn cả nhóm lẫn layer lẻ nay chép đủ mọi thứ đang chọn.
+- Xếp ảnh in khỏi phải chờ: ảnh thẻ đã chỉnh xong, sửa tay thêm, rồi bấm đúp layer «Chân dung» mở lại bảng thì bấm trang in được ngay, không phải đợi app nhận diện lại khuôn mặt. Ảnh xếp ra đúng như đang thấy trên màn hình.
+- Nút «AI» trên thanh menu nay mở một cửa sổ hai thẻ, gom mọi tính năng AI về một chỗ: «AI online» (chỉnh ảnh bằng Gemini / ChatGPT) và «AI offline» (làm ảnh thẻ, chỉnh chân dung, xếp ảnh in). «Auto retouch» trước nằm ở menu Image nay là thẻ «AI offline».
 - Bỏ «AI Auto Retouch»: phần chỉnh chân dung ở thẻ «AI offline» đã làm tốt hơn việc đó.
+- Bỏ ghép áo ở ô Ảnh thẻ (hàng «Áo»): muốn thay áo thì dùng thẻ «AI online». Ảnh đã ghép áo trước đây vẫn mở được, áo là một layer thường.
+- «Select Subject» gọn hơn: bỏ ô chọn kiểu nhận diện, chỉ giữ kiểu mặc định.
 - Mọi thứ trong cửa sổ «AI» là «Gói Pro»: ai cũng được dùng thử 7 ngày, sau đó cần mã mở khóa (300.000 đ, mua một lần cho một máy).
 - Phần chính của iAi vẫn miễn phí như trước.
 - Mua gói Pro ngay trong app: menu Help ▸ «Gói Pro» có mã chuyển khoản, mã máy của bạn và chỗ nhập mã mở khóa.

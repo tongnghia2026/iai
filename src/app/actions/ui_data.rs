@@ -1629,8 +1629,6 @@ impl App {
             has_selection: self.docs.active().canvas.selection.active,
             select_subject_busy: self.jobs.select_subject.is_busy(),
             select_subject_status_msg: self.jobs.select_subject.status_text(),
-            select_subject_model: self.jobs.select_subject.selected_model(),
-            yolo_people_only: self.jobs.select_subject.people_only(),
             show_refine_panel: self.edit.show_refine_panel,
             refine_params: self.refine_params(),
             refine_can_undo: self
@@ -1764,6 +1762,7 @@ impl App {
             portrait_session: false,
             portrait_status: String::new(),
             portrait_ready: false,
+            portrait_adds_nothing: false,
             portrait_faces: Vec::new(),
             portrait_hair: false,
             portrait_body: None,
@@ -1782,12 +1781,6 @@ impl App {
             id_photo_error: Default::default(),
             id_photo_busy: false,
             id_photo_made: false,
-            garment_thumb: Default::default(),
-            garment_name: Default::default(),
-            garment_worn: false,
-            garment_busy: false,
-            garment_status: Default::default(),
-            garment_error: Default::default(),
             print_folder: None,
             scan_is_pdf: self
                 .docs
@@ -1991,10 +1984,11 @@ impl App {
             paint_color_dialog_original: self.shell.ui.paint_color_dialog_original,
             paint_color_dialog_live_preview: self.shell.ui.paint_color_dialog_live_preview,
             paint_color_dialog_center_next: self.shell.ui.paint_color_dialog_center_next,
-            user_presets: self.shell.user_presets.clone(),
+            crop_presets: self.shell.crop_presets.clone(),
+            canvas_presets: self.shell.canvas_presets.clone(),
             adjustment_presets: self.shell.adjustment_presets.clone(),
             show_preset_dialog: self.shell.ui.show_preset_dialog,
-            show_delete_preset_dialog: self.shell.ui.show_delete_preset_dialog,
+            delete_preset_dialog: self.shell.ui.delete_preset_dialog,
             preset_dialog_name: self.shell.ui.preset_dialog_name.clone(),
             preset_dialog_w: self.shell.ui.preset_dialog_w,
             preset_dialog_h: self.shell.ui.preset_dialog_h,
@@ -2027,6 +2021,7 @@ impl App {
                 _ => None,
             },
             hovered_guide: self.active_hover_guide(),
+            selected_guide: self.selected_guide(),
             snap_guides: if self.edit.transform_state.is_some() {
                 self.edit.transform_snap_guides.clone()
             } else if self.edit.tools.active_id() == crate::tools::ToolId::Move {
@@ -2037,7 +2032,7 @@ impl App {
             artboards: self.docs.active().effective_artboards(),
             toolbar_w: self.shell.toolbar_w,
             panel_r_w: self.shell.panel_r_w,
-            is_tool_modal: self.modal_lock_active() && !self.portrait_yields(),
+            is_tool_modal: self.chrome_locked() && !self.portrait_yields(),
             modal_flash: self
                 .shell
                 .ui
@@ -2047,6 +2042,7 @@ impl App {
             support: self.shell.ui.support_dialog,
             news: crate::author_news::current(),
             mail: self.mail_view(),
+            agent: self.agent_view(),
             #[cfg(feature = "pro")]
             pro: self.pro_view(),
         }
@@ -2279,6 +2275,41 @@ mod tests {
     use crate::core::layer::{Layer, LayerMask};
     use crate::core::shape::{ShapeData, ShapeKind};
     use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+    use crate::tools::ToolId;
+
+    /// Every tool, for the tests that go through each one.
+    const TOOLS: [ToolId; 30] = [
+        ToolId::Brush,
+        ToolId::Eraser,
+        ToolId::Pencil,
+        ToolId::Move,
+        ToolId::Crop,
+        ToolId::Zoom,
+        ToolId::Hand,
+        ToolId::Fill,
+        ToolId::Gradient,
+        ToolId::Eyedropper,
+        ToolId::SelectionRect,
+        ToolId::SelectionEllipse,
+        ToolId::Lasso,
+        ToolId::PolygonLasso,
+        ToolId::SmartSelect,
+        ToolId::Clone,
+        ToolId::Transform,
+        ToolId::RefineBrush,
+        ToolId::Text,
+        ToolId::Shape,
+        ToolId::Repair,
+        ToolId::PerspectiveCrop,
+        ToolId::Pen,
+        ToolId::Smudge,
+        ToolId::Dodge,
+        ToolId::Burn,
+        ToolId::Patch,
+        ToolId::Node,
+        ToolId::VectorBrush,
+        ToolId::Arrow,
+    ];
 
     /// Draws the whole window from `collect_ui_data` in a spread of app
     /// states, then with each canvas overlay of `ui::frame` switched on, and
@@ -2289,44 +2320,11 @@ mod tests {
     #[test]
     #[ignore]
     fn probe_ui_data_shapes() {
-        use crate::tools::ToolId;
         use crate::ui::UiActions;
         use std::hash::{Hash, Hasher};
 
         type Setup = fn(&mut App);
         type Tweak = fn(&mut UiData);
-        const TOOLS: [ToolId; 30] = [
-            ToolId::Brush,
-            ToolId::Eraser,
-            ToolId::Pencil,
-            ToolId::Move,
-            ToolId::Crop,
-            ToolId::Zoom,
-            ToolId::Hand,
-            ToolId::Fill,
-            ToolId::Gradient,
-            ToolId::Eyedropper,
-            ToolId::SelectionRect,
-            ToolId::SelectionEllipse,
-            ToolId::Lasso,
-            ToolId::PolygonLasso,
-            ToolId::SmartSelect,
-            ToolId::Clone,
-            ToolId::Transform,
-            ToolId::RefineBrush,
-            ToolId::Text,
-            ToolId::Shape,
-            ToolId::Repair,
-            ToolId::PerspectiveCrop,
-            ToolId::Pen,
-            ToolId::Smudge,
-            ToolId::Dodge,
-            ToolId::Burn,
-            ToolId::Patch,
-            ToolId::Node,
-            ToolId::VectorBrush,
-            ToolId::Arrow,
-        ];
         let states: Vec<(&str, Setup)> = vec![
             ("blank", |_| {}),
             ("welcome", |a| a.shell.ui.show_welcome = true),
@@ -2399,7 +2397,7 @@ mod tests {
             ("pdf export", |a| a.shell.ui.show_pdf_export_dialog = true),
             ("preset", |a| a.shell.ui.show_preset_dialog = true),
             ("delete preset", |a| {
-                a.shell.ui.show_delete_preset_dialog = true
+                a.shell.ui.delete_preset_dialog = Some(crate::core::presets::SizePresetList::Crop)
             }),
             ("refine color", |a| {
                 a.shell.ui.show_refine_color_dialog = true
@@ -2690,6 +2688,112 @@ mod tests {
         for (name, tweak) in overlays {
             draw(&format!("overlay: {name}"), None, |_| {}, Some(tweak));
         }
+    }
+
+    /// The strips across the top of the window sit flush on one another for
+    /// every tool, and the docked Layers band with its colour strip reaches up
+    /// to the tool-options bar, so the tabs and the ruler stop at its edge.
+    #[test]
+    fn the_top_strips_close_up_and_the_layers_band_reaches_the_options_bar() {
+        use crate::ui::UiActions;
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.shell.ui.show_rulers = true;
+        app.shell.ui.show_layer_panel = true;
+        app.docs.documents[0].canvas =
+            crate::core::canvas::Canvas::from_rgba([128u8, 128, 128, 255].repeat(80 * 60), 80, 60);
+        let ctx = app.win.egui_ctx.clone();
+        ctx.set_fonts(crate::ui::snapshot::fonts());
+        crate::ui::theme::apply_theme(&ctx, crate::ui::theme::ThemeMode::Dark);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
+        let rect = |name: &str| {
+            egui::PanelState::load(&ctx, egui::Id::new(name))
+                .unwrap_or_else(|| panic!("{name} drawn"))
+                .rect
+        };
+        for tool in TOOLS {
+            app.edit.tools.select(tool);
+            for _ in 0..3 {
+                let data = app.collect_ui_data();
+                let mut actions = UiActions::default();
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(0.0),
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| crate::ui::frame(ui, &data, &mut actions));
+            }
+            let (title, options, tabs) = (rect("titlebar"), rect("topoptions"), rect("tabbar"));
+            let (ruler, band) = (rect("ruler_h"), rect("right_panels"));
+            let at = format!("{tool:?}: options {options:?}, tabs {tabs:?}, band {band:?}");
+            assert_eq!(options.top(), title.bottom(), "{at}");
+            assert_eq!(options.height(), 32.0, "{at}");
+            assert_eq!(band.top(), options.bottom(), "{at}");
+            assert_eq!(band.right(), screen.right(), "{at}");
+            assert_eq!(tabs.top(), options.bottom(), "{at}");
+            assert_eq!(tabs.right(), band.left(), "{at}");
+            assert_eq!(ruler.top(), tabs.bottom(), "{at}");
+            assert_eq!(ruler.right(), band.left(), "{at}");
+        }
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the whole window, over a red
+    /// backdrop that would show through any gap between its strips, is drawn
+    /// into `khung.png` there, with three guides (the middle one picked).
+    #[test]
+    #[ignore]
+    fn probe_panel_snapshot_of_the_window_chrome() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        use crate::core::document::{Guide, GuideOrientation};
+        let mut app = App::new();
+        app.lib.catalog = crate::app::library::Catalog::default();
+        app.shell.ui.show_welcome = false;
+        app.shell.ui.show_rulers = true;
+        app.shell.ui.show_guides = true;
+        app.docs.documents[0].canvas = crate::core::canvas::Canvas::from_rgba(
+            [255u8, 255, 255, 255].repeat(800 * 600),
+            800,
+            600,
+        );
+        app.edit.tools.select(ToolId::Move);
+        (
+            app.edit.view.zoom,
+            app.edit.view.offset_x,
+            app.edit.view.offset_y,
+        ) = (1.0, 200.0, 140.0);
+        app.docs.active_mut().guides = vec![
+            Guide {
+                orientation: GuideOrientation::Horizontal,
+                pos: 150.0,
+            },
+            Guide {
+                orientation: GuideOrientation::Vertical,
+                pos: 300.0,
+            },
+            Guide {
+                orientation: GuideOrientation::Vertical,
+                pos: 600.0,
+            },
+        ];
+        app.edit.selected_guide = Some((app.docs.active().id, 1));
+        let data = app.collect_ui_data();
+        let image = crate::ui::snapshot::render_ui(1600.0, 900.0, 1.0, None, |ui| {
+            let screen = ui.ctx().content_rect();
+            ui.ctx()
+                .layer_painter(egui::LayerId::background())
+                .rect_filled(screen, 0.0, egui::Color32::RED);
+            let page =
+                egui::Rect::from_min_size(egui::pos2(200.0, 140.0), egui::vec2(800.0, 600.0));
+            ui.ctx()
+                .layer_painter(egui::LayerId::background())
+                .rect_filled(page, 0.0, egui::Color32::WHITE);
+            crate::ui::frame(ui, &data, &mut crate::ui::UiActions::default());
+        });
+        image
+            .save(std::path::Path::new(&dir).join("khung.png"))
+            .unwrap();
     }
 
     #[test]

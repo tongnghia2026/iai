@@ -103,11 +103,10 @@ where
         return false;
     }
 
-    // Selection is read through a raw pointer so the mutable `get_paint_tiles_mut`
-    // borrow below doesn't conflict — they touch disjoint Canvas fields. Same
-    // pattern the Brush hot path uses.
+    // The selection and the layer's tiles are disjoint Canvas fields: both can
+    // be borrowed at once.
     let has_sel = canvas.selection.active;
-    let sel_ptr: *const crate::core::selection::Selection = &canvas.selection;
+    let sel = &canvas.selection;
 
     let tile_size = TILE_SIZE;
     // Channels-panel write gate: keep only the enabled channels of the
@@ -155,7 +154,7 @@ where
                     if has_sel {
                         let canvas_px = (px as i32 + ox) as u32;
                         let canvas_py = (py as i32 + oy) as u32;
-                        cov *= unsafe { (*sel_ptr).sample(canvas_px, canvas_py) };
+                        cov *= sel.sample(canvas_px, canvas_py);
                         if cov < 0.001 {
                             continue;
                         }

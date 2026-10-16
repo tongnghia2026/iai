@@ -330,16 +330,9 @@ impl App {
                 if id == crate::tools::ToolId::PerspectiveCrop {
                     // No auto frame — wait for the user to pick the four corners.
                     let canvas = &self.docs.active().canvas;
-                    let dpi = canvas.metadata.resolution_ppi;
                     let cw = canvas.width as f32;
                     let ch = canvas.height as f32;
                     let t = self.edit.tools.perspective_crop_mut();
-                    // Only adopt the image's DPI when no manual output size is set.
-                    // Once the user has typed a size, freeze DPI so a cm/inch value
-                    // doesn't jump when re-entering the tool on a different-DPI image.
-                    if t.manual_size.is_none() {
-                        t.dpi = dpi;
-                    }
                     t.sync_manual_pixels(cw, ch);
                     t.begin_placing();
                 }
@@ -962,17 +955,6 @@ impl App {
         }
         if let Some(on) = actions.tool.set_smart_select_auto_enhance.take() {
             self.edit.tools.wand_mut().auto_enhance = on;
-        }
-        if let Some(model) = actions.sel.set_select_subject_model.take() {
-            if self.jobs.select_subject.set_selected_model(model) {
-                self.shell.status_msg = self.jobs.select_subject.status_text();
-            } else {
-                self.shell.status_msg =
-                    "Cannot switch Select Subject model while it is busy".to_string();
-            }
-        }
-        if let Some(v) = actions.sel.set_yolo_people_only.take() {
-            self.jobs.select_subject.set_people_only(v);
         }
         if let Some(t) = actions.tool.set_fill_tolerance.take() {
             self.edit.tools.fill_mut().tolerance = t;

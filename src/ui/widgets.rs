@@ -59,6 +59,85 @@ pub(crate) fn plain_press(ctx: &egui::Context) -> bool {
 }
 
 /// Linear interpolate two colours (premultiplied-agnostic), `t` in 0..1.
+/// A combo box whose list is as tall as what it holds, down to `bottom` at
+/// most, and scrolls past that. egui's own measures the list no taller than
+/// its first-frame area (400 points) and keeps that height after.
+pub(crate) fn tall_combo<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    selected: &str,
+    width: f32,
+    bottom: f32,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let id = ui.make_persistent_id(id_salt);
+    let popup_id = id.with("popup");
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let padding = ui.spacing().button_padding;
+    let icon = egui::Vec2::splat(ui.spacing().icon_width);
+    let text_room = width - 2.0 * padding.x - ui.spacing().icon_spacing - icon.x;
+    let galley = egui::WidgetText::from(selected).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        text_room,
+        egui::TextStyle::Button,
+    );
+    let inner = egui::vec2(width - 2.0 * padding.x, galley.size().y.max(icon.y));
+    let (rect, response) = ui.allocate_exact_size(inner + 2.0 * padding, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), selected)
+    });
+    if ui.is_rect_visible(rect) {
+        // Drawn as egui draws its combo box.
+        let visuals = if open {
+            &ui.visuals().widgets.open
+        } else {
+            ui.style().interact(&response)
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect.expand(visuals.expansion),
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        let inner = rect.shrink2(padding);
+        let icon = egui::Align2::RIGHT_CENTER.align_size_within_rect(icon, inner);
+        let arrow = egui::Rect::from_center_size(
+            icon.center(),
+            egui::vec2(icon.width() * 0.7, icon.height() * 0.45),
+        );
+        painter.add(egui::Shape::convex_polygon(
+            vec![arrow.left_top(), arrow.right_top(), arrow.center_bottom()],
+            visuals.fg_stroke.color,
+            egui::Stroke::NONE,
+        ));
+        let at = egui::Align2::LEFT_CENTER.align_size_within_rect(galley.size(), inner);
+        painter.galley(at.min, galley, visuals.text_color());
+    }
+    egui::Popup::menu(&response)
+        .id(popup_id)
+        .width(rect.width())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
+            ui.set_min_width(ui.available_width());
+            let margin = ui.spacing().menu_margin.bottom as f32 + 4.0;
+            let room = (bottom - ui.cursor().top() - margin).max(120.0);
+            // As tall as the list from the first frame on: a list that has
+            // grown since grows with it.
+            egui::ScrollArea::vertical()
+                .max_height(room)
+                .min_scrolled_height(room)
+                .show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    contents(ui)
+                })
+                .inner
+        })
+        .map(|shown| shown.inner)
+}
+
 pub(crate) fn mix_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     Color32::from_rgba_unmultiplied(

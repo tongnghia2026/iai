@@ -4,6 +4,7 @@ use crate::tools::ToolId;
 use egui;
 use egui_phosphor::regular as ph;
 
+use crate::core::text::SystemFonts;
 use crate::ui::widgets::focus_field_select_all;
 
 const TOP_OPTIONS_ICON_SIZE: f32 = 17.0;
@@ -124,13 +125,16 @@ fn dimension_drag<'a>(
 
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
+    // No margin above or below: the row's tallest buttons (the 18 px icons)
+    // need 30 of the 32 px, and a row taller than the room left for it
+    // grew the bar past its fill, a strip of bare canvas under it.
     #[allow(deprecated)]
     egui::TopBottomPanel::top("topoptions")
         .exact_size(32.0)
         .frame(
             egui::Frame::new()
                 .fill(pal.top_bar_bg)
-                .inner_margin(egui::Margin::symmetric(4, 3)),
+                .inner_margin(egui::Margin::symmetric(4, 0)),
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -1047,17 +1051,48 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let mut apply_preset: Option<PresetAction> = None;
     let mut open_new_preset = false;
     let mut open_delete_dialog = false;
-    let preset_popup_height = crop_preset_popup_height(data.dialogs.user_presets.len());
+    let saved = &data.dialogs.crop_presets;
 
-    egui::ComboBox::from_id_salt("crop_preset_combined")
-        .selected_text(preset_label)
-        // Long physical-size and user preset names should remain readable.
-        .width(270.0)
-        // Egui's default combo height is intentionally short and adds a scroll
-        // bar. Size this menu from its actual row count so the full preset list
-        // opens at once (the popup system still constrains it to the monitor).
-        .height(preset_popup_height)
-        .show_ui(ui, |ui| {
+    // Long physical-size and user preset names should remain readable; the
+    // list is as long as the presets it holds, down to the bars at the bottom.
+    let bottom = super::work_area_bottom(ui.ctx(), data);
+    crate::ui::widgets::tall_combo(
+        ui,
+        "crop_preset_combined",
+        &preset_label,
+        270.0,
+        bottom,
+        |ui| {
+            // The user's own sizes first, the ones picked most: in reach at
+            // once, with what makes and deletes them.
+            ui.label(
+                egui::RichText::new("Saved Presets")
+                    .color(egui::Color32::GRAY)
+                    .size(10.5),
+            );
+            for (i, preset) in saved.iter().enumerate() {
+                if ui.selectable_label(false, &preset.name).clicked() {
+                    apply_preset = Some(PresetAction::UserPreset(i));
+                    ui.close();
+                }
+            }
+            if ui
+                .selectable_label(false, "New Crop Preset\u{2026}")
+                .clicked()
+            {
+                open_new_preset = true;
+                ui.close();
+            }
+            if !saved.is_empty()
+                && ui
+                    .selectable_label(false, "Delete Crop Preset\u{2026}")
+                    .clicked()
+            {
+                open_delete_dialog = true;
+                ui.close();
+            }
+
+            ui.separator();
             ui.label(
                 egui::RichText::new("Ratio")
                     .color(egui::Color32::GRAY)
@@ -1130,34 +1165,8 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     ui.close();
                 }
             }
-
-            if !data.dialogs.user_presets.is_empty() {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("Saved Presets")
-                        .color(egui::Color32::GRAY)
-                        .size(10.5),
-                );
-                for (i, preset) in data.dialogs.user_presets.iter().enumerate() {
-                    if ui.selectable_label(false, &preset.name).clicked() {
-                        apply_preset = Some(PresetAction::UserPreset(i));
-                        ui.close();
-                    }
-                }
-            }
-
-            ui.separator();
-            if ui.button("New Crop Preset\u{2026}").clicked() {
-                open_new_preset = true;
-                ui.close();
-            }
-            if !data.dialogs.user_presets.is_empty()
-                && ui.button("Delete Crop Preset\u{2026}").clicked()
-            {
-                open_delete_dialog = true;
-                ui.close();
-            }
-        });
+        },
+    );
 
     if let Some(action) = apply_preset {
         match action {
@@ -1189,7 +1198,7 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 actions.tool.set_crop_h_px = Some(h);
             }
             PresetAction::UserPreset(i) => {
-                let p = &data.dialogs.user_presets[i];
+                let p = &saved[i];
                 actions.tool.set_crop_mode = Some(2);
                 actions.tool.set_crop_unit = Some(p.unit_idx());
                 actions.tool.set_crop_dpi = Some(p.dpi);
@@ -1199,7 +1208,8 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     }
     if open_delete_dialog {
-        actions.dialogs.open_delete_preset_dialog = true;
+        actions.dialogs.open_delete_preset_dialog =
+            Some(crate::core::presets::SizePresetList::Crop);
     }
 
     ui.separator();
@@ -1373,22 +1383,6 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             actions.tool.crop_confirm = true;
         }
     }
-}
-
-/// Enough vertical room for every fixed Crop row plus all saved presets.
-/// Separators/headings are included in the base; each saved preset contributes
-/// one normal menu row, and a non-empty saved section also shows Delete Preset.
-fn crop_preset_popup_height(saved_preset_count: usize) -> f32 {
-    // Raised for the "AI (Gemini / ChatGPT)" section (label + separator + 1 row).
-    const FIXED_CONTENT_HEIGHT: f32 = 620.0;
-    const MENU_ROW_HEIGHT: f32 = 26.0;
-    FIXED_CONTENT_HEIGHT
-        + saved_preset_count as f32 * MENU_ROW_HEIGHT
-        + if saved_preset_count > 0 {
-            MENU_ROW_HEIGHT
-        } else {
-            0.0
-        }
 }
 
 #[derive(Clone)]
@@ -2539,30 +2533,6 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     ui.separator();
 
     let busy = data.sel.select_subject_busy;
-    let mut selected_model = data.sel.select_subject_model;
-    egui::ComboBox::from_id_salt("select_subject_model")
-        .selected_text(selected_model.short_label())
-        .width(105.0)
-        .show_ui(ui, |ui| {
-            for model in crate::core::select_subject::SelectSubjectModel::ALL {
-                if ui
-                    .selectable_value(&mut selected_model, model, model.label())
-                    .clicked()
-                {
-                    actions.sel.set_select_subject_model = Some(model);
-                }
-            }
-        });
-    if selected_model == crate::core::select_subject::SelectSubjectModel::Yolo11Seg {
-        let mut people_only = data.sel.yolo_people_only;
-        if ui
-            .add_enabled(!busy, egui::Checkbox::new(&mut people_only, "People only"))
-            .on_hover_text("YOLO: select only people instead of every detected object")
-            .changed()
-        {
-            actions.sel.set_yolo_people_only = Some(people_only);
-        }
-    }
     let btn_label = if busy {
         format!("{} Running…", ph::HOURGLASS)
     } else {
@@ -2577,7 +2547,7 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
         if !data.sel.select_subject_status_msg.is_empty() {
             data.sel.select_subject_status_msg.as_str()
         } else {
-            "Auto-select subject / person using the selected local AI model"
+            "Auto-select subject / person using a local AI model"
         },
     );
     if resp.clicked() {
@@ -3022,5 +2992,107 @@ fn transform_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
         .clicked()
     {
         actions.tool.transform_commit = true;
+    }
+}
+
+#[cfg(test)]
+mod crop_preset_tests {
+    use super::*;
+    use crate::core::presets::{SizePreset, SizePresetList};
+    use crate::ui::dialogs::stage::Stage;
+
+    #[test]
+    fn the_saved_crop_presets_open_first_with_what_makes_and_deletes_them() {
+        let mut data = UiData::default();
+        data.dialogs.crop_presets = std::sync::Arc::new(vec![SizePreset {
+            name: "3x4".into(),
+            width: 2.8,
+            height: 3.8,
+            unit: "cm".into(),
+            dpi: 600.0,
+        }]);
+        let shown = Stage::new(data, |ctx, data, actions| {
+            #[allow(deprecated)]
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal(|ui| crop_options(ui, data, actions));
+            });
+        });
+        shown.click(&crop_preset_label(&shown.data));
+        let texts = shown.texts();
+        let y = |text: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t == text)
+                .map(|(_, at)| at.y)
+                .unwrap_or_else(|| panic!("no {text}"))
+        };
+        let (new, delete) = ("New Crop Preset\u{2026}", "Delete Crop Preset\u{2026}");
+        assert!(y("Saved Presets") < y("3x4") && y("3x4") < y(new));
+        assert!(y(new) < y(delete) && y(delete) < y("Ratio"));
+        assert_eq!(
+            shown.click(delete).0.dialogs.open_delete_preset_dialog,
+            Some(SizePresetList::Crop)
+        );
+    }
+
+    #[test]
+    fn the_crop_list_is_as_long_as_what_it_holds_down_to_the_bars_at_the_bottom() {
+        let preset = |name: &str| SizePreset {
+            name: name.into(),
+            width: 2.8,
+            height: 3.8,
+            unit: "cm".into(),
+            dpi: 600.0,
+        };
+        let saved = |count: usize| {
+            let names = ["3x4", "4x6", "2x3", "10x15", "13x18", "A5", "A4", "A3"];
+            std::sync::Arc::new(names[..count].iter().map(|n| preset(n)).collect::<Vec<_>>())
+        };
+        let staged = |screen: egui::Vec2, count: usize| {
+            let mut data = UiData::default();
+            data.doc.has_doc = true;
+            data.tool.active_tool = ToolId::Crop;
+            data.dialogs.crop_presets = saved(count);
+            Stage::on(data, screen, |ctx, data, actions| {
+                super::build(ctx, data, actions)
+            })
+        };
+        let open = |shown: &Stage| {
+            shown.click(&crop_preset_label(&shown.data));
+            for _ in 0..3 {
+                shown.frame(vec![]);
+            }
+            shown.texts()
+        };
+        let last = "2400 \u{00D7} 1600 px";
+        let shows =
+            |texts: &[(String, egui::Pos2)], text: &str| texts.iter().any(|(t, _)| t == text);
+
+        // On the owner's screen, eight presets and every row of the list.
+        let mut shown = staged(egui::vec2(1920.0, 1040.0), 1);
+        let texts = open(&shown);
+        assert!(shows(&texts, "3x4") && shows(&texts, last));
+        // Closed, seven more saved, opened again: it has grown with them.
+        shown.key(egui::Key::Escape);
+        shown.data.dialogs.crop_presets = saved(8);
+        let texts = open(&shown);
+        assert!(shows(&texts, "A3") && shows(&texts, last));
+
+        // On a low screen it stops above the page bar and the status bar,
+        // and scrolls.
+        let shown = staged(egui::vec2(1920.0, 500.0), 8);
+        let texts = open(&shown);
+        let bottom = 500.0 - crate::ui::statusbar::HEIGHT - crate::ui::artboard_bar::BAR_H;
+        assert!(shows(&texts, "3x4") && !shows(&texts, last));
+        let lowest = texts
+            .iter()
+            .filter(|(_, at)| at.y > 30.0)
+            .map(|(_, at)| at.y)
+            .fold(0.0, f32::max);
+        assert!(lowest < bottom - 10.0, "{lowest} under {bottom}");
+        assert!(
+            lowest > bottom - 60.0,
+            "the list stops well short: {lowest}"
+        );
     }
 }

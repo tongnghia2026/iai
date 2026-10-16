@@ -8,6 +8,8 @@
 //! [`placement`] math positions the image exactly as the Print dialog
 //! previews it, and row bands are blitted with `StretchDIBits` at a fixed
 //! pixel→point mapping. File ▸ Export and the fallback path keep the PDF.
+// Printing goes through GDI.
+#![allow(unsafe_code)]
 
 use super::print::{placement, printable_area_points, PrintLayout};
 

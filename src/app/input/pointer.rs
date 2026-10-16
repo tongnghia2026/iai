@@ -30,9 +30,6 @@ impl App {
         button: MouseButton,
     ) {
         let pressed = state == ElementState::Pressed;
-        if button == MouseButton::Left && !pressed {
-            self.note_garment_drop();
-        }
         if self.shell.ui.show_paint_color_dialog {
             if button == MouseButton::Left {
                 if pressed && !self.edit.input.is_over_ui {
@@ -287,6 +284,9 @@ impl App {
                     self.sync_cursor(event_loop);
                 } else {
                     if pressed {
+                        // A click anywhere but on a guide lets go of the picked
+                        // one, so Delete goes back to the layer or the pixels.
+                        self.edit.selected_guide = None;
                         if !self.edit.input.was_over_ui {
                             let active_tool = self.edit.tools.active_id();
                             if !self.alpha_view_allows_tool(active_tool) {
@@ -302,11 +302,15 @@ impl App {
                             self.portrait_pressed();
 
                             // Grab an existing guide with the Move tool (before any
-                            // tool press): drag to reposition, drop off-canvas to delete.
+                            // tool press): drag to reposition, drop off-canvas to
+                            // delete. The guide is picked too: Delete removes it.
                             if self.edit.tools.active_id() == ToolId::Move
                                 && self.edit.transform_state.is_none()
                             {
                                 if let Some(gi) = self.guide_at_screen() {
+                                    self.edit.selected_guide = Some((self.docs.active().id, gi));
+                                    self.shell.status_msg =
+                                        "Đã chọn đường gióng — bấm Delete để xóa".to_string();
                                     let g = self.docs.active().guides[gi];
                                     let ev = self.tool_event();
                                     let pos = match g.orientation {
@@ -731,6 +735,7 @@ impl App {
                             };
                             if (pos < 0.0 || pos > dim) && idx < self.docs.active().guides.len() {
                                 self.docs.active_mut().guides.remove(idx);
+                                self.edit.selected_guide = None;
                             }
                             self.edit.input.last_left_release_time =
                                 Some(std::time::Instant::now());

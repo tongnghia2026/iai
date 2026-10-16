@@ -7,6 +7,13 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/tongnghia2026/iai"
 readme = "README.md"
 
+# The app is the root package; the crates under crates/ and the checks in
+# xtask/ are members beside it. A plain `cargo build` / `cargo test` at the
+# root still means the app alone.
+[workspace]
+members = ["crates/*", "xtask"]
+resolver = "2"
+
 # The library holds the whole application; the binary is a thin entry point.
 # Tests compile against the library, not the binary's module tree.
 [lib]
@@ -18,19 +25,38 @@ default = []
 # The Pro pack: the "AI" window (ID photos, garments, portrait retouch, print
 # sheets, Gemini / ChatGPT) and the key that opens it. A build without it
 # (`--no-default-features`) is the free core, whole.
-pro = ["raw-dll", "dep:ed25519-compact", "dep:socket2", "dep:tungstenite"]
+pro = ["raw-dll", "dep:ed25519-compact", "dep:socket2", "dep:tungstenite", "iai-imaging/pro", "iai-ai/pro"]
 # The library that decodes camera RAW files (crates/iai-raw: rawloader and
 # rawler, both LGPL-2.1) is loaded at run time from iai_raw.dll beside the
 # exe instead of being linked into it, so that whoever has the app can put a
 # build of their own in its place. A build with parts that are not open has to
 # have it this way; a build without the feature links the library in.
-raw-dll = ["dep:libloading"]
+raw-dll = ["iai-formats/raw-dll"]
 jzazbz-prototype = []
 canvas-editor-webview = ["dep:wry"]
+dev-tools = []
 
 [[bin]]
 name = "iai"
 path = "src/main.rs"
+
+# Development tools beside the app, built only when asked for
+# (`cargo run --release --features dev-tools --bin text_spike -- <dir>`), so a
+# release build links one program, not four.
+[[bin]]
+name = "color_probe"
+path = "src/bin/color_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "raw_ids"
+path = "src/bin/raw_ids.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "text_spike"
+path = "src/bin/text_spike.rs"
+required-features = ["dev-tools"]
 
 [dependencies]
 winit = { version = "0.30", features = ["rwh_06"] }
@@ -52,18 +78,38 @@ foreign-types-shared = "0.3"
 zip = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
+# Locks that a panic on another thread does not poison: a job that fails
+# while it holds one leaves the app running. Already in the tree through wgpu.
+parking_lot = "0.12"
 flate2 = "1"
 # What a decoded RAW file is to the app, and the interface of the library
 # that decodes it.
 iai-raw-api = { path = "crates/iai-raw-api" }
+iai-formats = { path = "crates/iai-formats" }
+iai-gpu = { path = "crates/iai-gpu" }
+iai-diag = { path = "crates/iai-diag" }
+iai-engine = { path = "crates/iai-engine" }
+iai-automation = { path = "crates/iai-automation" }
+iai-canvas = { path = "crates/iai-canvas" }
+iai-ai = { path = "crates/iai-ai" }
+iai-layout = { path = "crates/iai-layout" }
+iai-imaging = { path = "crates/iai-imaging" }
+iai-develop = { path = "crates/iai-develop" }
+iai-text = { path = "crates/iai-text" }
+iai-vector = { path = "crates/iai-vector" }
+iai-history = { path = "crates/iai-history" }
+iai-doc = { path = "crates/iai-doc" }
+iai-platform = { path = "crates/iai-platform" }
+iai-raster = { path = "crates/iai-raster" }
+iai-color = { path = "crates/iai-color" }
+iai-geom = { path = "crates/iai-geom" }
 # That library: rawloader, and rawler for what rawloader does not read. Both
 # declare LGPL-2.1; binary distribution obligations and the complete license
 # text are documented in THIRD_PARTY.md and licenses/. With `raw-dll` the app
 # calls nothing of this crate, and nothing of it is linked into the exe: it is
 # built beside it, as iai_raw.dll.
 iai-raw = { path = "crates/iai-raw" }
-# Loads iai_raw.dll. ISC; already in the tree through wgpu.
-libloading = { version = "0.8", optional = true }
 ort = { version = "2.0.0-rc.12", features = ["directml"] }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json", "multipart"], default-features = false }
 ab_glyph = "0.2"
@@ -100,7 +146,9 @@ ed25519-compact = { version = "2", default-features = false, features = ["std", 
 # The Win32_System_Diagnostics_* / Threading / Memory / ProcessStatus / Kernel /
 # SystemInformation features serve the flight recorder's watcher process
 # (src/diag/watch.rs): it walks the app's stacks from outside through dbghelp.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Win32_System_DataExchange reads the resolution an image on the clipboard
+# carries (src/app/os_clipboard.rs).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 wry = { version = "=0.56.1", optional = true }
 
 # Embeds the app icon into iai.exe (see build.rs) so Explorer and the Windows
@@ -110,10 +158,23 @@ winresource = "0.1"
 
 [dev-dependencies]
 naga = { version = "29", features = ["wgsl-in", "glsl-out", "hlsl-out"] }
+# The GPU crate's shader checks, for the app's own shader tests.
+iai-gpu = { path = "crates/iai-gpu", features = ["shader-check"] }
 
-# Clippy is a blocking check in CI. These five lints are switched off for the
-# whole crate, each for a reason that holds everywhere it fires:
-[lints.clippy]
+[lints]
+workspace = true
+
+# Every crate of the workspace opts into these with `[lints] workspace = true`.
+[workspace.lints.rust]
+# Unsafe code only where a function or module says why it needs it, with
+# `#[allow(unsafe_code)]`: today the Win32, GDI, lcms2 and DLL bridges.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+# Clippy is a blocking check in CI (`cargo xtask lints`). These five lints are
+# switched off for the whole workspace, each for a reason that holds
+# everywhere it fires:
+[workspace.lints.clippy]
 # Published colour-science constants are kept digit for digit.
 excessive_precision = "allow"
 # `.max(lo).min(hi)` sends NaN to `lo` and accepts lo > hi; `clamp` returns NaN
@@ -125,6 +186,17 @@ needless_range_loop = "allow"
 # that own them (plan QC-11), not one lint at a time.
 too_many_arguments = "allow"
 type_complexity = "allow"
+# Never crash, and say why unsafe code is sound. Tests may unwrap and panic
+# (clippy.toml); elsewhere `cargo xtask lints` holds each crate to the number
+# of these xtask/lint-budget.txt allows, which may only go down.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+dbg_macro = "warn"
+undocumented_unsafe_blocks = "warn"
 
 # This crate has a large GUI/image-processing dependency graph. Test debug info
 # makes the Unix linker use substantially more memory and disk while adding

@@ -497,7 +497,7 @@ impl App {
                                 Some(self.shell.print_selected_printer.as_str())
                             };
                             match std::fs::write(&tmp, &pdf) {
-                                Ok(_) => match crate::core::print::send_to_printer_with_options(
+                                Ok(_) => match crate::core::printers::send_to_printer_with_options(
                                     &tmp,
                                     printer,
                                     self.shell.print_copies,

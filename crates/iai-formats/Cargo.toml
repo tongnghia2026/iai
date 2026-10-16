@@ -1,0 +1,47 @@
+[package]
+name = "iai-formats"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_formats"
+path = "src/lib.rs"
+
+[features]
+# Load the RAW decoders from iai_raw.dll at run time instead of linking them
+# in (see crates/iai-raw); a build with the Pro part needs it this way.
+raw-dll = ["dep:libloading"]
+
+[dependencies]
+iai-canvas = { path = "../iai-canvas" }
+iai-color = { path = "../iai-color" }
+iai-develop = { path = "../iai-develop" }
+iai-diag = { path = "../iai-diag" }
+iai-doc = { path = "../iai-doc" }
+iai-geom = { path = "../iai-geom" }
+iai-history = { path = "../iai-history" }
+iai-imaging = { path = "../iai-imaging" }
+iai-platform = { path = "../iai-platform" }
+iai-raster = { path = "../iai-raster" }
+iai-raw = { path = "../iai-raw" }
+iai-raw-api = { path = "../iai-raw-api" }
+iai-text = { path = "../iai-text" }
+iai-vector = { path = "../iai-vector" }
+base64 = "0.22"
+bytemuck = { version = "1.0", features = ["derive"] }
+flate2 = "1"
+hayro = "0.7.1"
+image = "0.25"
+libloading = { version = "0.8", optional = true }
+lopdf = { version = "0.43", default-features = false }
+png = "0.17"
+rayon = "1"
+serde_json = "1"
+tiff = "0.11"
+zip = "2"
+
+[lints]
+workspace = true

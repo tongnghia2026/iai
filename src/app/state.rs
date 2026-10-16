@@ -495,7 +495,8 @@ pub struct UiState {
     /// dragging a layer or a transform box past the page edge fight back.
     pub snap_enabled: bool,
     pub show_preset_dialog: bool,
-    pub show_delete_preset_dialog: bool,
+    /// The list "Delete preset" deletes from, while its window is open.
+    pub delete_preset_dialog: Option<crate::core::presets::SizePresetList>,
     pub preset_dialog_name: String,
     pub preset_dialog_w: f32,
     pub preset_dialog_h: f32,
@@ -728,6 +729,7 @@ fn perspective_crop_cursor_has_tip_hotspot_and_crop_badge() {
 
 /// Audible attention chime for blocked modal actions (Windows system sound;
 /// no-op on other platforms and in tests).
+#[allow(unsafe_code)] // Win32: MessageBeep
 fn message_beep(kind: u32) {
     #[cfg(all(windows, not(test)))]
     {
@@ -1404,6 +1406,8 @@ pub struct App {
     pub(in crate::app) shell: UiShell,
     /// The lightweight library: recent-files catalog + thumbnail cache.
     pub(in crate::app) lib: crate::app::library::LibraryShell,
+    /// The command engine: what menus, dialogs and (later) agents run.
+    pub(in crate::app) engine: iai_engine::Engine,
 }
 
 impl Default for App {
@@ -1427,6 +1431,7 @@ impl App {
         // `settings` is moved into `shell.settings`; copy out the one value a
         // later field (`canvas_unit`) needs so we don't read it after the move.
         let settings_default_unit = settings.default_unit;
+        let settings_snap = settings.snap_default;
         Self {
             docs: DocumentSession {
                 documents: vec![Document::new(
@@ -1514,7 +1519,11 @@ impl App {
                 rendering: false,
             },
             edit: EditorInteraction {
-                tools: ToolManager::new(),
+                tools: {
+                    let mut tools = ToolManager::new();
+                    tools.set_snap(settings_snap);
+                    tools
+                },
                 fg_color: [0, 0, 0, 255],
                 bg_color: [255, 255, 255, 255],
                 view: ViewState {
@@ -1558,11 +1567,15 @@ impl App {
                 pending_fill: None,
                 pending_stroke: None,
                 guide_op: None,
+                selected_guide: None,
                 transform_snap_guides: Vec::new(),
                 pending_transform_commit: None,
                 raster_transform_lineage: std::collections::HashMap::new(),
                 warp_after_transform_commit: false,
                 clipboard: None,
+                clipboard_mirror_rect: None,
+                clipboard_source_canvas: None,
+                clipboard_source_ppi: None,
                 clipboard_image_new_doc_hint: None,
                 os_clipboard_written: None,
                 #[cfg(feature = "pro")]
@@ -1810,7 +1823,7 @@ impl App {
                     lock_guides: false,
                     snap_enabled: settings.snap_default,
                     show_preset_dialog: false,
-                    show_delete_preset_dialog: false,
+                    delete_preset_dialog: None,
                     preset_dialog_name: String::new(),
                     preset_dialog_w: 0.0,
                     preset_dialog_h: 0.0,
@@ -1882,10 +1895,15 @@ impl App {
                 #[cfg(feature = "pro")]
                 id_photo: Default::default(),
                 #[cfg(feature = "pro")]
-                garment: Default::default(),
-                #[cfg(feature = "pro")]
                 print_folder: None,
-                user_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all()),
+                agent_link: None,
+                agent_link_error: None,
+                crop_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
+                    crate::core::presets::SizePresetList::Crop,
+                )),
+                canvas_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
+                    crate::core::presets::SizePresetList::NewCanvas,
+                )),
                 develop_presets: std::sync::Arc::new(
                     crate::core::presets::DevelopPreset::load_all(),
                 ),
@@ -1894,6 +1912,7 @@ impl App {
                 ),
             },
             lib: crate::app::library::LibraryShell::new(),
+            engine: crate::app::engine::new_engine(),
         }
     }
 
@@ -2611,6 +2630,12 @@ impl App {
     /// Modals that fully block canvas interaction (no zoom/pan/edit). Everything
     /// except the live-preview image dialogs (adjustment / filter).
     pub fn is_blocking_modal(&self) -> bool {
+        self.blocks_beside_page_render() || self.jobs.pending_pdf_page_render.is_some()
+    }
+
+    /// [`Self::is_blocking_modal`] but for a PDF page being rendered on a
+    /// page switch.
+    fn blocks_beside_page_render(&self) -> bool {
         self.shell.ui.show_welcome
             || self.shell.ui.show_new_dialog
             || self.shell.ui.show_font_change_dialog
@@ -2632,7 +2657,6 @@ impl App {
             || self.shell.ui.save_error.is_some()
             || self.jobs.pending_reload_prompt.is_some()
             || self.jobs.pending_pdf_prompt.is_some()
-            || self.jobs.pending_pdf_page_render.is_some()
             || self.jobs.pending_pdf_page_insert.is_some()
             || self.shell.ui.show_refine_color_dialog
             || self.shell.ui.show_paint_color_dialog
@@ -2676,8 +2700,31 @@ impl App {
         self.locked_beside_retouch() || self.portrait_under_way()
     }
 
+    /// Whether the window's chrome (menus, panels, tab and page bars, tools)
+    /// is greyed out: while [`Self::modal_lock_active`], except for the
+    /// moment a PDF page renders on a page switch. That is over in a tenth of
+    /// a second, and greying everything for it flashed the whole window at
+    /// every page (the owner saw it, 15/10); input is still refused then.
+    pub(crate) fn chrome_locked(&self) -> bool {
+        self.locked_beside_retouch_when(self.blocks_beside_page_render())
+            || self.portrait_under_way()
+    }
+
+    /// The person holds the canvas: a transform, a text being typed, a
+    /// preview dialog, the Develop window… An agent's change waits until it
+    /// is committed or cancelled (plain dialogs do not count).
+    pub(crate) fn person_mid_edit(&self) -> bool {
+        self.locked_beside_retouch_when(false) || self.portrait_under_way()
+    }
+
     /// `modal_lock_active` but for a retouch Auto retouch has under way.
     pub(crate) fn locked_beside_retouch(&self) -> bool {
+        self.locked_beside_retouch_when(self.is_blocking_modal())
+    }
+
+    /// `locked_beside_retouch`, with `blocking` standing for whether a
+    /// blocking modal is up.
+    fn locked_beside_retouch_when(&self, blocking: bool) -> bool {
         // The Develop stage's second OS window is modal over the main window
         // (Track D): while it is open the main window is soft-locked — canvas
         // actions are refused (bell) until Develop closes.
@@ -2689,7 +2736,7 @@ impl App {
             || (self.edit.tools.active_id() == ToolId::PerspectiveCrop
                 && self.edit.tools.perspective_crop().has_quad())
             || self.held_preview_open()
-            || (self.is_blocking_modal()
+            || (blocking
                 && !self.shell.ui.show_welcome
                 && !self.shell.ui.show_exit_dialog
                 && !self.shell.ui.show_close_dialog)

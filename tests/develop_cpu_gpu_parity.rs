@@ -65,7 +65,7 @@ fn settled_pixel_evaluator_matches_committed_scene_for_non_spatial_edits() {
 
 #[test]
 fn compositor_shader_remains_valid_wgsl() {
-    let source = include_str!("../src/gpu/compositor.wgsl");
+    let source = include_str!("../crates/iai-gpu/src/compositor.wgsl");
     naga::front::wgsl::parse_str(source).expect("compositor.wgsl must parse");
 }
 

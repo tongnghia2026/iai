@@ -19,6 +19,8 @@
 //! `IaiRawFrame` is [`Frame`]; its fields mean what the fields of
 //! [`RawImage`](crate::RawImage) of the same names do. A library with these
 //! four functions, whatever it is built from, is one the app can use.
+// Memory handed across a C interface: unsafe by nature.
+#![allow(unsafe_code)]
 
 use std::ffi::c_void;
 
@@ -68,14 +70,16 @@ impl Span {
         if self.ptr.is_null() || self.len == 0 {
             &[]
         } else {
-            std::slice::from_raw_parts(self.ptr, self.len)
+            // SAFETY: the caller vouches for `len` readable bytes at `ptr`.
+            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
 
     /// # Safety
     /// As [`Span::bytes`].
     unsafe fn text(self) -> String {
-        String::from_utf8_lossy(self.bytes()).into_owned()
+        // SAFETY: the caller vouches for the span, as `bytes` asks.
+        String::from_utf8_lossy(unsafe { self.bytes() }).into_owned()
     }
 }
 
@@ -242,7 +246,9 @@ pub fn lend(decoded: Result<RawImage, String>) -> *const Frame {
 /// `frame` is a pointer [`lend`] returned (or null), given back once.
 pub unsafe fn take_back(frame: *const Frame) {
     if !frame.is_null() {
-        drop(Box::from_raw(frame as *mut Held));
+        // SAFETY: `lend` made the pointer with `Box::into_raw`, and it comes
+        // back once.
+        drop(unsafe { Box::from_raw(frame as *mut Held) });
     }
 }
 
@@ -252,12 +258,15 @@ pub(crate) struct Lender {
     free: FreeFn,
 }
 
-// The library frees a frame from whichever thread hands it over.
+// SAFETY: the library frees a frame from whichever thread hands it over.
 unsafe impl Send for Lender {}
+// SAFETY: a lender is only ever dropped, never read through.
 unsafe impl Sync for Lender {}
 
 impl Drop for Lender {
     fn drop(&mut self) {
+        // SAFETY: the frame came from this library's decode and goes back to
+        // its free function once, here.
         unsafe { (self.free)(self.frame) }
     }
 }
@@ -272,7 +281,9 @@ unsafe fn samples<T>(ptr: *const c_void, len: usize, lender: Lender) -> Result<S
     if ptr.is_null() || !ptr.is_aligned() {
         return Err("the RAW library handed over no usable samples".to_owned());
     }
-    Ok(Samples::lent(ptr, len, lender))
+    // SAFETY: the caller vouches that these are the frame's samples, which
+    // stay until the lender is dropped; null and alignment are checked above.
+    Ok(unsafe { Samples::lent(ptr, len, lender) })
 }
 
 /// The app's side: the picture a frame describes. The samples stay the
@@ -288,9 +299,13 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
         return Err("the RAW library answered with nothing".to_owned());
     }
     let lender = Lender { frame, free };
-    let frame = &*frame;
+    // SAFETY: not null, and the caller vouches it is a frame the library
+    // returned and has not taken back.
+    let frame = unsafe { &*frame };
+    // SAFETY: every span read below is one of `frame`'s, which the library set.
+    let text = |span: Span| unsafe { span.text() };
     if frame.error.len != 0 {
-        return Err(frame.error.text());
+        return Err(text(frame.error));
     }
     let size = |value: u64| {
         usize::try_from(value).map_err(|_| "the RAW library's picture is too large".to_owned())
@@ -315,15 +330,17 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
         }
     };
     let cfa = Cfa::new(
-        &frame.cfa_name.text(),
+        &text(frame.cfa_name),
         frame.cfa_width as usize,
         frame.cfa_height as usize,
-        frame.cfa_colors.bytes(),
+        // SAFETY: a span of `frame`'s, as above.
+        unsafe { frame.cfa_colors.bytes() },
     )?;
     let blackareas = if frame.blackareas.is_null() || frame.blackareas_len == 0 {
         Vec::new()
     } else {
-        std::slice::from_raw_parts(frame.blackareas, frame.blackareas_len).to_vec()
+        // SAFETY: the library set `blackareas_len` areas at `blackareas`.
+        unsafe { std::slice::from_raw_parts(frame.blackareas, frame.blackareas_len) }.to_vec()
     };
     let mut crops = [0usize; 4];
     for (side, value) in crops.iter_mut().zip(frame.crops) {
@@ -331,10 +348,10 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
     }
     let mut image = RawImage {
         decoder,
-        make: frame.make.text(),
-        model: frame.model.text(),
-        clean_make: frame.clean_make.text(),
-        clean_model: frame.clean_model.text(),
+        make: text(frame.make),
+        model: text(frame.model),
+        clean_make: text(frame.clean_make),
+        clean_model: text(frame.clean_model),
         width,
         height,
         cpp,
@@ -351,8 +368,16 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
         data: RawImageData::Integer(Vec::new().into()),
     };
     image.data = match frame.sample_kind {
-        SAMPLES_U16 => RawImageData::Integer(samples(frame.samples, frame.samples_len, lender)?),
-        SAMPLES_F32 => RawImageData::Float(samples(frame.samples, frame.samples_len, lender)?),
+        SAMPLES_U16 => {
+            // SAFETY: the samples pointer, length and kind are the frame's.
+            let samples = unsafe { samples(frame.samples, frame.samples_len, lender) };
+            RawImageData::Integer(samples?)
+        }
+        SAMPLES_F32 => {
+            // SAFETY: as above.
+            let samples = unsafe { samples(frame.samples, frame.samples_len, lender) };
+            RawImageData::Float(samples?)
+        }
         other => {
             return Err(format!(
                 "the RAW library names an unknown kind of sample ({other})"
@@ -410,11 +435,14 @@ mod tests {
         static COUNTERS: std::sync::Mutex<Vec<(usize, &'static AtomicUsize)>> =
             std::sync::Mutex::new(Vec::new());
         unsafe extern "C" fn free(frame: *const Frame) {
-            let counters = COUNTERS.lock().unwrap();
-            let (_, freed) = counters
+            // A frame given back leaves the list: the allocator may hand its
+            // address to the next test's frame.
+            let mut counters = COUNTERS.lock().unwrap();
+            let at = counters
                 .iter()
-                .find(|(address, _)| *address == frame as usize)
+                .position(|(address, _)| *address == frame as usize)
                 .expect("a frame that was lent");
+            let (_, freed) = counters.swap_remove(at);
             freed.fetch_add(1, Ordering::SeqCst);
             unsafe { take_back(frame) }
         }

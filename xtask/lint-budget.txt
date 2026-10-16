@@ -1,0 +1,33 @@
+# How many of each crash lint a crate may still have: `cargo xtask lints`
+# fails when a crate has more, or has any it is not listed with here.
+# The numbers only go down: after a cleanup, `cargo xtask lints --update`
+# lowers them. Counted on the build as shipped
+# (`cargo xtask lints --features iai/canvas-editor-webview`); test code is
+# not counted.
+#
+# crate lint count
+iai clippy::expect_used 64
+iai clippy::undocumented_unsafe_blocks 48
+iai clippy::unreachable 4
+iai clippy::unwrap_used 18
+iai-ai clippy::unwrap_used 3
+iai-canvas clippy::expect_used 1
+iai-canvas clippy::unwrap_used 4
+iai-color clippy::undocumented_unsafe_blocks 1
+iai-develop clippy::expect_used 18
+iai-develop clippy::unreachable 1
+iai-develop clippy::unwrap_used 3
+iai-diag clippy::panic 1
+iai-diag clippy::undocumented_unsafe_blocks 48
+iai-doc clippy::expect_used 1
+iai-doc clippy::unwrap_used 2
+iai-formats clippy::expect_used 2
+iai-formats clippy::undocumented_unsafe_blocks 3
+iai-formats clippy::unreachable 1
+iai-gpu clippy::expect_used 2
+iai-gpu clippy::unwrap_used 6
+iai-platform clippy::undocumented_unsafe_blocks 1
+iai-raster clippy::expect_used 1
+iai-raster clippy::unwrap_used 4
+iai-vector clippy::expect_used 3
+iai-vector clippy::unwrap_used 2

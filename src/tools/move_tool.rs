@@ -128,7 +128,8 @@ impl MoveTool {
             (h * 0.5, SnapKind::CanvasCenter),
         ];
 
-        for layer in canvas.layer_stack.layers.iter() {
+        let moving = Self::moving_indices(&canvas.layer_stack);
+        for (idx, layer) in canvas.layer_stack.layers.iter().enumerate() {
             if layer.width == 0 || layer.height == 0 {
                 continue;
             }
@@ -137,7 +138,7 @@ impl MoveTool {
             let lx1 = lx0 + layer.width as f32;
             let ly1 = ly0 + layer.height as f32;
 
-            if layer.selected && Self::can_move_layer(layer) {
+            if moving.binary_search(&idx).is_ok() {
                 ux0 = ux0.min(lx0);
                 uy0 = uy0.min(ly0);
                 ux1 = ux1.max(lx1);
@@ -186,6 +187,39 @@ impl MoveTool {
     /// be stale for a transformed Path before its asynchronous bake settles.
     pub fn arm_vector_transform_toggle(&mut self) {
         self.click_selected_vector = true;
+    }
+
+    /// The layers a drag moves: the selected ones and everything inside a
+    /// selected folder, as far as each may move.
+    fn moving_indices(stack: &crate::core::layer::LayerStack) -> Vec<usize> {
+        stack
+            .selected_with_group_contents()
+            .into_iter()
+            .filter(|&i| Self::can_move_layer(&stack.layers[i]))
+            .collect()
+    }
+
+    /// Whether the layer at `idx` sits in a selected folder that is closed in
+    /// the panel. A closed folder is one object on the canvas: a press on
+    /// anything in it grabs the folder. An open folder (a print sheet's, for
+    /// one) keeps offering its layers one by one.
+    fn in_closed_selected_folder(stack: &crate::core::layer::LayerStack, idx: usize) -> bool {
+        let mut parent = stack.layers.get(idx).and_then(|l| l.parent_id);
+        let mut guard = 0;
+        while let Some(pid) = parent {
+            let Some(p) = stack.layers.iter().find(|l| l.id == pid) else {
+                break;
+            };
+            if p.selected && p.is_group() && !p.expanded {
+                return true;
+            }
+            parent = p.parent_id;
+            guard += 1;
+            if guard > stack.layers.len() {
+                break;
+            }
+        }
+        false
     }
 
     fn can_move_layer(layer: &crate::core::layer::Layer) -> bool {
@@ -299,7 +333,11 @@ impl Tool for MoveTool {
             }
 
             if let Some(idx) = hit_idx {
-                if !canvas.layer_stack.layers[idx].selected {
+                // A press on something inside a selected, closed folder grabs
+                // the folder: the selection stays and the drag moves all of it.
+                if !canvas.layer_stack.layers[idx].selected
+                    && !Self::in_closed_selected_folder(&canvas.layer_stack, idx)
+                {
                     for l in &mut canvas.layer_stack.layers {
                         l.selected = false;
                     }
@@ -476,13 +514,15 @@ impl Tool for MoveTool {
             let canvas = ctx.canvas_mut();
 
             if event.alt && !self.alt_duplicated {
+                // Whole objects: a selected folder is copied with its contents.
                 let to_duplicate: Vec<usize> = canvas
                     .layer_stack
-                    .layers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| l.selected && Self::can_move_layer(l))
-                    .map(|(i, _)| i)
+                    .selected_roots()
+                    .into_iter()
+                    .filter(|&i| {
+                        let l = &canvas.layer_stack.layers[i];
+                        (l.is_group() && !l.locked) || Self::can_move_layer(l)
+                    })
                     .collect();
 
                 if !to_duplicate.is_empty() {
@@ -498,7 +538,7 @@ impl Tool for MoveTool {
                     }
 
                     for &idx in to_duplicate.iter().rev() {
-                        let new_idx = canvas.layer_stack.duplicate_layer(idx);
+                        let new_idx = canvas.layer_stack.duplicate_node(idx);
                         canvas.layer_stack.layers[new_idx].selected = true;
                     }
                     dup_cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
@@ -508,29 +548,22 @@ impl Tool for MoveTool {
                 }
             }
 
-            let has_movable = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .any(|l| l.selected && Self::can_move_layer(l));
-
-            if !has_movable {
+            let moving = Self::moving_indices(&canvas.layer_stack);
+            if moving.is_empty() {
                 return ToolResponse::none();
             }
 
-            let old_bounds: Vec<(i32, i32, u32, u32)> = canvas
-                .layer_stack
-                .layers
+            let old_bounds: Vec<(i32, i32, u32, u32)> = moving
                 .iter()
-                .filter(|l| l.selected && Self::can_move_layer(l) && l.has_renderable_content())
+                .map(|&i| &canvas.layer_stack.layers[i])
+                .filter(|l| l.has_renderable_content())
                 .map(|l| (l.offset.0, l.offset.1, l.width, l.height))
                 .collect();
 
-            for layer in canvas.layer_stack.layers.iter_mut() {
-                if layer.selected && Self::can_move_layer(layer) {
-                    layer.offset.0 += dx;
-                    layer.offset.1 += dy;
-                }
+            for &i in &moving {
+                let layer = &mut canvas.layer_stack.layers[i];
+                layer.offset.0 += dx;
+                layer.offset.1 += dy;
             }
             self.total_dx = target_dx;
             self.total_dy = target_dy;
@@ -682,12 +715,9 @@ impl Tool for MoveTool {
                 canvas.record(Box::new(c));
             }
             if moved {
-                let mut layer_ids: Vec<u32> = canvas
-                    .layer_stack
-                    .layers
-                    .iter()
-                    .filter(|l| l.selected && Self::can_move_layer(l))
-                    .map(|l| l.id)
+                let mut layer_ids: Vec<u32> = Self::moving_indices(&canvas.layer_stack)
+                    .into_iter()
+                    .map(|i| canvas.layer_stack.layers[i].id)
                     .collect();
                 if layer_ids.is_empty() {
                     if let Some(layer) =
@@ -858,6 +888,142 @@ mod tests {
             t.marquee_dragging,
             "an unselected empty vector box must not be grabbed"
         );
+    }
+
+    /// Two opaque 20×20 squares in a folder, only the folder's header row
+    /// selected, as right after Ctrl+G. Returns `(one, two, header)` indices.
+    fn add_folder_of_two(doc: &mut Document) -> (usize, usize, usize) {
+        let stack = &mut doc.canvas.layer_stack;
+        for (name, offset) in [("one", (40, 50)), ("two", (150, 60))] {
+            let id = stack.next_id();
+            let mut layer = crate::core::layer::Layer::from_rgba(
+                id,
+                name,
+                [200u8, 0, 0, 255].repeat(20 * 20),
+                20,
+                20,
+            );
+            layer.offset = offset;
+            layer.selected = true;
+            stack.layers.push(layer);
+            stack.set_next_id(id + 1);
+        }
+        let header = stack
+            .create_group_from_selected(300, 300)
+            .expect("two layers group");
+        (header - 2, header - 1, header)
+    }
+
+    #[test]
+    fn dragging_a_selected_folder_moves_everything_in_it() {
+        // The press lands on one layer of the folder; with Auto-Select on it
+        // used to select that layer and leave the rest of the folder behind.
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let (one, two, header) = add_folder_of_two(&mut doc);
+
+        let press = PointerEvent::new(45.0, 55.0);
+        let drag = PointerEvent::new(55.0, 62.0);
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+            t.on_release(drag, &mut c);
+        }
+
+        let layers = &doc.canvas.layer_stack.layers;
+        assert!(
+            layers[header].selected && !layers[one].selected,
+            "the folder stays the selection"
+        );
+        assert_eq!(layers[one].offset, (50, 57));
+        assert_eq!(layers[two].offset, (160, 67), "the other layer came along");
+
+        doc.canvas.undo();
+        let layers = &doc.canvas.layer_stack.layers;
+        assert_eq!(layers[one].offset, (40, 50));
+        assert_eq!(layers[two].offset, (150, 60), "one undo puts both back");
+    }
+
+    #[test]
+    fn pressing_a_layer_of_an_open_folder_picks_that_layer() {
+        // A print sheet opens with its (open) folder selected; a press on one
+        // photo must keep picking that photo, not drag the whole sheet.
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let (one, two, header) = add_folder_of_two(&mut doc);
+        doc.canvas.layer_stack.layers[header].expanded = true;
+
+        let press = PointerEvent::new(45.0, 55.0);
+        let drag = PointerEvent::new(55.0, 62.0);
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+        let layers = &doc.canvas.layer_stack.layers;
+        assert!(layers[one].selected && !layers[header].selected);
+        assert_eq!(layers[one].offset, (50, 57));
+        assert_eq!(layers[two].offset, (150, 60), "the other layer stays");
+    }
+
+    #[test]
+    fn a_folder_moves_without_auto_select_too() {
+        // Auto-Select off: the header alone is selected and holds no pixels, so
+        // the drag used to move nothing at all.
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        t.auto_select = false;
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let (one, two, _) = add_folder_of_two(&mut doc);
+
+        let press = PointerEvent::new(250.0, 250.0);
+        let drag = PointerEvent::new(245.0, 260.0);
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+        let layers = &doc.canvas.layer_stack.layers;
+        assert_eq!(layers[one].offset, (35, 60));
+        assert_eq!(layers[two].offset, (145, 70));
+    }
+
+    #[test]
+    fn alt_drag_copies_a_selected_folder_with_its_contents() {
+        let mut t = MoveTool::new();
+        t.snap_enabled = false;
+        let mut doc = Document::new(DocumentId(1), 300, 300);
+        let (one, two, header) = add_folder_of_two(&mut doc);
+        let source_group = doc.canvas.layer_stack.layers[header].id;
+
+        let press = PointerEvent::new(45.0, 55.0);
+        let mut drag = PointerEvent::new(75.0, 55.0);
+        drag.alt = true;
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+
+        let layers = &doc.canvas.layer_stack.layers;
+        assert_eq!(layers.len(), 7, "Background + the folder of two, twice");
+        assert_eq!(layers[one].offset, (40, 50), "the originals stay put");
+        assert_eq!(layers[two].offset, (150, 60));
+        let copy = layers
+            .iter()
+            .find(|l| l.is_group() && l.id != source_group)
+            .expect("the folder was copied, not one layer of it");
+        assert!(copy.selected, "the copy is what is being dragged");
+        let mut moved: Vec<(i32, i32)> = layers
+            .iter()
+            .filter(|l| l.parent_id == Some(copy.id))
+            .map(|l| l.offset)
+            .collect();
+        moved.sort_unstable();
+        assert_eq!(moved, vec![(70, 50), (180, 60)], "both copies moved");
     }
 
     #[test]

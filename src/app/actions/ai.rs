@@ -5,13 +5,14 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 
 impl App {
-    /// Called when user clicks "Select Subject".
-    /// Triggers model download (if needed) then starts async inference.
+    /// Called when user clicks "Select Subject": the model is downloaded
+    /// first when it is missing, then `select.subject` runs in the background
+    /// and lands on the document it was started on.
     pub fn do_select_subject(&mut self) {
         use crate::core::select_subject::SubjectStatus;
 
         {
-            let status = self.jobs.select_subject.status.lock().unwrap().clone();
+            let status = self.jobs.select_subject.status.lock().clone();
             if matches!(status, SubjectStatus::NoModel | SubjectStatus::Error(_)) {
                 drop(status);
                 self.jobs.select_subject.download_model_async();
@@ -25,101 +26,8 @@ impl App {
                 self.shell.status_msg = "Model is still downloading…".to_string();
                 return;
             }
-            if matches!(status, SubjectStatus::LoadingModel | SubjectStatus::Running) {
-                self.shell.status_msg = self.jobs.select_subject.status_text();
-                return;
-            }
         }
-
-        let doc_id = self.docs.active().id.0;
-        let w = self.docs.active().canvas.width;
-        let h = self.docs.active().canvas.height;
-        let pixels = {
-            self.docs.active_mut().canvas.ensure_pixels();
-            self.docs.active().canvas.pixels.clone()
-        };
-
-        if self.jobs.select_subject.run_async(doc_id, pixels, w, h) {
-            self.shell.status_msg = self.jobs.select_subject.status_text();
-        }
-        if let Some(win) = &self.win.window {
-            win.request_redraw();
-        }
-    }
-
-    /// Poll for a completed Select Subject result and apply it to the selection.
-    /// Called every frame from the render loop.
-    pub fn poll_select_subject(&mut self) {
-        if let Some((doc_id, result)) = self.jobs.select_subject.poll_result() {
-            match result {
-                Ok(mask) => {
-                    // Apply to the document the job was started on, not whatever
-                    // tab is active now — the user may have switched tabs while
-                    // inference ran. Falling back to the active doc for a legacy
-                    // job with no id keeps old behaviour.
-                    let idx = match doc_id {
-                        Some(id) => self.docs.documents.iter().position(|d| d.id.0 == id),
-                        None => Some(self.docs.active_doc_idx),
-                    };
-                    let Some(idx) = idx else {
-                        self.shell.status_msg =
-                            "Select Subject: tab gốc đã đóng — bỏ kết quả".to_string();
-                        if let Some(w) = &self.win.window {
-                            w.request_redraw();
-                        }
-                        return;
-                    };
-                    let active = self.docs.active_doc_idx;
-                    let engine = if self.jobs.select_subject.used_gpu() {
-                        "GPU"
-                    } else {
-                        "CPU"
-                    };
-                    let n = {
-                        let c = &self.docs.documents[idx].canvas;
-                        (c.width * c.height) as usize
-                    };
-                    if mask.len() != n {
-                        // Canvas was resized (e.g. cropped) while inference ran.
-                        self.shell.status_msg =
-                            "Select Subject: kích thước ảnh đã đổi — thử lại".to_string();
-                    } else {
-                        {
-                            let canvas = &mut self.docs.documents[idx].canvas;
-                            let mut cmd = crate::core::command::SelectionCommand::capture_before(
-                                "Select Subject",
-                                &canvas.selection,
-                            );
-                            canvas.selection.mask.copy_from_slice(&mask);
-                            canvas.selection.active = mask.iter().any(|&v| v > 0);
-                            canvas.selection.mask_revision += 1;
-                            canvas.selection.mark_bbox_dirty();
-                            cmd.capture_after(&canvas.selection);
-                            canvas.record(Box::new(cmd));
-                        }
-                        if idx == active {
-                            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-                            self.shell.status_msg = format!("Select Subject xong ({engine})");
-                        } else {
-                            // Non-active tab: refresh its bbox now so the mask is
-                            // correct when the user switches to it (switch_to_doc
-                            // re-uploads the selection on activation).
-                            self.docs.documents[idx].canvas.selection.refresh_bbox();
-                            let title = self.docs.documents[idx].title.clone();
-                            self.shell.status_msg = format!(
-                                "Select Subject xong ({engine}) ở tab \"{title}\" — chuyển qua tab đó để xem"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    self.shell.status_msg = format!("Select Subject error: {}", e);
-                }
-            }
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-        }
+        self.start_command("select.subject", serde_json::json!({}));
     }
 
     /// Hand a large Smart Repair stroke to the AI inpainter on a worker

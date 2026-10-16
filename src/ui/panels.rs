@@ -1,5 +1,6 @@
 use super::{UiActions, UiData};
 use crate::core::layer::{BlendMode, PaintTarget};
+use crate::core::text::SystemFonts;
 use crate::core::text::TextFontFamily;
 use egui;
 use egui_phosphor::regular as ph;
@@ -334,9 +335,9 @@ pub(super) fn font_family_field(
         // bottom chrome (status strip + page-tabs bar), so it fills the window
         // height instead of stopping at a fixed size.
         let list_top = resp.rect.bottom() + 2.0;
-        // statusbar (22) + artboard tabs bar (42) + a gap that also covers the
+        // The status bar, the page-tabs bar, and a gap that also covers the
         // popup frame's own padding.
-        const BOTTOM_CHROME: f32 = super::statusbar::HEIGHT + 42.0 + 18.0;
+        const BOTTOM_CHROME: f32 = super::statusbar::HEIGHT + super::artboard_bar::BAR_H + 18.0;
         let list_height = (ui.ctx().viewport_rect().bottom() - BOTTOM_CHROME - list_top).max(220.0);
         let area = egui::Area::new(egui::Id::new("text_panel_font_area"))
             .order(egui::Order::Foreground)

@@ -1442,6 +1442,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
 name = "ecb"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2722,17 +2728,35 @@ dependencies = [
  "hayro",
  "hmac-sha256",
  "i_overlay",
+ "iai-ai",
+ "iai-automation",
+ "iai-canvas",
+ "iai-color",
+ "iai-develop",
+ "iai-diag",
+ "iai-doc",
+ "iai-engine",
+ "iai-formats",
+ "iai-geom",
+ "iai-gpu",
+ "iai-history",
+ "iai-imaging",
+ "iai-layout",
+ "iai-platform",
+ "iai-raster",
  "iai-raw",
  "iai-raw-api",
+ "iai-text",
+ "iai-vector",
  "image",
  "lcms2",
  "lcms2-sys",
- "libloading",
  "lopdf",
  "lyon_path",
  "lyon_tessellation",
  "naga",
  "ort",
+ "parking_lot",
  "png 0.17.16",
  "pollster 0.3.0",
  "qrcodegen",
@@ -2740,6 +2764,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "rustc-demangle",
+ "schemars",
  "serde",
  "serde_json",
  "socket2",
@@ -2755,6 +2780,242 @@ dependencies = [
 ]
 
 [[package]]
+name = "iai-ai"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hmac-sha256",
+ "iai-platform",
+ "image",
+ "ort",
+ "parking_lot",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iai-automation"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "iai-canvas",
+ "iai-engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iai-canvas"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "flate2",
+ "iai-ai",
+ "iai-color",
+ "iai-develop",
+ "iai-doc",
+ "iai-geom",
+ "iai-history",
+ "iai-imaging",
+ "iai-platform",
+ "iai-raster",
+ "iai-text",
+ "iai-vector",
+ "image",
+ "lcms2",
+ "lopdf",
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
+name = "iai-color"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "foreign-types-shared 0.3.1",
+ "lcms2",
+ "lcms2-sys",
+ "serde",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iai-develop"
+version = "0.1.0"
+dependencies = [
+ "foreign-types-shared 0.3.1",
+ "hmac-sha256",
+ "iai-color",
+ "iai-doc",
+ "iai-platform",
+ "iai-raster",
+ "lcms2",
+ "lcms2-sys",
+ "rayon",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "iai-diag"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "rustc-demangle",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iai-doc"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "iai-color",
+ "iai-geom",
+ "iai-raster",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iai-engine"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "cosmic-text",
+ "iai-ai",
+ "iai-canvas",
+ "iai-color",
+ "iai-diag",
+ "iai-doc",
+ "iai-formats",
+ "iai-geom",
+ "iai-history",
+ "iai-imaging",
+ "iai-platform",
+ "iai-raster",
+ "iai-text",
+ "iai-vector",
+ "image",
+ "parking_lot",
+ "rayon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "iai-formats"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytemuck",
+ "flate2",
+ "hayro",
+ "iai-canvas",
+ "iai-color",
+ "iai-develop",
+ "iai-diag",
+ "iai-doc",
+ "iai-geom",
+ "iai-history",
+ "iai-imaging",
+ "iai-platform",
+ "iai-raster",
+ "iai-raw",
+ "iai-raw-api",
+ "iai-text",
+ "iai-vector",
+ "image",
+ "libloading",
+ "lopdf",
+ "png 0.17.16",
+ "rayon",
+ "serde_json",
+ "tiff",
+ "zip",
+]
+
+[[package]]
+name = "iai-geom"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "iai-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "iai-color",
+ "iai-develop",
+ "iai-doc",
+ "iai-geom",
+ "iai-imaging",
+ "iai-raster",
+ "iai-vector",
+ "lyon_path",
+ "lyon_tessellation",
+ "naga",
+ "pollster 0.3.0",
+ "wgpu",
+]
+
+[[package]]
+name = "iai-history"
+version = "0.1.0"
+dependencies = [
+ "iai-doc",
+ "iai-platform",
+ "iai-raster",
+]
+
+[[package]]
+name = "iai-imaging"
+version = "0.1.0"
+dependencies = [
+ "iai-doc",
+ "iai-raster",
+ "rayon",
+]
+
+[[package]]
+name = "iai-layout"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "chrono",
+ "cosmic-text",
+ "csv",
+ "iai-doc",
+ "iai-text",
+]
+
+[[package]]
+name = "iai-platform"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iai-raster"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "iai-color",
+ "rayon",
+]
+
+[[package]]
 name = "iai-raw"
 version = "0.1.0"
 dependencies = [
@@ -2766,6 +3027,34 @@ dependencies = [
 [[package]]
 name = "iai-raw-api"
 version = "0.1.0"
+
+[[package]]
+name = "iai-text"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "cosmic-text",
+ "flate2",
+ "iai-doc",
+ "iai-geom",
+ "iai-platform",
+ "iai-vector",
+ "image",
+ "lopdf",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "iai-vector"
+version = "0.1.0"
+dependencies = [
+ "i_overlay",
+ "iai-doc",
+ "iai-geom",
+ "iai-history",
+ "iai-raster",
+ "rayon",
+]
 
 [[package]]
 name = "iana-time-zone"
@@ -5228,6 +5517,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ref-cast"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
+dependencies = [
+ "ref-cast-impl",
+]
+
+[[package]]
+name = "ref-cast-impl"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5443,6 +5752,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5549,6 +5883,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -5960,6 +6305,17 @@ name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7870,6 +8226,13 @@ name = "xml-rs"
 version = "0.8.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "xz2"

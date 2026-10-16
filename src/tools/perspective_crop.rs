@@ -37,7 +37,8 @@ pub struct PerspectiveCropTool {
     /// these values so integer rounding never feeds back into fields such as cm.
     pub manual_input: Option<(f32, f32)>,
     /// Output resolution (px/inch) — for unit conversion in the options bar and
-    /// written to the rectified image's metadata on commit.
+    /// written to the rectified image's metadata on commit. 300 until the user
+    /// sets another; the photo's own resolution has no say in it.
     pub dpi: f32,
     /// Options-bar unit index (see `core::units::Unit::all`): 0=px,1=cm,2=mm,…
     pub unit: u8,
@@ -66,7 +67,7 @@ impl PerspectiveCropTool {
             manual_size: None,
             manual_input: None,
             dpi: 300.0,
-            unit: 0,
+            unit: Unit::Millimeters as u8,
             press_pos: (0.0, 0.0),
             sweeping: false,
             sweep_cur: (0.0, 0.0),

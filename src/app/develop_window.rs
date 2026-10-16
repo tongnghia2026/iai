@@ -60,6 +60,7 @@ struct DevelopWorkArea {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)] // Win32: the monitor work area
 fn native_work_area(
     window: &Window,
 ) -> Option<(
@@ -1095,10 +1096,10 @@ impl App {
         });
 
         for event in &full_output.platform_output.events {
-            crate::diag::widget_event(event);
+            crate::diag_ui::widget_event(event);
         }
         if let Some(at) = pressed_at.filter(|_| ctx.is_pointer_over_egui()) {
-            crate::diag::pressed_text(&full_output.shapes, at);
+            crate::diag_ui::pressed_text(&full_output.shapes, at);
         }
         if let Some(state) = &mut self.win.develop_egui_state {
             state.handle_platform_output(&window, full_output.platform_output);

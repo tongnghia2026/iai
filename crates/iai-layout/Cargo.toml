@@ -1,0 +1,22 @@
+[package]
+name = "iai-layout"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_layout"
+path = "src/lib.rs"
+
+[dependencies]
+iai-doc = { path = "../iai-doc" }
+iai-text = { path = "../iai-text" }
+calamine = { version = "0.26", features = ["dates"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+csv = "1"
+
+[lints]
+workspace = true

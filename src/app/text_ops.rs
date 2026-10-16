@@ -4,44 +4,13 @@
 
 use super::render::CanvasEvent;
 use super::state::{App, TextEditState, TextFontPreviewSession, TextFontPreviewState};
-use crate::core::canvas::Canvas;
+use crate::core::canvas::text_layer::{layer_name_from, rasterize_into_layer};
 use crate::core::command::LayerStructureCommand;
 use crate::core::layer::{Layer, LayerType};
-use crate::core::text::{rasterize_placed, TextData};
+use crate::core::text::rasterize_placed;
+use crate::core::text::TextData;
 use crate::core::tile::TileMap;
 use crate::tools::ToolId;
-
-/// Rasterize `td` and replace the layer's tiles with it. The text is written at
-/// tile-local (0,0); `origin` is the upright text anchor, and rotated tiles
-/// receive a bbox offset. Also updates the layer name from the content.
-///
-/// The tiles are raster-sized (not canvas-sized): a canvas-sized TileMap would
-/// silently crop text extending past the canvas edge, and the transform-commit
-/// path already produces raster-sized text layers — width/height must track
-/// the tiles for hit-testing and .iai export.
-fn rasterize_into_layer(canvas: &mut Canvas, idx: usize, origin: (i32, i32), td: TextData) {
-    let (cw, ch) = (canvas.width, canvas.height);
-    let (tiles, w, h, offset) = match rasterize_placed(&td) {
-        Some((raster, delta)) => (
-            TileMap::from_rgba(&raster.rgba, raster.width, raster.height),
-            raster.width,
-            raster.height,
-            (
-                origin.0.saturating_add(delta.0),
-                origin.1.saturating_add(delta.1),
-            ),
-        ),
-        None => (TileMap::new(cw, ch), cw, ch, origin),
-    };
-    let name = layer_name_from(&td.content);
-    let layer = &mut canvas.layer_stack.layers[idx];
-    layer.tiles = tiles;
-    layer.width = w;
-    layer.height = h;
-    layer.offset = offset;
-    layer.name = name;
-    layer.layer_type = LayerType::Text(td);
-}
 
 fn text_edit_origin_for_layer(td: &TextData, layer: &Layer) -> (i32, i32) {
     let Some((placed, delta)) = rasterize_placed(td) else {
@@ -128,16 +97,6 @@ fn font_display_label(fam: &crate::core::text::TextFontFamily) -> String {
     } else {
         format!("{name} {style}")
     }
-}
-
-/// First line of the text, trimmed and truncated, for the layer panel name.
-fn layer_name_from(content: &str) -> String {
-    let first = content.lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        return "Text".to_string();
-    }
-    let truncated: String = first.chars().take(24).collect();
-    truncated
 }
 
 /// Rebuild `session.glyph_styles` after the buffer changed from `old` to the
@@ -1298,6 +1257,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::canvas::Canvas;
 
     fn app_with_text(content: &str) -> (App, usize) {
         let mut app = App::new();

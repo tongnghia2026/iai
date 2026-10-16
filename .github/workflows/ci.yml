@@ -41,10 +41,12 @@ jobs:
       - name: Build (as shipped, with the Canvas Editor)
         run: cargo build --locked --features canvas-editor-webview
       # The unit tests are the suite kept green day to day.
-      - name: Test (as shipped; includes WGSL validation)
-        run: cargo test --locked --lib --features canvas-editor-webview
-      - name: Test (the RAW library and its interface)
-        run: cargo test --locked -p iai-raw -p iai-raw-api
+      # Every crate of the workspace, as shipped (the app's features turn on
+      # those of the crates: the Pro part, the RAW DLL).
+      - name: Test (every crate, as shipped; includes WGSL validation)
+        run: cargo test --locked --workspace --lib --features iai/canvas-editor-webview
+      - name: Test (the workspace checks)
+        run: cargo test --locked -p xtask
       # The integration tests in `tests/`: colour-pipeline and CPU/GPU parity
       # gates, the rest hand-run probes (ignored). The GPU ones skip themselves
       # here (`CI` is set).
@@ -84,7 +86,8 @@ jobs:
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libgtk-3-dev liblcms2-dev
       - name: Check
-        run: cargo check --locked --all-targets
+        # dev-tools: the development programs beside the app keep compiling too.
+        run: cargo check --locked --workspace --all-targets --features iai/dev-tools
 
   # Staging job for the next portability step: a full build + test on Linux and
   # macOS (not just `cargo check`). Informational for now so a link error or a
@@ -121,14 +124,16 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         # This is a large test graph. One linker at a time avoids rust-lld being
         # killed by resource pressure on shared GitHub-hosted Linux runners.
-        run: xvfb-run -a cargo test --locked --jobs 1
+        run: xvfb-run -a cargo test --locked --workspace --jobs 1
       - name: Test (macOS)
         if: matrix.os == 'macos-latest'
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   # Blocking since 2026-10-08, when the backlog (412 warnings) reached zero.
   # The lints switched off on purpose are listed, with reasons, under
-  # `[lints.clippy]` in Cargo.toml.
+  # `[workspace.lints.clippy]` in Cargo.toml. Every warning fails, except the
+  # crash lints (`unwrap`, `expect`, `panic!`, unsafe without a SAFETY note):
+  # each crate may keep as many of those as xtask/lint-budget.txt allows.
   clippy:
     name: Clippy
     runs-on: windows-latest
@@ -143,6 +148,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy (as shipped, with the Canvas Editor)
-        run: cargo clippy --locked --features canvas-editor-webview -- -D warnings
+        run: cargo xtask lints --features iai/canvas-editor-webview
       - name: Clippy (without the Canvas Editor)
-        run: cargo clippy --locked -- -D warnings
+        run: cargo xtask lints
+      - name: Crate layers
+        run: cargo xtask layers

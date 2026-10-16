@@ -1,0 +1,22 @@
+[package]
+name = "iai-vector"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/tongnghia2026/iai"
+publish = false
+
+[lib]
+name = "iai_vector"
+path = "src/lib.rs"
+
+[dependencies]
+iai-doc = { path = "../iai-doc" }
+iai-geom = { path = "../iai-geom" }
+iai-history = { path = "../iai-history" }
+iai-raster = { path = "../iai-raster" }
+i_overlay = "7.0.2"
+rayon = "1"
+
+[lints]
+workspace = true
