@@ -264,25 +264,30 @@ impl App {
         if let Some(mode) = actions.sel.set_selection_mode.take() {
             self.edit.selection_mode = mode;
         }
-        if let Some(r) = actions.sel.selection_feather.take() {
-            self.docs.active_mut().canvas.feather_selection(r);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        }
-        if let Some(px) = actions.sel.selection_grow.take() {
-            self.docs.active_mut().canvas.grow_selection(px);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        }
-        if let Some(px) = actions.sel.selection_shrink.take() {
-            self.docs.active_mut().canvas.shrink_selection(px);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        }
-        if let Some(r) = actions.sel.selection_smooth.take() {
-            self.docs.active_mut().canvas.smooth_selection(r);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        }
-        if let Some(px) = actions.sel.selection_border.take() {
-            self.docs.active_mut().canvas.border_selection(px);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+        // Select > Modify, as the command an agent runs.
+        let modify = [
+            ("feather", actions.sel.selection_feather.take()),
+            (
+                "grow",
+                actions.sel.selection_grow.take().map(|px| px as f32),
+            ),
+            (
+                "shrink",
+                actions.sel.selection_shrink.take().map(|px| px as f32),
+            ),
+            ("smooth", actions.sel.selection_smooth.take()),
+            (
+                "border",
+                actions.sel.selection_border.take().map(|px| px as f32),
+            ),
+        ];
+        for (change, amount) in modify {
+            if let Some(amount) = amount.filter(|a| *a > 0.0) {
+                let _ = self.run_with(
+                    "select.modify",
+                    serde_json::json!({"change": change, "amount": amount.min(500.0)}),
+                );
+            }
         }
         if let Some(kind) = actions.sel.open_modify_dialog.take() {
             self.shell.ui.show_modify_dialog = Some(kind);

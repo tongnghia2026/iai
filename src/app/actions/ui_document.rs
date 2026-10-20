@@ -377,9 +377,7 @@ impl App {
             self.shell.status_msg = format!("Converted to profile: {}", profile.name());
         }
         if actions.doc.convert_grayscale {
-            self.docs.active_mut().canvas.convert_to_grayscale();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.shell.status_msg = "Converted to Grayscale".to_string();
+            let _ = self.run_now("image.grayscale");
         }
         self.handle_cmyk_mode_actions(actions);
         if let Some(sixteen) = actions.doc.set_bit_depth.take() {

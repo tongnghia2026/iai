@@ -369,10 +369,7 @@ impl App {
             }
         }
         if actions.layers.merge_all {
-            // Flatten Image is tile-native (chunked 8- and 16-bit) — runs under
-            // Viewport Streaming.
-            self.docs.active_mut().canvas.flatten_all();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            let _ = self.run_now("layer.flatten");
         }
         if let Some(idx) = actions.layers.merge_group.take() {
             // Merge Group is tile-native (per-chunk subtree composite + opacity/mask

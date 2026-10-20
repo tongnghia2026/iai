@@ -247,7 +247,18 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
         .collect();
     assert_eq!(
         ids,
-        ["layer.delete", "layer.move", "layer.new", "layer.set"]
+        [
+            "layer.delete",
+            "layer.duplicate",
+            "layer.flatten",
+            "layer.mask",
+            "layer.merge_down",
+            "layer.move",
+            "layer.new",
+            "layer.place",
+            "layer.set",
+            "layer.via_copy"
+        ]
     );
     assert!(list["commands"][0]["paramsSchema"]["properties"]["layer"].is_object());
 

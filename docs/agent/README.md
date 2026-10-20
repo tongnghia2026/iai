@@ -74,8 +74,12 @@ script's first call). An MCP batch (`iai_command_batch`) holds at most 256 calls
   `iai_doc_inspect`, `iai_image_crop`, `iai_image_resize`, `iai_ai_remove_background`,
   `iai_ai_inpaint`, `iai_text_add`, `iai_vector_add_shape`, `iai_analyze_region`,
   `iai_export_pdf`, `iai_file_save`, `iai_file_list`, `iai_file_contact_sheet`,
-  `iai_image_perspective_crop`, and (Pro) `iai_id_photo_make`, `iai_id_photo_batch`,
-  `iai_print_impose_sheet`, `iai_print_card_sheet`;
+  `iai_image_perspective_crop`, `iai_image_adjust`, `iai_image_auto_levels`,
+  `iai_image_filter`, `iai_image_scan_cleanup`, `iai_layer_place`, and (Pro)
+  `iai_id_photo_make`, `iai_id_photo_batch`, `iai_print_impose_sheet`, `iai_print_card_sheet`;
+  the others (`edit.fill`, `edit.clear`, `select.modify`, `select.color_range`, `select.wand`,
+  `layer.duplicate`, `layer.merge_down`, `layer.flatten`, `image.grayscale`, `doc.close`, …)
+  through `iai_command_run`;
 - `iai_command_list` (optionally by `prefix`, with each command's JSON Schema),
   `iai_command_run`, `iai_command_batch` (atomic by default: all or nothing);
 - `iai_job_status` / `iai_job_cancel` for long commands started with `background: true`
@@ -99,8 +103,10 @@ listed. Resources: `iai://session`, `iai://commands`, `iai://doc/{id}`.
   edit (a transform, a text being typed, a dialog with a preview, Develop), changes are
   refused with `busy` — queries still answer. Ask again a little later.
 - **Pro commands** (`id_photo.make`, `id_photo.batch`, `print.impose_sheet`,
-  `print.card_sheet`) run when this machine's Pro is unlocked or on trial; otherwise
-  `permission_denied`.
+  `print.card_sheet`) run when this machine's Pro is unlocked or on trial; otherwise they
+  answer `permission_denied` saying where the person opens Pro (Help ▸ Gói Pro).
+- **Long batches:** `doc.close` a photo once it is written, so a hundred photos do not stay
+  open at once (a document with changes not saved needs `discard: true`).
 
 ## An errand, start to end
 
@@ -116,6 +122,23 @@ Twenty portraits in `D:\Photos\khach` → 3×4 ID photos on blue → 10×15 shee
 
 The test `agent::e2e` runs this through MCP (a light one in the suite; the full one with
 `IAI_AGENT_E2E_PHOTOS=<folder of portraits>`, ignored by default).
+
+## Tone, colour, filters, pages
+
+- `image.auto_levels` — a dull, dark or tinted photo (a card or a paper shot with a phone)
+  stretched end to end; `image.adjust {adjustment: {kind: …}}` for a set change (levels,
+  curves `[[in, out], …]` 0–255, brightness_contrast, hue_saturation, vibrance, exposure,
+  color_balance, invert, desaturate, threshold, posterize, black_and_white, photo_filter).
+- `image.filter {filter: {kind: …}}` — gaussian_blur, sharpen, high_pass, add_noise,
+  pixelate, reduce_noise; inside the selection when there is one.
+- `image.scan_cleanup` — a photographed page made a clean scan (white paper, black writing);
+  `look: "bilevel"` for pure black on white.
+- `layer.place {from: {path} | {doc}, box, fit}` — a picture centred on the page or in a box:
+  a photo centred on A4, several photos on one page (one box each), a page of cards. With
+  `text.add` and `vector.add_shape` that lays out a card or a sheet without a script.
+- Selections: `select.color_range {color | at, fuzziness}`, `select.wand {at, tolerance}`,
+  `select.modify {change: feather | grow | shrink | smooth | border, amount}`; then
+  `edit.fill {color}` or `edit.clear`.
 
 ## ID cards and ID photos a customer sent
 
@@ -133,8 +156,8 @@ screenshots of the electronic ID, and portraits:
    each portrait, all on photo paper, each person as many times as asked;
 4. `export.pdf {doc, path}` for each.
 
-`image.perspective_crop` lays one card (or any sheet, with `widthMm`/`heightMm`) flat in a
-document. The saved skills `in-can-cuoc-len-a4` and `anh-the-nhieu-nguoi` do steps 2–4.
+`image.perspective_crop` lays one card (or any sheet, with `widthMm`/`heightMm`, e.g. an A4
+page 210 × 297) flat in a document; follow it with `image.scan_cleanup` for a paper. The saved skills `in-can-cuoc-len-a4` and `anh-the-nhieu-nguoi` do steps 2–4.
 
 ## A many-page PDF
 

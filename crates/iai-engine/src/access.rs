@@ -58,6 +58,18 @@ impl Session<'_> {
         id
     }
 
+    /// Close document `doc`; the id of the one shown after.
+    pub fn close_document(&mut self, doc: u32) -> Result<Option<u32>, CmdError> {
+        let index = self.index_of(doc).ok_or_else(|| no_such_document(doc))?;
+        self.ws.remove(index);
+        let shown = self.active_id();
+        if let Some(shown) = shown {
+            self.emit(EngineEvent::Shown { doc: shown });
+            self.emit(EngineEvent::Structure { doc: shown });
+        }
+        Ok(shown)
+    }
+
     /// Show document `doc`.
     pub fn show(&mut self, doc: u32) -> Result<(), CmdError> {
         let index = self.index_of(doc).ok_or_else(|| no_such_document(doc))?;

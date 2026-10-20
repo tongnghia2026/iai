@@ -838,3 +838,357 @@ fn a_contact_sheet_numbers_a_folders_photos_in_one_picture() {
     assert_eq!(given["photos"][0]["name"], json!("c.jpg"));
     assert_eq!(given["photos"][1]["n"], json!(2));
 }
+
+/// The grey level of a `#RRGGBB` mean (its red).
+fn level(hex: &str) -> u8 {
+    u8::from_str_radix(&hex[1..3], 16).unwrap()
+}
+
+/// A page, half dark grey and half light grey, on its one Background layer.
+fn two_greys(t: &mut Setup) -> Value {
+    let made = t.run(
+        "file.new",
+        json!({"widthPx": 80, "heightPx": 40, "background": "#A0A0A0"}),
+    );
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 0, "y": 0, "w": 40, "h": 40}}),
+    );
+    t.run("edit.fill", json!({"color": "#404040"}));
+    t.run("select.none", json!({}));
+    made
+}
+
+#[test]
+fn tone_and_colour_are_adjusted_as_the_adjustments_menu_does() {
+    let mut t = Setup::new();
+    two_greys(&mut t);
+    assert_eq!(t.mean(json!({"x": 5, "y": 5, "w": 10, "h": 10})), "#404040");
+    t.run("image.adjust", json!({"adjustment": {"kind": "invert"}}));
+    assert_eq!(t.mean(json!({"x": 5, "y": 5, "w": 10, "h": 10})), "#BFBFBF");
+    t.run("edit.undo", json!({}));
+    // Levels: 64 becomes black, 160 white.
+    t.run(
+        "image.adjust",
+        json!({"adjustment": {"kind": "levels", "inBlack": 64, "inWhite": 160}}),
+    );
+    assert_eq!(t.mean(json!({"x": 5, "y": 5, "w": 10, "h": 10})), "#000000");
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 5, "w": 10, "h": 10})),
+        "#FFFFFF"
+    );
+    t.run("edit.undo", json!({}));
+    // A curve lifting the mids lightens the dark half.
+    t.run(
+        "image.adjust",
+        json!({"adjustment": {"kind": "curves", "points": [[0, 0], [64, 128], [255, 255]]}}),
+    );
+    assert!(level(&t.mean(json!({"x": 5, "y": 5, "w": 10, "h": 10}))) > 0x70);
+    for adjustment in [
+        json!({"kind": "brightness_contrast", "brightness": 30}),
+        json!({"kind": "hue_saturation", "saturation": -50}),
+        json!({"kind": "vibrance", "vibrance": 20}),
+        json!({"kind": "exposure", "exposure": 0.5}),
+        json!({"kind": "color_balance", "midtones": [10, 0, -10]}),
+        json!({"kind": "desaturate"}),
+        json!({"kind": "threshold"}),
+        json!({"kind": "posterize", "levels": 3}),
+        json!({"kind": "black_and_white"}),
+        json!({"kind": "photo_filter", "color": "#3366FF"}),
+    ] {
+        let done = t.run("image.adjust", json!({"adjustment": adjustment}));
+        assert!(!done["step"].as_str().unwrap().is_empty(), "{adjustment}");
+    }
+    let e = t
+        .try_run(
+            "image.adjust",
+            json!({"adjustment": {"kind": "levels", "inBlack": 200, "inWhite": 100}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn auto_levels_stretches_a_dull_photo_end_to_end() {
+    let mut t = Setup::new();
+    two_greys(&mut t);
+    t.run("image.auto_levels", json!({"clipPercent": 0}));
+    assert_eq!(t.mean(json!({"x": 5, "y": 5, "w": 10, "h": 10})), "#000000");
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 5, "w": 10, "h": 10})),
+        "#FFFFFF"
+    );
+    // One flat grey has nothing to stretch.
+    t.run(
+        "file.new",
+        json!({"widthPx": 20, "heightPx": 20, "background": "#808080"}),
+    );
+    let e = t.try_run("image.auto_levels", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+}
+
+#[test]
+fn a_filter_blurs_the_edge_and_only_inside_the_selection() {
+    let mut t = Setup::new();
+    two_greys(&mut t);
+    t.run(
+        "image.filter",
+        json!({"filter": {"kind": "gaussian_blur", "radius": 4}}),
+    );
+    let edge = level(&t.mean(json!({"x": 38, "y": 10, "w": 4, "h": 10})));
+    assert!((0x50..0x90).contains(&edge), "{edge:#x}");
+    t.run("edit.undo", json!({}));
+    // Selected: the left edge of the selection is the only edge that moves.
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 0, "y": 0, "w": 20, "h": 40}}),
+    );
+    t.run(
+        "image.filter",
+        json!({"filter": {"kind": "gaussian_blur", "radius": 4}}),
+    );
+    assert_eq!(
+        t.mean(json!({"x": 38, "y": 10, "w": 4, "h": 10})),
+        "#707070"
+    );
+    for filter in [
+        json!({"kind": "sharpen"}),
+        json!({"kind": "high_pass", "radius": 3}),
+        json!({"kind": "add_noise", "amount": 10}),
+        json!({"kind": "pixelate", "cell": 4}),
+        json!({"kind": "reduce_noise"}),
+    ] {
+        t.run("image.filter", json!({"filter": filter}));
+    }
+}
+
+#[test]
+fn a_photographed_page_comes_out_white_with_black_writing() {
+    let mut t = Setup::new();
+    // Greyish paper, darker at the right (uneven light), and a line of writing.
+    t.run(
+        "file.new",
+        json!({"widthPx": 200, "heightPx": 120, "background": "#B4B4B4"}),
+    );
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 120, "y": 0, "w": 80, "h": 120}}),
+    );
+    t.run("edit.fill", json!({"color": "#9A9A9A"}));
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 20, "y": 55, "w": 160, "h": 6}}),
+    );
+    t.run("edit.fill", json!({"color": "#202020"}));
+    t.run("select.none", json!({}));
+    t.run("image.scan_cleanup", json!({}));
+    assert!(level(&t.mean(json!({"x": 10, "y": 10, "w": 30, "h": 30}))) >= 0xF0);
+    assert!(level(&t.mean(json!({"x": 150, "y": 10, "w": 30, "h": 30}))) >= 0xF0);
+    assert!(level(&t.mean(json!({"x": 40, "y": 56, "w": 100, "h": 4}))) <= 0x40);
+}
+
+#[test]
+fn a_picture_is_placed_centred_in_its_box() {
+    let dir = TempDir::new("place");
+    let photo = dir.path("do.png");
+    image::RgbImage::from_pixel(300, 100, image::Rgb([200, 30, 30]))
+        .save(&photo)
+        .unwrap();
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 1000, "heightPx": 1000}));
+    // Whole page: as wide as the page, centred down it.
+    let placed = t.run("layer.place", json!({"from": {"path": photo}}));
+    let id = placed["layer"].clone();
+    let bounds = |t: &mut Setup, id: &Value| {
+        let info = t.inspect();
+        let layer = info["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == *id)
+            .unwrap()
+            .clone();
+        let b = &layer["bounds"];
+        (
+            b["x"].as_i64().unwrap(),
+            b["y"].as_i64().unwrap(),
+            b["w"].as_i64().unwrap(),
+            b["h"].as_i64().unwrap(),
+        )
+    };
+    assert_eq!(bounds(&mut t, &id), (0, 333, 1000, 333));
+    assert_eq!(
+        t.mean(json!({"x": 400, "y": 450, "w": 200, "h": 100})),
+        "#C81E1E"
+    );
+    // A box with a margin, turned upright.
+    let placed = t.run(
+        "layer.place",
+        json!({"from": {"path": photo}, "box": {"x": 100, "y": 100, "w": 300, "h": 500}, "marginPx": 50, "turn": 90}),
+    );
+    assert_eq!(bounds(&mut t, &placed["layer"]), (183, 150, 133, 400));
+    // Cover fills the box; what overflows is cut.
+    let placed = t.run(
+        "layer.place",
+        json!({"from": {"path": photo}, "box": {"x": 600, "y": 600, "w": 200, "h": 200}, "fit": "cover", "name": "Ô"}),
+    );
+    assert_eq!(bounds(&mut t, &placed["layer"]), (600, 600, 200, 200));
+    // Another document's page.
+    let other = t.run(
+        "file.new",
+        json!({"widthPx": 50, "heightPx": 50, "background": "#00FF00"}),
+    )["doc"]
+        .clone();
+    let first = t.run("doc.list", json!({}))["docs"][0]["doc"].clone();
+    let placed = t.run(
+        "layer.place",
+        json!({"doc": first, "from": {"doc": other}, "fit": "none"}),
+    );
+    assert_eq!(placed["doc"], first);
+    let e = t
+        .try_run(
+            "layer.place",
+            json!({"from": {"path": photo, "doc": other}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn everyday_edits_fill_clear_edge_duplicate_merge_flatten_and_close() {
+    let mut t = Setup::new();
+    let made = t.run("file.new", json!({"widthPx": 60, "heightPx": 40}));
+    let doc = made["doc"].clone();
+    let count = |t: &mut Setup| t.inspect()["layers"].as_array().unwrap().len();
+    t.run("layer.new", json!({"kind": "fill", "fill": "#3366CC"}));
+    // Clear a corner of the blue layer: the white page shows through.
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 0, "y": 0, "w": 20, "h": 20}}),
+    );
+    t.run("edit.clear", json!({}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 10, "h": 10})), "#FFFFFF");
+    // Grow the selection, then fill it red.
+    let grown = t.run("select.modify", json!({"change": "grow", "amount": 5}));
+    assert_eq!(grown["bounds"]["w"], json!(25));
+    t.run("edit.fill", json!({"color": "#FF0000"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 10, "h": 10})), "#FF0000");
+    t.run("select.modify", json!({"change": "feather", "amount": 3}));
+    t.run("select.none", json!({}));
+    let e = t
+        .try_run("select.modify", json!({"change": "shrink", "amount": 2}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    // Duplicate, merge down, flatten.
+    assert_eq!(count(&mut t), 2);
+    t.run("layer.duplicate", json!({}));
+    assert_eq!(count(&mut t), 3);
+    t.run("layer.merge_down", json!({}));
+    assert_eq!(count(&mut t), 2);
+    t.run("layer.flatten", json!({}));
+    assert_eq!(count(&mut t), 1);
+    assert_eq!(
+        t.mean(json!({"x": 40, "y": 30, "w": 10, "h": 5})),
+        "#3366CC"
+    );
+    // Close: refused with changes, unless discarded; never as a dry run.
+    let e = t.try_run("doc.close", json!({"doc": doc})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    let mut s = t.engine.session(&mut t.ws);
+    let mut call = CommandCall::new("doc.close", json!({"doc": doc, "discard": true}));
+    call.dry_run = true;
+    assert_eq!(s.execute(call).unwrap_err().code, ErrorCode::BadParams);
+    drop(s);
+    let other = t.run("file.new", json!({"widthPx": 10, "heightPx": 10}))["doc"].clone();
+    let closed = t.run("doc.close", json!({"doc": doc, "discard": true}));
+    assert_eq!(closed["shown"], other);
+    assert_eq!(
+        t.run("doc.list", json!({}))["docs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_colour_is_selected_by_its_value_by_a_point_or_by_the_wand() {
+    let mut t = Setup::new();
+    two_greys(&mut t);
+    let dark = t.run(
+        "select.color_range",
+        json!({"color": "#404040", "fuzziness": 10}),
+    );
+    assert_eq!(dark["bounds"], json!({"x": 0, "y": 0, "w": 40, "h": 40}));
+    let light = t.run(
+        "select.color_range",
+        json!({"at": {"x": 70, "y": 5}, "fuzziness": 10}),
+    );
+    assert_eq!(light["bounds"]["x"], json!(40));
+    t.run("select.none", json!({}));
+    let wand = t.run("select.wand", json!({"at": {"x": 10, "y": 30}}));
+    assert_eq!(wand["bounds"], json!({"x": 0, "y": 0, "w": 40, "h": 40}));
+    let both = t.run(
+        "select.wand",
+        json!({"at": {"x": 70, "y": 30}, "mode": "add"}),
+    );
+    assert_eq!(both["bounds"]["w"], json!(80));
+    let e = t
+        .try_run("select.wand", json!({"at": {"x": 500, "y": 5}}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "select.color_range",
+            json!({"color": "#FFFFFF", "at": {"x": 1, "y": 1}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn a_colour_page_turns_grey() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 20, "heightPx": 20, "background": "#C83214"}),
+    );
+    t.run("image.grayscale", json!({}));
+    let mean = t.mean(json!({"x": 0, "y": 0, "w": 20, "h": 20}));
+    assert_eq!(&mean[1..3], &mean[3..5]);
+    assert_eq!(&mean[3..5], &mean[5..7]);
+}
+
+#[test]
+fn a_selection_becomes_a_layer_and_a_mask_hides_and_is_applied() {
+    let mut t = Setup::new();
+    two_greys(&mut t);
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 0, "y": 0, "w": 10, "h": 10}}),
+    );
+    let copied = t.run("layer.via_copy", json!({}));
+    let layers = copied["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), 2);
+    let id = layers[0]["id"].clone();
+    assert_eq!(copied["layer"], id);
+    t.run("select.none", json!({}));
+    // Hide all of it: the grey below shows; apply: its pixels are gone.
+    t.run("edit.fill", json!({"layer": id, "color": "#FF0000"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+    t.run("layer.mask", json!({"layer": id, "op": "hide_all"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#404040");
+    let e = t
+        .try_run("layer.mask", json!({"layer": id, "op": "reveal_all"}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    t.run("layer.mask", json!({"layer": id, "op": "apply"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#404040");
+    let e = t
+        .try_run("layer.mask", json!({"layer": id, "op": "delete"}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    // Nothing selected: the whole layer is copied.
+    let whole = t.run("layer.via_copy", json!({}));
+    assert_eq!(whole["layers"].as_array().unwrap().len(), 3);
+}

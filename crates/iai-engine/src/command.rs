@@ -67,9 +67,12 @@ impl CommandMeta {
     /// Whether it may run on a snapshot and be taken back (`dryRun`): only
     /// commands whose every effect stays inside the session.
     pub fn can_dry_run(&self) -> bool {
-        self.effects
-            .iter()
-            .all(|e| matches!(e, Effect::Query | Effect::Edit | Effect::LocalAi))
+        // Closing a tab is no step of any page's history: nothing takes it back.
+        self.id != "doc.close"
+            && self
+                .effects
+                .iter()
+                .all(|e| matches!(e, Effect::Query | Effect::Edit | Effect::LocalAi))
     }
 }
 

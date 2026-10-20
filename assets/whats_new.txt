@@ -2,6 +2,12 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+21/10/2026
+- Trợ lý AI làm được thêm nhiều việc chỉnh ảnh: tự cân sáng ảnh tối hay ám màu, chỉnh sáng tối, màu sắc, đen trắng, làm nét, làm mờ, giảm nhiễu, làm sạch ảnh chụp giấy tờ cho trắng như bản scan.
+- Trợ lý AI đặt được ảnh vào giữa trang A4 hay ghép nhiều ảnh lên một trang, chọn vùng theo màu, tô màu, xóa vùng chọn, gộp layer.
+- Khi máy chưa mở Gói Pro mà nhờ AI làm việc của Pro (ảnh thẻ, xếp ảnh in, căn cước), AI sẽ nói rõ cần vào Help ▸ Gói Pro để mở khóa.
+- Auto Levels, chuyển ảnh xám và Flatten Image giờ báo kết quả bằng tiếng Việt ở thanh dưới cùng.
+
 20/10/2026
 - Trợ lý AI nay in được căn cước cho khách: đưa nó thư mục ảnh khách gửi (căn cước chụp nghiêng, mờ, ảnh chụp màn hình căn cước điện tử, ảnh chân dung để lẫn), nó tự nhận ra ảnh nào là mặt trước, mặt sau, của ai, cắt thẳng từng thẻ đúng cỡ thật rồi xếp 4 thẻ một trang A4: mặt trước và mặt sau một hàng, ảnh màn hình xoay ngang một hàng.
 - Trợ lý AI làm ảnh thẻ cho nhiều người một lần, mỗi người in đúng số tấm bạn dặn, xếp chung lên giấy ảnh 10x15 có dấu cắt.

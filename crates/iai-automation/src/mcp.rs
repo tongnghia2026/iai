@@ -41,6 +41,8 @@ read relative to the folders this session was granted (absolute paths must lie i
 `iai_file_list` shows what a folder holds, `iai_file_contact_sheet` its photos numbered in one \
 picture (to sort a customer's photos at a glance). Cards shot at a slant: \
 `image.perspective_crop` lays one flat, `print.card_sheet` (Pro) lays ID cards out on A4. \
+Tone and colour: `image.auto_levels`, `image.adjust`, `image.filter`, `image.scan_cleanup`; \
+pictures onto a page: `layer.place`. \
 Long commands (AI models, files) answer when done, or with a job id to poll with \
 `iai_job_status`. Every change is one undo step (`edit.undo`). To check work, measure it: \
 `analyze.region` gives the average colour, spread and coverage of a rectangle; \

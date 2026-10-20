@@ -296,3 +296,66 @@ mod tests {
         ));
     }
 }
+
+/// Menu actions that now run the command an agent runs: the same change,
+/// one undo step, as before.
+#[cfg(test)]
+mod menu_runs_commands {
+    use crate::app::state::App;
+    use crate::core::canvas::Canvas;
+    use crate::ui::UiActions;
+
+    /// A 40 × 20 page, dark grey at the left, light grey at the right.
+    fn two_greys() -> App {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        let (w, h) = (40u32, 20u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let v = if i % w < w / 2 { 64 } else { 160 };
+                [v, v, v, 255]
+            })
+            .collect();
+        app.docs.documents[0].canvas = Canvas::from_rgba(rgba, w, h);
+        app
+    }
+
+    fn red_at(app: &App, x: u32, y: u32) -> u8 {
+        let canvas = &app.docs.active().canvas;
+        canvas.flatten_for_export()[((y * canvas.width + x) * 4) as usize]
+    }
+
+    #[test]
+    fn select_modify_auto_levels_and_flatten_from_the_menu() {
+        let mut app = two_greys();
+        app.run_with(
+            "select.rect",
+            serde_json::json!({"rect": {"x": 0, "y": 0, "w": 10, "h": 10}}),
+        )
+        .unwrap();
+        let mut actions = UiActions::default();
+        actions.sel.selection_grow = Some(3);
+        actions.sel.selection_feather = Some(0.0);
+        app.handle_selection_refine_actions(&mut actions);
+        let (x0, _, x1, _) = app.docs.active_mut().canvas.selection.bounding_box();
+        assert_eq!((x0, x1), (0.0, 13.0));
+
+        app.run_now("select.none").unwrap();
+        app.do_auto_levels();
+        assert_eq!(
+            (red_at(&app, 5, 15), red_at(&app, 35, 15)),
+            (0, 255),
+            "{}",
+            app.shell.status_msg
+        );
+        assert!(app.docs.active_mut().canvas.can_undo());
+
+        app.run_with("layer.new", serde_json::json!({})).unwrap();
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 2);
+        let mut actions = UiActions::default();
+        actions.layers.merge_all = true;
+        app.handle_layer_actions(&mut actions);
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 1);
+        assert_eq!(app.shell.status_msg, "Đã gộp thành một lớp");
+    }
+}

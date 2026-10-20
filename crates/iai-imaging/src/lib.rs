@@ -6,6 +6,7 @@
 
 pub mod card_find;
 pub mod filters;
+pub mod levels;
 pub mod output_sharpen;
 pub mod quick_select;
 pub mod refine;

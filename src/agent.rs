@@ -114,14 +114,16 @@ pub fn control_file() -> PathBuf {
     crate::diag::data_dir().join("control.json")
 }
 
-/// The commands an agent may run: the free core's, and the Pro pack's
-/// when this machine's Pro is open.
+/// The commands an agent may run: the free core's, and the Pro pack's,
+/// which say Pro is locked when this machine's Pro is not open.
 pub fn registry_for_agents() -> iai_engine::Registry {
     #[cfg_attr(not(feature = "pro"), allow(unused_mut))]
     let mut registry = iai_engine::cmds::core_registry();
     #[cfg(feature = "pro")]
     if crate::pro::Pro::load().status().open() {
         crate::pro::cmds::register(&mut registry);
+    } else {
+        crate::pro::cmds::register_locked(&mut registry);
     }
     registry
 }

@@ -289,60 +289,17 @@ impl App {
     /// black/white points the Levels dialog's "Auto" button derives, applied directly
     /// without opening a dialog.
     pub(crate) fn do_auto_levels(&mut self) {
-        let idx = self.docs.active_doc_idx;
-        self.docs.documents[idx]
-            .canvas
-            .layer_stack
-            .normalize_active_idx();
-        if self.docs.documents[idx]
-            .canvas
-            .layer_stack
-            .layers
-            .is_empty()
-        {
-            return;
-        }
-        let bad = {
-            let l = self.docs.documents[idx].canvas.active_layer();
-            (!l.is_background && l.locked) || !l.is_raster()
-        };
-        if bad {
-            self.shell.status_msg = "Auto Levels requires an unlocked raster layer".to_string();
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-            return;
-        }
-        // Auto Levels derives its stretch from RGB/luma histograms — no ink
-        // meaning, and its [master,r,g,b] result would misread as [C,M,Y,K].
-        if self.docs.documents[idx].canvas.is_cmyk() {
-            self.shell.status_msg = "Auto Levels chưa hỗ trợ ở chế độ CMYK".to_string();
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-            return;
-        }
-        let pixels = self.docs.documents[idx]
-            .canvas
-            .active_layer()
-            .flatten_tiles();
-        let hist = levels_histogram_from_rgba(&pixels);
-        let Some(channels) = crate::ui::dialogs::auto_levels_channels_from_histogram(
-            &hist,
-            self.shell.ui.adjustment_options,
-        ) else {
-            self.shell.status_msg = "Auto Levels: not enough tonal range".to_string();
-            return;
-        };
-        let ok = self.docs.documents[idx]
-            .canvas
-            .apply_adjustment_to_active_layer(crate::core::layer::AdjustmentType::Levels {
-                channels,
-            });
-        if ok {
-            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-            self.shell.status_msg = "Auto Levels".to_string();
-        }
+        let options =
+            crate::ui::dialogs::sanitize_adjustment_options(self.shell.ui.adjustment_options);
+        let monochromatic =
+            options.auto_levels_algorithm == crate::ui::AutoLevelsAlgorithm::Monochromatic;
+        let _ = self.run_with(
+            "image.auto_levels",
+            serde_json::json!({
+                "monochromatic": monochromatic,
+                "clipPercent": options.auto_clip_percent,
+            }),
+        );
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -623,18 +580,7 @@ impl App {
 }
 
 fn levels_histogram_from_rgba(pixels: &[u8]) -> std::sync::Arc<[[u32; 256]; 4]> {
-    let mut histogram = [[0_u32; 256]; 4];
-    for px in pixels.chunks_exact(4) {
-        if px[3] == 0 {
-            continue;
-        }
-        histogram[0][px[0] as usize] += 1;
-        histogram[1][px[1] as usize] += 1;
-        histogram[2][px[2] as usize] += 1;
-        let luma = (px[0] as u32 * 77 + px[1] as u32 * 150 + px[2] as u32 * 29) >> 8;
-        histogram[3][luma.min(255) as usize] += 1;
-    }
-    std::sync::Arc::new(histogram)
+    std::sync::Arc::new(iai_imaging::levels::histograms(pixels))
 }
 
 /// Ink-coverage histograms `[C, M, Y, K]` for the CMYK Levels/Curves dialogs,

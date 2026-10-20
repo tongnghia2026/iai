@@ -2074,36 +2074,12 @@ pub(crate) fn gamma_to_x(rect: egui::Rect, in_black: u8, in_white: u8, gamma: f3
     egui::lerp(rect.left()..=rect.right(), ib + (iw - ib).max(0.001) * mid)
 }
 
+#[cfg(test)]
 pub(crate) fn auto_levels_from_histogram_with_clip(
     histogram: &[u32],
     clip_percent: f32,
 ) -> Option<(u8, u8)> {
-    let total: u32 = histogram.iter().sum();
-    if total == 0 {
-        return None;
-    }
-    let clip = (total as f32 * (clip_percent.clamp(0.0, 10.0) / 100.0)).round() as u32;
-    let mut acc = 0_u32;
-    let mut black = 0_u8;
-    for (i, count) in histogram.iter().copied().enumerate() {
-        acc = acc.saturating_add(count);
-        if acc > clip {
-            black = i as u8;
-            break;
-        }
-    }
-
-    acc = 0;
-    let mut white = 255_u8;
-    for (i, count) in histogram.iter().copied().enumerate().rev() {
-        acc = acc.saturating_add(count);
-        if acc > clip {
-            white = i as u8;
-            break;
-        }
-    }
-
-    (black < white).then_some((black, white))
+    iai_imaging::levels::black_and_white(histogram, clip_percent)
 }
 
 pub(crate) fn auto_levels_channels_from_histogram(
@@ -2111,32 +2087,11 @@ pub(crate) fn auto_levels_channels_from_histogram(
     options: AdjustmentOptions,
 ) -> Option<[LevelsParams; 4]> {
     let options = sanitize_adjustment_options(options);
-    let mut channels = [LevelsParams::default(); 4];
-    match options.auto_levels_algorithm {
-        AutoLevelsAlgorithm::Monochromatic => {
-            let (black, white) =
-                auto_levels_from_histogram_with_clip(&histograms[3], options.auto_clip_percent)?;
-            channels[0].in_black = black;
-            channels[0].in_white = white;
-        }
-        AutoLevelsAlgorithm::PerChannelContrast => {
-            let mut any = false;
-            for (plane, channel) in [(0, 1), (1, 2), (2, 3)] {
-                if let Some((black, white)) = auto_levels_from_histogram_with_clip(
-                    &histograms[plane],
-                    options.auto_clip_percent,
-                ) {
-                    channels[channel].in_black = black;
-                    channels[channel].in_white = white;
-                    any = true;
-                }
-            }
-            if !any {
-                return None;
-            }
-        }
-    }
-    Some(channels)
+    iai_imaging::levels::auto_levels(
+        histograms,
+        options.auto_levels_algorithm == AutoLevelsAlgorithm::Monochromatic,
+        options.auto_clip_percent,
+    )
 }
 
 pub(crate) fn color_balance_editor_ui(

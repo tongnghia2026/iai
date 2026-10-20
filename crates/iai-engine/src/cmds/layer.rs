@@ -1,4 +1,4 @@
-//! Layers of the shown page: add, delete, reorder, change.
+//! Layers of the shown page: add, delete, reorder, change, place a picture.
 
 use iai_canvas::canvas::Canvas;
 use iai_history::command::LayerStructureCommand;
@@ -6,7 +6,7 @@ use iai_history::gateway::ChangeKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{not_enabled, parse_color, Blend};
+use super::common::{not_enabled, parse_color, Blend, RectPx};
 use super::doc::{layer_infos, LayerInfo};
 use crate::{
     layer_index, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session,
@@ -404,6 +404,354 @@ impl Command for SetLayer {
             if moves {
                 // As the Move tool moves a layer: by its offset.
                 layer.offset = (p.x.unwrap_or(layer.offset.0), p.y.unwrap_or(layer.offset.1));
+            }
+            Ok(layer.id)
+        })?;
+        answer(s, doc, Some(id)).map(Plan::Done)
+    }
+}
+
+/// Where `layer.place` takes its picture from.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceSource {
+    /// An image file.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: Option<String>,
+    /// Or an open document, as its shown page looks.
+    pub doc: Option<u32>,
+}
+
+/// How the picture is sized into its box.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceFit {
+    /// As large as fits whole, centred (the default).
+    #[default]
+    Contain,
+    /// Filling the box, centred, the overflow cut off.
+    Cover,
+    /// At its own size, centred.
+    None,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PlaceParams {
+    /// Document id (see `doc.list`) to place into; the document shown when omitted.
+    pub doc: Option<u32>,
+    pub from: PlaceSource,
+    /// The box on the page to place it in, in pixels; the whole page when omitted.
+    #[serde(rename = "box")]
+    pub area: Option<RectPx>,
+    #[serde(default)]
+    pub fit: PlaceFit,
+    /// Kept clear inside the box, in pixels.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 10000))]
+    pub margin_px: u32,
+    /// Turn the picture clockwise first: 0, 90, 180 or 270.
+    #[serde(default)]
+    pub turn: u32,
+    #[schemars(length(min = 1, max = 200))]
+    pub name: Option<String>,
+}
+
+impl Validate for PlaceParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.from.path.is_some() == self.from.doc.is_some() {
+            return Err(CmdError::bad_param("from", "a `path` or a `doc`"));
+        }
+        if !matches!(self.turn, 0 | 90 | 180 | 270) {
+            return Err(CmdError::bad_param("turn", "0, 90, 180 or 270"));
+        }
+        Ok(())
+    }
+}
+
+static PLACE: CommandMeta = CommandMeta {
+    id: "layer.place",
+    label_vi: "Đặt ảnh vào trang",
+    label_en: "Place Image",
+    doc: "Put a picture (an image file, or another open document) on the page as a new layer, \
+          sized into a box (the whole page by default) and centred in it: `fit` contain \
+          (whole, as large as fits), cover (filling the box) or none (own size). To centre a \
+          photo on an A4 page, or lay several out on one page, one box each. One undo step.",
+    effects: &[Effect::Edit, Effect::ReadFiles],
+    featured: true,
+};
+
+pub struct PlaceImage;
+
+/// The picture `from` names, as RGBA, and its name.
+fn place_source(
+    s: &mut Session<'_>,
+    from: &PlaceSource,
+) -> Result<(image::RgbaImage, String), CmdError> {
+    match (&from.path, from.doc) {
+        (Some(path), _) => {
+            let path = std::path::Path::new(path);
+            let canvas = iai_formats::FormatRegistry::new()
+                .import(path)
+                .map_err(|e| {
+                    CmdError::new(ErrorCode::NotFound, format!("{}: {e}", path.display()))
+                        .vi(format!("Không mở được ảnh {}", path.display()))
+                })?;
+            let image = image::RgbaImage::from_raw(
+                canvas.width,
+                canvas.height,
+                canvas.flatten_for_export(),
+            )
+            .ok_or_else(|| CmdError::internal("empty picture"))?;
+            let name = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok((image, name))
+        }
+        (None, Some(doc)) => {
+            let title = s.document(Some(doc))?.title.clone();
+            let canvas = s.canvas(Some(doc))?;
+            let image = image::RgbaImage::from_raw(
+                canvas.width,
+                canvas.height,
+                canvas.flatten_for_export(),
+            )
+            .ok_or_else(|| CmdError::internal("empty picture"))?;
+            Ok((image, title))
+        }
+        (None, None) => Err(CmdError::bad_param("from", "a `path` or a `doc`")),
+    }
+}
+
+impl Command for PlaceImage {
+    type Params = PlaceParams;
+    type Output = LayerChanged;
+
+    fn meta(&self) -> &'static CommandMeta {
+        &PLACE
+    }
+
+    fn plan(&self, s: &mut Session<'_>, p: PlaceParams) -> Result<Plan<LayerChanged>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let (picture, source_name) = place_source(s, &p.from)?;
+        let picture = match p.turn {
+            90 => image::imageops::rotate90(&picture),
+            180 => image::imageops::rotate180(&picture),
+            270 => image::imageops::rotate270(&picture),
+            _ => picture,
+        };
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (page_w, page_h) = (canvas.width, canvas.height);
+        let area = p.area.unwrap_or(RectPx {
+            x: 0,
+            y: 0,
+            w: page_w,
+            h: page_h,
+        });
+        let margin = p.margin_px.saturating_mul(2);
+        let (room_w, room_h) = (
+            area.w.saturating_sub(margin).max(1),
+            area.h.saturating_sub(margin).max(1),
+        );
+        let (pw, ph) = (picture.width().max(1), picture.height().max(1));
+        let scale = match p.fit {
+            PlaceFit::Contain => (room_w as f32 / pw as f32).min(room_h as f32 / ph as f32),
+            PlaceFit::Cover => (room_w as f32 / pw as f32).max(room_h as f32 / ph as f32),
+            PlaceFit::None => 1.0,
+        };
+        let (sw, sh) = (
+            ((pw as f32 * scale).round() as u32).max(1),
+            ((ph as f32 * scale).round() as u32).max(1),
+        );
+        let largest = iai_canvas::canvas::MAX_DIMENSION;
+        if sw > largest || sh > largest {
+            return Err(CmdError::new(
+                ErrorCode::TooLarge,
+                "the placed picture is too large",
+            ));
+        }
+        let scaled = if (sw, sh) == (pw, ph) {
+            picture
+        } else {
+            image::imageops::resize(&picture, sw, sh, image::imageops::FilterType::Lanczos3)
+        };
+        // Cover: only what lies inside the box is kept.
+        let (kept, kw, kh) = if p.fit == PlaceFit::Cover && (sw > room_w || sh > room_h) {
+            let (kw, kh) = (sw.min(room_w), sh.min(room_h));
+            let cut = image::imageops::crop_imm(
+                &scaled,
+                sw.saturating_sub(kw) / 2,
+                sh.saturating_sub(kh) / 2,
+                kw,
+                kh,
+            )
+            .to_image();
+            (cut, kw, kh)
+        } else {
+            (scaled, sw, sh)
+        };
+        let half = |room: u32, size: u32| i32::try_from(room.saturating_sub(size) / 2).unwrap_or(0);
+        let margin_i = i32::try_from(p.margin_px).unwrap_or(0);
+        let x = area
+            .x
+            .saturating_add(margin_i)
+            .saturating_add(half(room_w, kw));
+        let y = area
+            .y
+            .saturating_add(margin_i)
+            .saturating_add(half(room_h, kh));
+        let name = p.name.clone().unwrap_or(source_name);
+        let id = structural(canvas, "Place Image", |canvas| {
+            let (w, h) = (canvas.width, canvas.height);
+            let stack = &mut canvas.layer_stack;
+            let idx = stack.add_layer(w, h);
+            let layer = stack
+                .layers
+                .get_mut(idx)
+                .ok_or_else(|| CmdError::internal("new layer"))?;
+            let id = layer.id;
+            let parent = layer.parent_id;
+            let mut placed = iai_doc::layer::Layer::from_rgba(id, &name, kept.into_raw(), kw, kh);
+            placed.offset = (x, y);
+            placed.parent_id = parent;
+            *layer = placed;
+            Ok(id)
+        })?;
+        answer(s, doc, Some(id)).map(Plan::Done)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ViaCopyParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Layer id (see `doc.inspect`) to copy from; the active layer when omitted.
+    pub layer: Option<u32>,
+}
+impl Validate for ViaCopyParams {}
+
+static VIA_COPY: CommandMeta = CommandMeta {
+    id: "layer.via_copy",
+    label_vi: "Layer từ vùng chọn",
+    label_en: "Layer via Copy",
+    doc: "Copy what is selected on a layer to a new layer right above it (Ctrl+J); the whole \
+          layer when nothing is selected. The new layer becomes the active one. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct LayerViaCopy;
+
+impl Command for LayerViaCopy {
+    type Params = ViaCopyParams;
+    type Output = LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &VIA_COPY
+    }
+    fn plan(&self, s: &mut Session<'_>, p: ViaCopyParams) -> Result<Plan<LayerChanged>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        canvas.layer_stack.active_idx = layer_index(canvas, p.layer)?;
+        let idx = if canvas.selection.active {
+            canvas.layer_via_copy()
+        } else {
+            canvas.duplicate_active_layer()
+        };
+        canvas.layer_stack.active_idx = idx;
+        let id = canvas.layer_stack.layers.get(idx).map(|l| l.id);
+        answer(s, doc, id).map(Plan::Done)
+    }
+}
+
+/// What to do with a layer's mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskOp {
+    /// A new mask showing all of the layer.
+    RevealAll,
+    /// A new mask hiding all of it (paint it white where it should show).
+    HideAll,
+    /// Bake the mask into the layer's pixels and drop it.
+    Apply,
+    /// Drop the mask; the layer shows whole again.
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MaskParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Layer id (see `doc.inspect`); the active layer when omitted.
+    pub layer: Option<u32>,
+    pub op: MaskOp,
+}
+impl Validate for MaskParams {}
+
+static MASK: CommandMeta = CommandMeta {
+    id: "layer.mask",
+    label_vi: "Mặt nạ layer",
+    label_en: "Layer Mask",
+    doc: "Add a layer mask that reveals or hides all of the layer, apply the mask to its \
+          pixels, or delete it (Layer ▸ Layer Mask). One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct LayerMask;
+
+impl Command for LayerMask {
+    type Params = MaskParams;
+    type Output = LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &MASK
+    }
+    fn plan(&self, s: &mut Session<'_>, p: MaskParams) -> Result<Plan<LayerChanged>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let idx = layer_index(canvas, p.layer)?;
+        let layer = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .ok_or_else(|| CmdError::internal("layer index"))?;
+        let has = layer.mask.is_some();
+        match p.op {
+            MaskOp::RevealAll | MaskOp::HideAll if layer.is_background => {
+                return Err(not_enabled(
+                    "the Background takes no mask",
+                    "Layer nền không có mặt nạ",
+                ));
+            }
+            MaskOp::RevealAll | MaskOp::HideAll if has => {
+                return Err(not_enabled(
+                    "the layer has a mask already",
+                    "Layer đã có mặt nạ",
+                ));
+            }
+            MaskOp::Apply | MaskOp::Delete if !has => {
+                return Err(not_enabled("the layer has no mask", "Layer chưa có mặt nạ"));
+            }
+            _ => {}
+        }
+        let label = match p.op {
+            MaskOp::RevealAll | MaskOp::HideAll => "Add Layer Mask",
+            MaskOp::Apply => "Apply Layer Mask",
+            MaskOp::Delete => "Delete Layer Mask",
+        };
+        let id = structural(canvas, label, |canvas| {
+            let layer = canvas
+                .layer_stack
+                .layers
+                .get_mut(idx)
+                .ok_or_else(|| CmdError::internal("layer index"))?;
+            match p.op {
+                MaskOp::RevealAll => layer.add_mask(true),
+                MaskOp::HideAll => layer.add_mask(false),
+                MaskOp::Apply => layer.apply_mask(),
+                MaskOp::Delete => layer.delete_mask(),
             }
             Ok(layer.id)
         })?;

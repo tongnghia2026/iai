@@ -1,8 +1,10 @@
 //! The commands of the free core. Each module is one area; `register_core`
 //! puts them all in a registry. Pro commands are registered by the app.
 
+pub mod adjust;
 pub mod ai;
 pub mod analyze;
+pub mod basic;
 pub mod common;
 pub mod contact;
 pub mod doc;
@@ -36,6 +38,9 @@ pub fn register_core(r: &mut Registry) {
     r.register(layer::DeleteLayer);
     r.register(layer::MoveLayer);
     r.register(layer::SetLayer);
+    r.register(layer::PlaceImage);
+    r.register(layer::LayerViaCopy);
+    r.register(layer::LayerMask);
     r.register(select::SelectAll);
     r.register(select::SelectNone);
     r.register(select::SelectInvert);
@@ -43,6 +48,20 @@ pub fn register_core(r: &mut Registry) {
     r.register(select::SelectSubject);
     r.register(image::Crop);
     r.register(image::PerspectiveCrop);
+    r.register(adjust::Adjust);
+    r.register(adjust::AutoLevels);
+    r.register(adjust::ApplyFilter);
+    r.register(adjust::ScanCleanup);
+    r.register(basic::Fill);
+    r.register(basic::Clear);
+    r.register(basic::ModifySelection);
+    r.register(basic::DuplicateLayer);
+    r.register(basic::MergeDown);
+    r.register(basic::Flatten);
+    r.register(basic::CloseDocument);
+    r.register(basic::ColorRange);
+    r.register(basic::Wand);
+    r.register(basic::Grayscale);
     r.register(image::Resize);
     r.register(image::Rotate);
     r.register(image::Flip);
