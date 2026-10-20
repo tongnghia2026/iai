@@ -42,6 +42,7 @@ pub mod portrait_ops;
 pub mod powerclip_ops;
 pub mod render;
 pub mod scan_cleanup_ops;
+mod selection_feedback;
 pub mod shape_ops;
 pub mod state;
 pub mod text_ops;

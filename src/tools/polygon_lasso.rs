@@ -2,6 +2,7 @@
 // or Enter closes; Esc cancels. Like the freehand lasso, the live selection is left
 // untouched while placing points — the polygon is applied once, on close.
 
+use super::selection_common::{self, SelectionOutcome};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::selection::{SelectionMode, SelectionSnapshot};
 
@@ -13,6 +14,8 @@ pub struct PolygonLassoTool {
     points: Vec<(f32, f32)>,
     /// Locked in at the first point so every close path uses the same mode.
     mode: SelectionMode,
+    by_keys: bool,
+    outcome: Option<SelectionOutcome>,
     base_snap: Option<SelectionSnapshot>,
 
     is_moving_selection: bool,
@@ -35,6 +38,8 @@ impl PolygonLassoTool {
             anti_alias: true,
             points: Vec::new(),
             mode: SelectionMode::New,
+            by_keys: false,
+            outcome: None,
             base_snap: None,
             is_moving_selection: false,
             frac_x: 0.0,
@@ -42,6 +47,11 @@ impl PolygonLassoTool {
             total_dx: 0,
             total_dy: 0,
         }
+    }
+
+    /// How the last gesture ended, once.
+    pub fn take_outcome(&mut self) -> Option<SelectionOutcome> {
+        self.outcome.take()
     }
 
     /// Placed vertices; the app appends the cursor for the rubber-band overlay.
@@ -55,6 +65,12 @@ impl PolygonLassoTool {
                 canvas.restore_selection_snapshot(snap);
             }
             canvas.select_polygon_mode(&self.points, self.mode, self.feather, self.anti_alias);
+            self.outcome = Some(selection_common::drawn_outcome(
+                canvas,
+                self.base_snap.as_ref(),
+                self.mode,
+                self.by_keys,
+            ));
         }
         self.points.clear();
         self.base_snap = None;
@@ -80,9 +96,7 @@ impl Tool for PolygonLassoTool {
         let canvas = ctx.canvas_mut();
 
         if self.points.is_empty()
-            && event.selection_mode == SelectionMode::New
-            && canvas.selection.active
-            && canvas.selection.is_selected(cx as u32, cy as u32)
+            && selection_common::press_moves_selection(&event, &canvas.selection)
         {
             self.is_moving_selection = true;
             self.frac_x = 0.0;
@@ -94,6 +108,7 @@ impl Tool for PolygonLassoTool {
 
         if self.points.is_empty() {
             self.mode = event.selection_mode;
+            self.by_keys = selection_common::mode_from_keys(&event);
             self.base_snap = Some(canvas.snapshot_selection());
             self.points.push((cx, cy));
             return ToolResponse::repaint();
@@ -151,6 +166,10 @@ impl Tool for PolygonLassoTool {
     fn on_release(&mut self, _event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         if self.is_moving_selection {
             self.is_moving_selection = false;
+            self.outcome = Some(SelectionOutcome::Moved {
+                dx: self.total_dx,
+                dy: self.total_dy,
+            });
 
             if self.total_dx != 0 || self.total_dy != 0 {
                 let canvas = ctx.canvas_mut();

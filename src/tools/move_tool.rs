@@ -130,7 +130,9 @@ impl MoveTool {
 
         let moving = Self::moving_indices(&canvas.layer_stack);
         for (idx, layer) in canvas.layer_stack.layers.iter().enumerate() {
-            if layer.width == 0 || layer.height == 0 {
+            // An empty layer (a fresh one is canvas-sized) shows nothing: it
+            // must neither stretch the moving box nor be a target to snap to.
+            if layer.width == 0 || layer.height == 0 || !layer.has_renderable_content() {
                 continue;
             }
             let lx0 = layer.offset.0 as f32;
@@ -1115,5 +1117,38 @@ mod tests {
         // delta is vertically dominant, both selected layers stay on that line.
         assert_eq!(doc.canvas.layer_stack.layers[first].offset, (105, 50));
         assert_eq!(doc.canvas.layer_stack.layers[second].offset, (135, 70));
+    }
+
+    #[test]
+    fn an_empty_layer_in_the_selection_does_not_steer_snapping() {
+        // A fresh layer is canvas-sized and empty. Selected along with a photo,
+        // its rectangle used to be the box that snapped: a 3 px drag snapped that
+        // invisible box back onto the canvas edge and the photo did not move.
+        let mut t = MoveTool::new();
+        t.snap_enabled = true;
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        for layer in &mut doc.canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        let photo = doc.canvas.layer_stack.add_layer(50, 50);
+        {
+            let layer = &mut doc.canvas.layer_stack.layers[photo];
+            layer.tiles =
+                crate::core::tile::TileMap::from_rgba(&[200, 40, 40, 255].repeat(50 * 50), 50, 50);
+            layer.offset = (100, 100);
+            layer.selected = true;
+        }
+        let empty = doc.canvas.layer_stack.add_layer(400, 300);
+        doc.canvas.layer_stack.layers[empty].selected = true;
+        doc.canvas.layer_stack.active_idx = photo;
+
+        let press = PointerEvent::new(120.0, 120.0);
+        let drag = PointerEvent::new(123.0, 120.0);
+        {
+            let mut c = ctx(&mut doc);
+            t.on_press(press, &mut c);
+            t.on_drag(drag, &press, &mut c);
+        }
+        assert_eq!(doc.canvas.layer_stack.layers[photo].offset, (103, 100));
     }
 }

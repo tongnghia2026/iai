@@ -1,8 +1,9 @@
 // Rectangular marquee selection tool.
 // Drag to define rectangle; holds base mask for Add/Subtract/Intersect modes.
 
+use super::selection_common::{self, SelectionOutcome};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
-use crate::core::selection::SelectionSnapshot;
+use crate::core::selection::{SelectionMode, SelectionSnapshot};
 
 pub struct SelectionRectTool {
     pub feather: f32,
@@ -16,6 +17,11 @@ pub struct SelectionRectTool {
     /// True when this drag began with Shift held while a selection already
     /// existed → PTS "add to selection" (free shape, not constrained square).
     freeform_add: bool,
+    /// Picked at the press, as in Photoshop: Shift pressed later in the
+    /// drag squares the shape instead of changing the mode.
+    mode: SelectionMode,
+    by_keys: bool,
+    outcome: Option<SelectionOutcome>,
 
     is_moving_selection: bool,
     frac_x: f32,
@@ -42,6 +48,9 @@ impl SelectionRectTool {
             dragging: false,
             base_snap: None,
             freeform_add: false,
+            mode: SelectionMode::New,
+            by_keys: false,
+            outcome: None,
             is_moving_selection: false,
             frac_x: 0.0,
             frac_y: 0.0,
@@ -83,8 +92,8 @@ impl SelectionRectTool {
         canvas: &mut crate::core::canvas::Canvas,
         ex: f32,
         ey: f32,
-        mode: crate::core::selection::SelectionMode,
-    ) {
+        mode: SelectionMode,
+    ) -> bool {
         let x0 = self.start_x.min(ex).max(0.0) as u32;
         let y0 = self.start_y.min(ey).max(0.0) as u32;
         let x1 = (self.start_x.max(ex) as u32).min(canvas.width);
@@ -94,6 +103,12 @@ impl SelectionRectTool {
             canvas.restore_selection_snapshot(snap);
         }
         canvas.select_rect_mode(x0, y0, x1, y1, mode, self.feather, self.anti_alias);
+        x1 > x0 && y1 > y0
+    }
+
+    /// How the last gesture ended, once.
+    pub fn take_outcome(&mut self) -> Option<SelectionOutcome> {
+        self.outcome.take()
     }
 }
 
@@ -115,11 +130,7 @@ impl Tool for SelectionRectTool {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let canvas = ctx.canvas_mut();
 
-        if !event.shift
-            && !event.alt
-            && canvas.selection.active
-            && canvas.selection.is_selected(cx as u32, cy as u32)
-        {
+        if selection_common::press_moves_selection(&event, &canvas.selection) {
             self.is_moving_selection = true;
             self.frac_x = 0.0;
             self.frac_y = 0.0;
@@ -129,6 +140,8 @@ impl Tool for SelectionRectTool {
         }
 
         self.freeform_add = event.shift && canvas.selection.active;
+        self.mode = event.selection_mode;
+        self.by_keys = selection_common::mode_from_keys(&event);
 
         self.start_x = cx;
         self.start_y = cy;
@@ -198,9 +211,13 @@ impl Tool for SelectionRectTool {
         ToolResponse::redraw()
     }
 
-    fn on_release(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
+    fn on_release(&mut self, _event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         if self.is_moving_selection {
             self.is_moving_selection = false;
+            self.outcome = Some(SelectionOutcome::Moved {
+                dx: self.total_dx,
+                dy: self.total_dy,
+            });
 
             if self.total_dx != 0 || self.total_dy != 0 {
                 let canvas = ctx.canvas_mut();
@@ -214,12 +231,21 @@ impl Tool for SelectionRectTool {
             return ToolResponse::none();
         }
 
-        self.apply(
-            ctx.canvas_mut(),
-            self.end_x,
-            self.end_y,
-            event.selection_mode,
-        );
+        if !self.dragging {
+            return ToolResponse::none();
+        }
+        let canvas = ctx.canvas_mut();
+        let drew = self.apply(canvas, self.end_x, self.end_y, self.mode);
+        self.outcome = Some(if drew {
+            selection_common::drawn_outcome(
+                canvas,
+                self.base_snap.as_ref(),
+                self.mode,
+                self.by_keys,
+            )
+        } else {
+            SelectionOutcome::Click { mode: self.mode }
+        });
         self.dragging = false;
         self.freeform_add = false;
         self.base_snap = None;

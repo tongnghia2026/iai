@@ -2,6 +2,15 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+20/10/2026
+- Crop ra khổ in cố định (ví dụ ảnh chụp điện thoại ra khổ A3) nhanh gấp khoảng 5 lần: bấm Enter xong là thấy ảnh, cửa sổ không còn đứng hình.
+- «Làm sạch bản scan» gần như tức thì: mở bảng, kéo thanh chỉnh hay bấm «Áp dụng» đều không còn đứng hình 1–2 giây. Ảnh ra vẫn y như trước.
+- Chọn nhiều layer (cả layer chữ, hình vẽ) rồi Free Transform, kéo, xoay hay lật: các layer không còn nhảy về chỗ cũ hay lệch nhau. Layer chữ và hình vẽ đã xoay / lật giữ đúng hướng ở những lần sửa sau.
+- Khung chọn và lasso: bấm vào bên trong vùng đang chọn để vẽ thêm nay vẽ được như Photoshop, không còn kéo cả vùng chọn đi. Con trỏ có dấu + / − / × cho biết đang thêm, bớt hay lấy phần giao; kéo mà vùng chọn không đổi thì thanh dưới cùng nói lý do.
+- Hết lỗi phím Alt hoặc phím cách bị «kẹt» sau khi gõ chữ hay đóng hộp thoại, làm mỗi lần kéo đều bớt vùng chọn hoặc thành kéo trang.
+- Trợ lý AI điều khiển iAi nay mở được tài liệu PDF nhiều trang.
+- Nhật ký lỗi của app không còn bị các lần chạy tự động đẩy mất; lần nào bạn đánh dấu lỗi (Ctrl+Shift+F12) được giữ 30 ngày.
+
 16/10/2026
 - Mới: menu Help ▸ «Cho AI điều khiển iAi». Bật lên thì trợ lý AI trên máy (Claude Desktop, Claude Code) tự làm theo lời bạn nói: mở ảnh, tách nền, làm ảnh thẻ, xếp ảnh in, xuất PDF. Mỗi bước hiện ngay trên màn hình và Ctrl+Z được; AI không được in, không được ra mạng, chỉ đụng tới thư mục bạn cho phép.
 - Chuyển trang trong tài liệu PDF nhiều trang: thanh menu, bảng Layer và các thanh xung quanh không còn nháy.

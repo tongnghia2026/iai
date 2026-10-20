@@ -513,9 +513,7 @@ impl App {
         }
         if let Some(req) = actions.dialogs.apply_scan_cleanup.take() {
             self.shell.ui.show_scan_cleanup_dialog = false;
-            // Restore the pristine layer, then commit undoably from it.
-            self.cancel_scan_preview();
-            self.apply_scan_cleanup(req);
+            self.commit_scan_cleanup(req);
         }
         if let Some(v) = actions.dialogs.show_vector_style_dialog.take() {
             self.shell.ui.show_vector_style_dialog = v;

@@ -9,6 +9,7 @@ mod history_gate;
 mod layer_ops;
 #[cfg(test)]
 mod lower_tests;
+pub mod model_turn;
 mod raster_ops;
 mod selection_ops;
 pub mod selection_output;
@@ -1906,6 +1907,87 @@ mod hdr_adjust_tests {
             canvas.layer_stack.layers[0].tiles.get_pixel(2, 2),
             (255, 255, 255, 255)
         );
+    }
+
+    /// Timing of the owner's daily crop (a phone photo cropped up to a fixed
+    /// print size, the box reaching past the photo's top edge) and of a
+    /// shrinking one: `cargo test --release -p iai-canvas probe_crop_speed --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn probe_crop_speed() {
+        use std::hash::{Hash, Hasher};
+        let photo = |w: u32, h: u32| -> Vec<u8> {
+            (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    [
+                        (x * 3 + y) as u8,
+                        (y * 5 ^ x) as u8,
+                        ((x + y) / 7) as u8,
+                        255,
+                    ]
+                })
+                .collect()
+        };
+        let cases: [(&str, u32, u32, [f32; 4], u32, u32, f32); 3] = [
+            (
+                "enlarge",
+                964,
+                1280,
+                [482.0, 610.0, 964.0, 1331.1],
+                4961,
+                6850,
+                0.0,
+            ),
+            (
+                "enlarge+rotate",
+                964,
+                1280,
+                [482.0, 610.0, 964.0, 1331.1],
+                4961,
+                6850,
+                0.03,
+            ),
+            (
+                "shrink",
+                6000,
+                8000,
+                [3000.0, 4000.0, 5657.0, 8000.0],
+                3508,
+                4961,
+                0.0,
+            ),
+        ];
+        for (name, sw, sh, [cx, cy, vw, vh], ow, oh, angle) in cases {
+            let pixels = photo(sw, sh);
+            for round in 0..3 {
+                let mut canvas = Canvas::from_rgba(pixels.clone(), sw, sh);
+                let t = std::time::Instant::now();
+                assert!(canvas.crop_transformed_with_background(
+                    cx,
+                    cy,
+                    vw,
+                    vh,
+                    ow,
+                    oh,
+                    0.0,
+                    0.0,
+                    angle,
+                    true,
+                    [255, 255, 255, 255],
+                ));
+                let took = t.elapsed();
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                canvas.layer_stack.layers[0]
+                    .flatten_tiles()
+                    .hash(&mut hasher);
+                println!(
+                    "{name} round {round}: {took:?}, digest {:016x}",
+                    hasher.finish()
+                );
+            }
+        }
     }
 
     #[test]

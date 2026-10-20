@@ -671,6 +671,26 @@ impl ApplicationHandler for App {
         // Flight recorder: the watcher process times this handler from here to
         // its return, and the journal keeps a line for what the user just did.
         let _work = crate::diag::ui_work(crate::diag_ui::phase_of(&event, false));
+        // Held modifiers / Space first: egui and the dialog paths below can
+        // swallow the key, its release too (see `InputState::note_key`).
+        if let WindowEvent::KeyboardInput {
+            event:
+                KeyEvent {
+                    physical_key,
+                    state,
+                    ..
+                },
+            ..
+        } = &event
+        {
+            if self
+                .edit
+                .input
+                .note_key(*physical_key, *state == ElementState::Pressed)
+            {
+                self.sync_cursor(event_loop);
+            }
+        }
         if self.journal_mark_key(&event) {
             return;
         }
@@ -922,25 +942,8 @@ impl ApplicationHandler for App {
                         ..
                     } = &event
                     {
+                        // The held modifiers are already followed (`note_key`).
                         let pressed = *state == ElementState::Pressed;
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::AltLeft)
-                            | PhysicalKey::Code(KeyCode::AltRight) => {
-                                self.edit.input.alt_held = pressed;
-                                if !pressed {
-                                    self.edit.input.alt_right_dragging = false;
-                                }
-                            }
-                            PhysicalKey::Code(KeyCode::ControlLeft)
-                            | PhysicalKey::Code(KeyCode::ControlRight) => {
-                                self.edit.input.ctrl_held = pressed;
-                            }
-                            PhysicalKey::Code(KeyCode::ShiftLeft)
-                            | PhysicalKey::Code(KeyCode::ShiftRight) => {
-                                self.edit.input.shift_held = pressed;
-                            }
-                            _ => {}
-                        }
                         // View shortcuts (zoom/fit) stay live while editing;
                         // everything else belongs to the TextEdit.
                         app_key = (pressed

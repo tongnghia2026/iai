@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 use iai_canvas::canvas::{Canvas, MAX_DIMENSION};
 use iai_canvas::document::{file_modified_at, Document, FlowTextBacking, FlowTextDocumentState};
 use iai_formats::iai::IaiLoad;
+use iai_formats::pdf::{PdfPages, PdfRenderPlan};
 use iai_formats::{ExportOptions, FormatRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::common::{not_enabled, parse_color};
 use crate::{
-    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session,
-    Validate,
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, JobCtx, Plan,
+    Session, Validate,
 };
 
 /// A document as the file commands report it.
@@ -131,26 +132,57 @@ impl Command for NewDocument {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct OpenParams {
     /// The file: an image (JPEG, PNG, TIFF, WebP, BMP, PSD, camera RAW), a
-    /// PDF (every page, rasterised) or an iAi document (.iai).
+    /// PDF (its pages, rasterised) or an iAi document (.iai).
     #[schemars(length(min = 1, max = 4096))]
     pub path: String,
+    /// A PDF only: the pages to open, 0 being the first. They open in the
+    /// PDF's order, each once; every page when omitted.
+    #[schemars(length(min = 1, max = 10000))]
+    pub pages: Option<Vec<usize>>,
+    /// A PDF only: the resolution its pages are rendered at, in pixels per
+    /// inch; 300 when omitted. Lower only where a page would be too large.
+    #[schemars(range(min = 18, max = 600))]
+    pub dpi: Option<u32>,
 }
-impl Validate for OpenParams {}
+
+impl Validate for OpenParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if iai_formats::pdf::is_pdf_path(Path::new(&self.path)) {
+            return Ok(());
+        }
+        if self.pages.is_some() {
+            return Err(CmdError::bad_param("pages", "to be left out: not a PDF"));
+        }
+        if self.dpi.is_some() {
+            return Err(CmdError::bad_param("dpi", "to be left out: not a PDF"));
+        }
+        Ok(())
+    }
+}
 
 static OPEN: CommandMeta = CommandMeta {
     id: "file.open",
     label_vi: "Mở file",
     label_en: "Open File",
     doc: "Open a file as a new document (tab) and show it. A PDF opens as one document with a \
-          page per PDF page. Large and RAW files take seconds: `background: true` gives a job id.",
+          page per PDF page (`pages` picks some, `dpi` sets the resolution, 300 by default), as \
+          an untitled picture: `file.save` it as .iai or `export.pdf` it. Pages that would not \
+          fit in memory together are refused (`too_large`, with the call that fits). Large, \
+          RAW and many-page files take seconds: `background: true` gives a job id.",
     effects: &[Effect::Edit, Effect::ReadFiles],
     featured: true,
 };
 
 pub struct OpenFile;
 
+/// What to make of a PDF: which pages, at what resolution.
+pub(super) struct PdfChoice {
+    pub(super) pages: Option<Vec<usize>>,
+    pub(super) dpi: Option<u32>,
+}
+
 /// What a file decodes to, before it is a document.
-enum Decoded {
+pub(super) enum Decoded {
     Pages {
         pages: Vec<Canvas>,
         active: usize,
@@ -194,6 +226,120 @@ fn decode(path: &Path) -> Result<Decoded, String> {
     })
 }
 
+/// The pages of a PDF, rendered one at a time; refused before any is
+/// rendered when together they come to more than `limit` pixels.
+pub(super) fn decode_pdf(
+    path: &Path,
+    choice: &PdfChoice,
+    limit: u64,
+    cx: &JobCtx,
+) -> Result<Decoded, CmdError> {
+    let pdf = PdfPages::open(path).map_err(|e| unreadable(path, e))?;
+    let count = pdf.page_count();
+    let wanted: Vec<usize> = match &choice.pages {
+        Some(list) => {
+            if let Some(bad) = list.iter().find(|&&p| p >= count) {
+                return Err(CmdError::new(
+                    ErrorCode::NotFound,
+                    format!("no page {bad}: the PDF has {count} (the first is 0)"),
+                )
+                .vi(format!("Không có trang {}", bad.saturating_add(1))));
+            }
+            list.clone()
+        }
+        None => (0..count).collect(),
+    };
+    let dpi = choice.dpi.map(|d| d as f32);
+    let plan = pdf.plan(&wanted, dpi).map_err(|e| unreadable(path, e))?;
+    if plan.pixels > limit {
+        return Err(too_large_to_open(path, &pdf, &plan, dpi, limit));
+    }
+    let total = plan.pages.len();
+    let mut renders = pdf.renders(&plan);
+    let mut pages = Vec::with_capacity(total);
+    for done in 0..total {
+        cx.check_cancelled()?;
+        cx.progress(
+            0.1 + 0.85 * done as f32 / total as f32,
+            format!("Đang dựng trang {}/{total}…", done.saturating_add(1)),
+        );
+        let (_, canvas) = renders
+            .next()
+            .ok_or_else(|| CmdError::internal("a PDF page was not rendered"))?
+            .map_err(|e| unreadable(path, e))?;
+        pages.push(canvas);
+    }
+    Ok(Decoded::Pages {
+        pages,
+        active: 0,
+        master: None,
+    })
+}
+
+/// Pages that would not fit in memory together: what would, as numbers and
+/// as the call to make (the first pages that fit).
+fn too_large_to_open(
+    path: &Path,
+    pdf: &PdfPages,
+    plan: &PdfRenderPlan,
+    dpi: Option<f32>,
+    limit: u64,
+) -> CmdError {
+    let fits = |pages: &[usize], dpi: Option<f32>| {
+        pdf.plan(pages, dpi)
+            .is_ok_and(|fewer| fewer.pixels <= limit)
+    };
+    // The longest run of the asked pages, from the first, that fits.
+    let (mut lo, mut hi) = (0usize, plan.pages.len());
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo).div_ceil(2));
+        if plan.pages.get(..mid).is_some_and(|pages| fits(pages, dpi)) {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    let first: &[usize] = plan.pages.get(..lo).unwrap_or_default();
+    // The resolution at which every asked page fits: pixels grow with its square.
+    let mut all_at = (plan.dpi * (limit as f32 / plan.pixels as f32).sqrt()).floor() as u32;
+    while all_at >= 18 && !fits(&plan.pages, Some(all_at as f32)) {
+        all_at = all_at.saturating_sub(1);
+    }
+    let n = plan.pages.len();
+    let mp = |pixels: u64| pixels / 1_000_000;
+    let mut message = format!(
+        "{n} pages at {:.0} dpi come to {} MP, more than this machine holds open at once \
+         ({} MP): open fewer `pages` (the first {} fit)",
+        plan.dpi,
+        mp(plan.pixels),
+        mp(limit),
+        first.len()
+    );
+    if all_at >= 18 {
+        message.push_str(&format!(" or a lower `dpi` (all fit at {all_at})"));
+    }
+    let mut error = CmdError::new(ErrorCode::TooLarge, message).vi(format!(
+        "{}: {n} trang ở {:.0} dpi quá lớn để mở cùng lúc — hãy mở ít trang hơn hoặc giảm dpi",
+        file_name(path),
+        plan.dpi
+    ));
+    if !first.is_empty() {
+        let mut args = serde_json::Map::new();
+        args.insert("path".into(), path.display().to_string().into());
+        args.insert("pages".into(), first.into());
+        if let Some(dpi) = dpi {
+            args.insert("dpi".into(), (dpi as u32).into());
+        }
+        error = error.with_hint(serde_json::json!({"command": "file.open", "args": args}));
+    }
+    error
+}
+
+fn unreadable(path: &Path, e: String) -> CmdError {
+    CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
+        .vi(format!("Không mở được {}: {e}", file_name(path)))
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -215,15 +361,24 @@ impl Command for OpenFile {
             )
             .vi(format!("Không có file {}", file_name(&path))));
         }
+        let pdf = iai_formats::pdf::is_pdf_path(&path).then_some(PdfChoice {
+            pages: p.pages,
+            dpi: p.dpi,
+        });
         Ok(Plan::Job(Job {
             doc: None,
             label_vi: format!("Mở {}", file_name(&path)),
             work: Box::new(move |cx| {
                 cx.progress(0.1, format!("Đang đọc {}…", file_name(&path)));
-                let decoded = decode(&path).map_err(|e| {
-                    CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
-                        .vi(format!("Không mở được {}: {e}", file_name(&path)))
-                })?;
+                let decoded = match &pdf {
+                    Some(choice) => decode_pdf(
+                        &path,
+                        choice,
+                        iai_platform::hw::open_pages_pixel_limit(),
+                        cx,
+                    )?,
+                    None => decode(&path).map_err(|e| unreadable(&path, e))?,
+                };
                 cx.check_cancelled()?;
                 Ok(Box::new(move |s: &mut Session<'_>| {
                     let id = s.new_document_id();
@@ -258,8 +413,12 @@ impl Command for OpenFile {
                         .file_stem()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "Untitled".to_string());
-                    doc.file_modified_at = file_modified_at(&path);
-                    doc.path = Some(path.clone());
+                    // A rasterised PDF is not its file: saving it in place
+                    // would replace the PDF (all its pages) with these.
+                    if pdf.is_none() {
+                        doc.file_modified_at = file_modified_at(&path);
+                        doc.path = Some(path.clone());
+                    }
                     doc.mark_saved();
                     let out = opened(&doc);
                     s.add_document(doc);

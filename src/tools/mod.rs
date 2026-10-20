@@ -19,6 +19,7 @@ pub mod polygon_lasso;
 pub mod refine_brush;
 pub mod repair_brush;
 pub mod scrub;
+pub mod selection_common;
 pub mod selection_ellipse;
 pub mod selection_rect;
 pub mod shape;
@@ -524,6 +525,16 @@ impl ToolManager {
     pub fn clone_tool_mut(&mut self) -> &mut clone_tool::CloneTool {
         &mut self.clone
     }
+    /// How the last marquee / lasso gesture ended, once (the polygon lasso
+    /// ends on a click or Enter, not always on a release).
+    pub fn take_selection_outcome(&mut self) -> Option<selection_common::SelectionOutcome> {
+        self.selection_rect
+            .take_outcome()
+            .or_else(|| self.selection_ellipse.take_outcome())
+            .or_else(|| self.lasso.take_outcome())
+            .or_else(|| self.polygon_lasso.take_outcome())
+    }
+
     pub fn selection_rect(&self) -> &selection_rect::SelectionRectTool {
         &self.selection_rect
     }
@@ -738,5 +749,182 @@ mod tests {
         // A tool without a soft tip keeps its full ring.
         tools.select(ToolId::Pencil);
         assert_eq!(tools.cursor_ring_radius(true), tools.cursor_size());
+    }
+
+    mod selection_tools {
+        use super::super::selection_common::SelectionOutcome;
+        use super::super::{PointerEvent, ToolCtx, ToolId, ToolManager};
+        use crate::core::document::{Document, DocumentId};
+        use crate::core::selection::SelectionMode;
+
+        const DRAG_TOOLS: [ToolId; 3] = [
+            ToolId::SelectionRect,
+            ToolId::SelectionEllipse,
+            ToolId::Lasso,
+        ];
+        /// From inside the selection (10..50) out to (80, 80): a rect / ellipse
+        /// box 30..80, a lasso triangle (30,30)-(30,80)-(80,80).
+        const PATH: [(f32, f32); 3] = [(30.0, 30.0), (30.0, 80.0), (80.0, 80.0)];
+        /// Inside each of those shapes, outside the old selection.
+        const NEW_PIXEL: (u32, u32) = (40, 70);
+
+        fn at(x: f32, y: f32, mode: SelectionMode) -> PointerEvent {
+            // The mode as picked on the top bar: no Shift / Alt held.
+            PointerEvent {
+                selection_mode: mode,
+                ..PointerEvent::new(x, y)
+            }
+        }
+
+        fn doc_with_selection() -> Document {
+            let mut doc = Document::new(DocumentId(1), 100, 100);
+            doc.canvas.select_rect(10, 10, 50, 50);
+            doc
+        }
+
+        fn ctx(doc: &mut Document) -> ToolCtx<'_> {
+            ToolCtx::new(doc, [0, 0, 0, 255], [255; 4], 1.0, 0.0, 0.0)
+        }
+
+        /// Press on the first point, drag through the rest, release on the last.
+        fn drag(
+            tools: &mut ToolManager,
+            doc: &mut Document,
+            path: &[(f32, f32)],
+            modes: [SelectionMode; 2],
+        ) {
+            let mut ctx = ctx(doc);
+            let (x, y) = path[0];
+            tools.on_press(at(x, y, modes[0]), &mut ctx);
+            for &(x, y) in &path[1..] {
+                tools.on_drag(at(x, y, modes[0]), &mut ctx);
+            }
+            let (x, y) = path[path.len() - 1];
+            tools.on_release(at(x, y, modes[1]), &mut ctx);
+        }
+
+        /// The polygon lasso: one click per corner, closed on the first one.
+        fn click_polygon(tools: &mut ToolManager, doc: &mut Document, mode: SelectionMode) {
+            let mut ctx = ctx(doc);
+            for &(x, y) in PATH.iter().chain(&PATH[..1]) {
+                tools.on_press(at(x, y, mode), &mut ctx);
+                tools.on_release(at(x, y, mode), &mut ctx);
+            }
+        }
+
+        #[test]
+        fn a_press_inside_the_selection_draws_in_add_mode_with_every_tool() {
+            // 19/10: the marquees dragged the selection away on any plain press
+            // inside it, in Add (the default) as in New, so after Ctrl+A a new
+            // marquee "did nothing"; the lassos only did so in New.
+            for tool in DRAG_TOOLS.into_iter().chain([ToolId::PolygonLasso]) {
+                let mut tools = ToolManager::new();
+                tools.select(tool);
+                let mut doc = doc_with_selection();
+                if tool == ToolId::PolygonLasso {
+                    click_polygon(&mut tools, &mut doc, SelectionMode::Add);
+                } else {
+                    drag(&mut tools, &mut doc, &PATH, [SelectionMode::Add; 2]);
+                }
+                let sel = &doc.canvas.selection;
+                assert_eq!(
+                    sel.offset,
+                    (0, 0),
+                    "{tool:?} dragged the selection in Add mode"
+                );
+                assert!(sel.is_selected(20, 20), "{tool:?} lost the old selection");
+                assert!(
+                    sel.is_selected(NEW_PIXEL.0, NEW_PIXEL.1),
+                    "{tool:?} added nothing"
+                );
+                assert!(matches!(
+                    tools.take_selection_outcome(),
+                    Some(SelectionOutcome::Drawn {
+                        mode: SelectionMode::Add,
+                        changed: true,
+                        ..
+                    })
+                ));
+            }
+        }
+
+        #[test]
+        fn a_press_inside_the_selection_drags_it_in_new_mode_with_every_tool() {
+            for tool in DRAG_TOOLS.into_iter().chain([ToolId::PolygonLasso]) {
+                let mut tools = ToolManager::new();
+                tools.select(tool);
+                let mut doc = doc_with_selection();
+                drag(&mut tools, &mut doc, &PATH, [SelectionMode::New; 2]);
+                let sel = &doc.canvas.selection;
+                assert_eq!(sel.offset, (50, 50), "{tool:?} did not drag the selection");
+                assert_eq!(
+                    tools.take_selection_outcome(),
+                    Some(SelectionOutcome::Moved { dx: 50, dy: 50 }),
+                    "{tool:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn shift_held_late_in_a_drag_does_not_turn_new_into_add() {
+            // The mode is picked at the press (Photoshop): Shift pressed later
+            // squares the marquee, the old selection is still replaced.
+            for tool in DRAG_TOOLS {
+                let mut tools = ToolManager::new();
+                tools.select(tool);
+                let mut doc = doc_with_selection();
+                drag(
+                    &mut tools,
+                    &mut doc,
+                    &[(60.0, 60.0), (90.0, 90.0), (90.0, 70.0)],
+                    [SelectionMode::New, SelectionMode::Add],
+                );
+                assert!(
+                    !doc.canvas.selection.is_selected(20, 20),
+                    "{tool:?} kept the old selection"
+                );
+            }
+        }
+
+        #[test]
+        fn a_subtract_drag_with_nothing_to_subtract_is_reported() {
+            for tool in DRAG_TOOLS {
+                let mut tools = ToolManager::new();
+                tools.select(tool);
+                let mut doc = Document::new(DocumentId(1), 100, 100);
+                drag(&mut tools, &mut doc, &PATH, [SelectionMode::Subtract; 2]);
+                let outcome = tools.take_selection_outcome().expect("outcome");
+                assert_eq!(
+                    outcome,
+                    SelectionOutcome::Drawn {
+                        mode: SelectionMode::Subtract,
+                        by_keys: false,
+                        changed: false,
+                        result: None,
+                    },
+                    "{tool:?}"
+                );
+                assert!(outcome.nothing_happened_note().is_some());
+            }
+        }
+
+        #[test]
+        fn an_add_drag_inside_select_all_is_reported_unchanged() {
+            let mut tools = ToolManager::new();
+            tools.select(ToolId::SelectionRect);
+            let mut doc = Document::new(DocumentId(1), 100, 100);
+            doc.canvas.select_all();
+            drag(&mut tools, &mut doc, &PATH, [SelectionMode::Add; 2]);
+            assert_eq!(
+                tools.take_selection_outcome(),
+                Some(SelectionOutcome::Drawn {
+                    mode: SelectionMode::Add,
+                    by_keys: false,
+                    changed: false,
+                    result: Some([0, 0, 100, 100]),
+                })
+            );
+            assert_eq!(tools.take_selection_outcome(), None, "reported once");
+        }
     }
 }

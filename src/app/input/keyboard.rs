@@ -8,7 +8,7 @@
 //! command bodies.
 
 use crate::app::commands::{Command, KeyChord, KeyName};
-use crate::app::state::App;
+use crate::app::state::{App, InputState};
 use crate::extension::tool::ToolCtx;
 use crate::tools::ToolId;
 use winit::{
@@ -31,6 +31,34 @@ fn clone_bracket_step(size: f32, grow: bool) -> f32 {
         25.0
     } else {
         50.0
+    }
+}
+
+impl InputState {
+    /// Follow Alt / Ctrl / Shift / Space as the keyboard has them, before egui,
+    /// a dialog or the tool router can swallow the key: egui-winit consumes
+    /// every key event, releases too, while one of its text fields has focus,
+    /// and a release lost that way left Alt held (every marquee subtracting,
+    /// so a drag drew nothing) or Space held (every drag panning). A Space
+    /// press only pans when the canvas gets it, so presses are left to the
+    /// router; its release always lets go. Returns whether a flag changed.
+    pub(in crate::app) fn note_key(&mut self, key: PhysicalKey, pressed: bool) -> bool {
+        let flag = match key {
+            PhysicalKey::Code(KeyCode::AltLeft | KeyCode::AltRight) => {
+                if !pressed {
+                    self.alt_right_dragging = false;
+                }
+                &mut self.alt_held
+            }
+            PhysicalKey::Code(KeyCode::ControlLeft | KeyCode::ControlRight) => &mut self.ctrl_held,
+            PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => &mut self.shift_held,
+            PhysicalKey::Code(KeyCode::Space) if !pressed => {
+                self.space_dragging = false;
+                &mut self.space_held
+            }
+            _ => return false,
+        };
+        std::mem::replace(flag, pressed) != pressed
     }
 }
 
@@ -1650,6 +1678,44 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_release_egui_swallows_still_lets_go_of_the_held_keys() {
+        // 19/10: a release egui consumed (a text field had focus) or a dialog
+        // turned away never reached the router, so Alt stayed held — every
+        // marquee / lasso subtracted and drew nothing — or Space did, and
+        // every drag panned. `note_key` runs before either can swallow it.
+        let mut app = App::new();
+        let input = &mut app.edit.input;
+        for key in [KeyCode::AltLeft, KeyCode::ShiftRight, KeyCode::ControlLeft] {
+            assert!(input.note_key(PhysicalKey::Code(key), true));
+        }
+        // The router took the Space press and an Alt+right-drag began.
+        input.space_held = true;
+        input.space_dragging = true;
+        input.alt_right_dragging = true;
+
+        for key in [
+            KeyCode::AltLeft,
+            KeyCode::ShiftRight,
+            KeyCode::ControlLeft,
+            KeyCode::Space,
+        ] {
+            assert!(input.note_key(PhysicalKey::Code(key), false), "{key:?}");
+        }
+        assert!(!input.alt_held && !input.shift_held && !input.ctrl_held);
+        assert!(!input.space_held && !input.space_dragging && !input.alt_right_dragging);
+        assert!(!input.note_key(PhysicalKey::Code(KeyCode::Space), false));
+    }
+
+    #[test]
+    fn a_space_typed_into_a_field_does_not_arm_panning() {
+        let mut app = App::new();
+        let input = &mut app.edit.input;
+        assert!(!input.note_key(PhysicalKey::Code(KeyCode::Space), true));
+        assert!(!input.space_held);
+        assert!(!input.note_key(PhysicalKey::Code(KeyCode::KeyA), true));
+    }
 
     #[test]
     fn every_bindable_key_has_a_physical_key() {

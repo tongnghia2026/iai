@@ -257,6 +257,61 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
 }
 
 #[test]
+fn a_script_longer_than_a_batch_runs_a_batch_at_a_time_on_the_same_documents() {
+    use iai_engine::{CommandCall, ErrorCode};
+
+    let mut host = host();
+    let mut gate = Gate::new(Policy::agent(), Roots::default());
+    gate.learn(&iai_engine::cmds::core_registry().list());
+    let new_layers = |n: usize| (0..n).map(|_| CommandCall::new("layer.new", json!({})));
+    let mut calls = vec![CommandCall::new(
+        "file.new",
+        json!({"widthPx": 20, "heightPx": 20}),
+    )];
+    calls.extend(new_layers(299));
+    let reply = crate::script::run(&mut host, &gate, calls, false).unwrap();
+    assert_eq!(reply.completed.len(), 300);
+    assert!(reply.failed.is_none());
+
+    // The document lives on: a failure in the second batch counts from the first call.
+    let mut calls: Vec<CommandCall> = new_layers(280).collect();
+    calls.push(CommandCall::new("layer.delete", json!({"layer": 99999})));
+    calls.extend(new_layers(5));
+    let reply = crate::script::run(&mut host, &gate, calls, false).unwrap();
+    assert_eq!(reply.completed.len(), 280);
+    let failed = reply.failed.unwrap();
+    assert_eq!(
+        (failed.index, failed.error.code),
+        (280, ErrorCode::NotFound)
+    );
+    let info = crate::script::run(
+        &mut host,
+        &gate,
+        vec![CommandCall::new("doc.inspect", json!({}))],
+        false,
+    )
+    .unwrap();
+    let layers = info.completed[0].result().unwrap()["layers"].clone();
+    assert_eq!(layers.as_array().unwrap().len(), 1 + 299 + 280);
+
+    // All or nothing is one batch; and every call is checked before any runs.
+    let e = crate::script::run(&mut host, &gate, new_layers(257).collect(), true).unwrap_err();
+    assert_eq!(e.code, ErrorCode::TooLarge);
+    let mut calls: Vec<CommandCall> = new_layers(270).collect();
+    calls.push(CommandCall::new("file.export", json!({"path": "out.png"})));
+    assert!(crate::script::run(&mut host, &gate, calls, false).is_err());
+    let info = crate::script::run(
+        &mut host,
+        &gate,
+        vec![CommandCall::new("doc.inspect", json!({}))],
+        false,
+    )
+    .unwrap();
+    let layers = info.completed[0].result().unwrap()["layers"].clone();
+    assert_eq!(layers.as_array().unwrap().len(), 1 + 299 + 280);
+}
+
+#[test]
 fn the_server_serves_a_stream_line_by_line() {
     let mut host = host();
     let mut server = Server::new(

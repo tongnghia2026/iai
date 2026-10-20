@@ -72,6 +72,43 @@ pub fn fast_exp2(x: f32) -> f32 {
     exp2_split(x as f64).unwrap_or_else(|| x.exp2())
 }
 
+/// Exactly `v.round().clamp(0.0, 255.0) as u8` (NaN gives 0), with no libm
+/// `roundf` call: per-pixel loops that round three or four channels spent
+/// most of their time there. The truncated part is exact, so the half test is.
+#[inline]
+pub fn round_u8(v: f32) -> u8 {
+    let v = v.clamp(0.0, 255.0);
+    let t = v as u8;
+    if v - t as f32 >= 0.5 {
+        t + 1
+    } else {
+        t
+    }
+}
+
+/// Exactly `v.round().clamp(0.0, 65535.0) as u16` (NaN gives 0); see [`round_u8`].
+#[inline]
+pub fn round_u16(v: f32) -> u16 {
+    let v = v.clamp(0.0, 65535.0);
+    let t = v as u16;
+    if v - t as f32 >= 0.5 {
+        t + 1
+    } else {
+        t
+    }
+}
+
+/// Exactly `v.floor() as i32` (saturating, NaN gives 0), with no libm call.
+#[inline]
+pub fn floor_i32(v: f32) -> i32 {
+    let t = v as i32;
+    if t as f32 > v {
+        t.saturating_sub(1)
+    } else {
+        t
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +141,60 @@ mod tests {
         assert!(worst < 4.0e-7, "exp2 rel error {worst}");
         assert_eq!(fast_exp2(0.0), 1.0);
         assert_eq!(fast_exp2(-200.0), 0.0);
+    }
+
+    #[test]
+    fn rounding_and_floor_match_libm_bit_for_bit() {
+        let mut edges = vec![
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            0.5,
+            0.499_999_97,
+            254.5,
+            255.0,
+            255.5,
+            65_534.5,
+            65_535.4,
+            1.0e10,
+            -1.0e10,
+            2_147_483_520.0,
+            -2_147_483_648.0,
+        ];
+        // Every f32 step around each half and integer in the 8-bit range, and
+        // a sweep across the 16-bit range.
+        for k in 0..=512 {
+            let mid = k as f32 * 0.5;
+            let mut v = mid;
+            for _ in 0..4 {
+                v = v.next_down();
+            }
+            for _ in 0..9 {
+                edges.push(v);
+                edges.push(-v);
+                v = v.next_up();
+            }
+        }
+        edges.extend((0..400_000).map(|i| -100.0 + 66_000.0 * i as f32 / 400_000.0));
+        for v in edges {
+            assert_eq!(
+                round_u8(v),
+                v.round().clamp(0.0, 255.0) as u8,
+                "round_u8({v})"
+            );
+            assert_eq!(
+                round_u16(v),
+                v.round().clamp(0.0, 65535.0) as u16,
+                "round_u16({v})"
+            );
+            assert_eq!(floor_i32(v), v.floor() as i32, "floor_i32({v})");
+            assert_eq!(
+                floor_i32(v * 0.01),
+                (v * 0.01).floor() as i32,
+                "floor_i32({v}/100)"
+            );
+        }
     }
 }

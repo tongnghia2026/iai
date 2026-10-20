@@ -119,6 +119,18 @@ fn autosave_pixel_limit_for(total_ram_bytes: u64) -> u64 {
     (total_ram_bytes / 64).clamp(FLOOR, 900_000_000)
 }
 
+/// Most pixels the pages of one file (a PDF) may open into together. Every
+/// page stays in memory at 4 bytes a pixel; they are allowed RAM/8, so the
+/// ceiling is RAM/32 pixels, never under 200 MP (23 A4 pages at 300 dpi).
+pub fn open_pages_pixel_limit() -> u64 {
+    open_pages_pixel_limit_for(get().total_ram_bytes)
+}
+
+fn open_pages_pixel_limit_for(total_ram_bytes: u64) -> u64 {
+    const FLOOR: u64 = 200_000_000;
+    (total_ram_bytes / 32).max(FLOOR)
+}
+
 /// Worker threads for the global rayon pool: weak machines keep cores free so
 /// the UI thread never starves under a bake; big machines use everything.
 pub fn rayon_threads() -> usize {
@@ -367,6 +379,15 @@ mod tests {
             900_000_000,
             "canvas cap"
         );
+    }
+
+    #[test]
+    fn the_pages_a_file_opens_into_follow_the_machines_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(open_pages_pixel_limit_for(0), 200_000_000, "unknown RAM");
+        assert_eq!(open_pages_pixel_limit_for(4 * GIB), 200_000_000, "floor");
+        assert_eq!(open_pages_pixel_limit_for(8 * GIB), 268_435_456);
+        assert_eq!(open_pages_pixel_limit_for(32 * GIB), 1_073_741_824);
     }
 
     #[test]

@@ -55,7 +55,10 @@ claude mcp add iai -- "C:\iAi\iai.exe" mcp --write-root "D:\Photos"
 ### Scripts, no agent
 
 `iai.exe run script.json [same options]` runs a list of calls and prints the replies
-(exit code 1 when one failed):
+(exit code 1 when one failed). Every call is checked before any runs. An `atomic` script is
+all or nothing, so at most 256 calls; one that is not may hold up to 100 000, run 256 at a
+time on the same documents, and stops at the first failure (its `index` counts from the
+script's first call). An MCP batch (`iai_command_batch`) holds at most 256 calls.
 
 ```json
 {"atomic": false, "calls": [
@@ -111,3 +114,39 @@ Twenty portraits in `D:\Photos\khach` → 3×4 ID photos on blue → 10×15 shee
 
 The test `agent::e2e` runs this through MCP (a light one in the suite; the full one with
 `IAI_AGENT_E2E_PHOTOS=<folder of portraits>`, ignored by default).
+
+## A many-page PDF
+
+`file.open` renders a PDF's pages one at a time into one document, a page per PDF page:
+
+- `pages` — which ones, 0 being the first (`[0, 1, 2]`); every page when left out. They open
+  in the PDF's order, each once, so page `i` of the document is the `i`-th smallest asked.
+- `dpi` — the resolution, 18 to 600; 300 when left out. A page that would pass 50 MP, or
+  30 000 px a side, comes out lower; the reply's `dpi` says what it got.
+- All the pages stay in memory, about 35 MB per A4 page at 300 dpi. Pages that would take
+  more than an eighth of this machine's memory together (at least 200 MP: 23 A4 pages at
+  300 dpi) are refused with `too_large` before any is rendered; the message gives how many
+  of the first pages fit and the dpi at which all of them would, and the `hint` is the call
+  that opens the first pages that fit.
+- The document is a picture of the PDF, not the PDF: it has no file of its own, so
+  `file.save` needs a `path` (.iai keeps the pages) and the PDF is never overwritten.
+  `export.pdf` writes it back, every page or `pages`; shapes, paths and text added stay vector.
+
+Forty A4 colouring cards (2480 × 3508 px at 300 dpi), a line of grass at the foot of each:
+
+```json
+{"atomic": false, "calls": [
+  {"command": "file.open", "args": {"path": "thiep.pdf"}},
+  {"command": "page.select", "args": {"page": 0}},
+  {"command": "vector.add_path", "args": {"runs": [{"points": [[0, 3400], [600, 3300],
+    [1240, 3380], [1900, 3290], [2480, 3400]], "smooth": true}], "stroke": "#000000",
+    "strokeWidth": 8, "join": "round", "cap": "round", "name": "Cỏ"}},
+  {"command": "export.pdf", "args": {"path": "thiep_co.pdf"}}
+]}
+```
+
+with the `page.select` + `vector.add_path` pair repeated for pages 1 to 39 before the
+export. `vector.add_path` draws
+straight segments, or with `"smooth": true` a curve through the points; `join` is `miter`
+(default: a sharp corner reaches out up to 4 stroke widths), `round` or `bevel`; `cap` is
+`butt` (default), `round` or `square`.

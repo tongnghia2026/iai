@@ -1508,6 +1508,14 @@ impl App {
             || active == ToolId::Move
             || active == ToolId::Shape
             || active == ToolId::Text
+            // Marquee / lasso: the Move-selection pointer inside the selection.
+            || matches!(
+                active,
+                ToolId::SelectionRect
+                    | ToolId::SelectionEllipse
+                    | ToolId::Lasso
+                    | ToolId::PolygonLasso
+            )
             || self.edit.warp_state.is_some()
         {
             self.sync_cursor(event_loop);

@@ -425,6 +425,164 @@ fn a_document_is_saved_reopened_and_exported() {
     assert_eq!(e.code, ErrorCode::BadParams);
 }
 
+/// A PDF of `greys.len()` pages, each 1 × 0.5 inch and of one grey.
+fn grey_pages_pdf(path: &str, greys: &[u8]) {
+    let pages: Vec<_> = greys
+        .iter()
+        .map(|&g| iai_formats::pdf::ImagePdfPage {
+            rgba: [g, g, g, 255].repeat(8),
+            width: 4,
+            height: 2,
+            page_points: (72.0, 36.0),
+        })
+        .collect();
+    iai_formats::pdf::write_image_pdf(std::path::Path::new(path), &pages).unwrap();
+}
+
+fn grey(hex: &str) -> u8 {
+    u8::from_str_radix(&hex[1..3], 16).unwrap()
+}
+
+#[test]
+fn a_pdf_opens_the_pages_asked_at_the_dpi_asked_and_is_written_back() {
+    let dir = TempDir::new("pdf-pages");
+    let source = dir.path("five.pdf");
+    grey_pages_pdf(&source, &[0x10, 0x30, 0x50, 0x70, 0x90]);
+    let mut t = Setup::new();
+
+    let all = t.run("file.open", json!({"path": source}));
+    assert_eq!(
+        (
+            all["pages"].clone(),
+            all["widthPx"].clone(),
+            all["dpi"].clone()
+        ),
+        (json!(5), json!(300), json!(300.0))
+    );
+
+    // In the PDF's order, each once.
+    let some = t.run(
+        "file.open",
+        json!({"path": source, "pages": [3, 1, 3], "dpi": 100}),
+    );
+    assert_eq!(
+        (
+            some["pages"].clone(),
+            some["widthPx"].clone(),
+            some["heightPx"].clone()
+        ),
+        (json!(2), json!(100), json!(50))
+    );
+    assert_eq!(some["title"], json!("five"));
+    let whole = json!({"x": 0, "y": 0, "w": 100, "h": 50});
+    assert_eq!(t.mean(whole.clone()), "#303030");
+    t.run("page.select", json!({"page": 1}));
+    assert_eq!(t.mean(whole.clone()), "#707070");
+    t.run(
+        "vector.add_path",
+        json!({"runs": [{"points": [[10, 40], [50, 10], [90, 40]], "smooth": true}],
+               "stroke": "#FF0000", "strokeWidth": 4, "join": "round", "cap": "round"}),
+    );
+    let pdf = t.run("export.pdf", json!({"path": dir.path("out.pdf")}));
+    assert_eq!(pdf["pages"], json!(2));
+    let reread =
+        iai_formats::pdf::PdfImporter::probe(std::path::Path::new(&dir.path("out.pdf"))).unwrap();
+    assert_eq!(reread.page_count, 2);
+
+    // Not its file: saving in place would replace the five pages.
+    let e = t.try_run("file.save", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    t.run("file.save", json!({"path": dir.path("two.iai")}));
+
+    let e = t
+        .try_run("file.open", json!({"path": source, "pages": [5]}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound);
+    let e = t
+        .try_run("file.open", json!({"path": source, "dpi": 1200}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "file.open",
+            json!({"path": dir.path("two.iai"), "pages": [0]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn pdf_pages_too_large_together_are_refused_with_the_call_that_fits() {
+    let dir = TempDir::new("pdf-budget");
+    let source = dir.path("five.pdf");
+    grey_pages_pdf(&source, &[0x20; 5]);
+    let choice = super::file::PdfChoice {
+        pages: None,
+        dpi: Some(100),
+    };
+    // Each page is 100 × 50 px at 100 dpi: 25 000 px in all.
+    let fits = super::file::decode_pdf(
+        std::path::Path::new(&source),
+        &choice,
+        25_000,
+        &JobCtx::new(),
+    );
+    assert!(fits.is_ok());
+    let e = match super::file::decode_pdf(
+        std::path::Path::new(&source),
+        &choice,
+        12_000,
+        &JobCtx::new(),
+    ) {
+        Ok(_) => panic!("five pages over the limit were opened"),
+        Err(e) => e,
+    };
+    assert_eq!(e.code, ErrorCode::TooLarge);
+    assert!(e.message.contains("the first 2 fit"), "{}", e.message);
+    // 68 dpi: 68 × 34 px a page, 11 560 in all.
+    assert!(e.message.contains("all fit at 68"), "{}", e.message);
+    assert_eq!(
+        e.hint.unwrap(),
+        json!({"command": "file.open", "args": {"path": source, "pages": [0, 1], "dpi": 100}})
+    );
+}
+
+#[test]
+fn a_path_can_curve_through_its_points_and_round_its_corners() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 200, "heightPx": 200}));
+    let arch = json!([[20, 100], [100, 20], [180, 100]]);
+    // Straight, the run passes 7 px below (55, 55); smooth, through it.
+    let straight = t.run(
+        "vector.add_path",
+        json!({"runs": [{"points": arch}], "stroke": "#000000", "strokeWidth": 6}),
+    );
+    let on_curve = json!({"x": 54, "y": 54, "w": 2, "h": 2});
+    assert_eq!(grey(&t.mean(on_curve.clone())), 0xFF);
+    t.run("layer.delete", json!({"layer": straight["layer"]}));
+    let smooth = t.run(
+        "vector.add_path",
+        json!({"runs": [{"points": arch, "smooth": true}], "stroke": "#000000", "strokeWidth": 6}),
+    );
+    assert!(grey(&t.mean(on_curve)) < 0x40);
+    t.run("layer.delete", json!({"layer": smooth["layer"]}));
+
+    // A pointed V: a mitred corner reaches 22 px past its tip, a round one 10.
+    let v = json!([{"points": [[20, 180], [100, 20], [180, 180]]}]);
+    let past_tip = json!({"x": 99, "y": 4, "w": 2, "h": 2});
+    let mitred = t.run(
+        "vector.add_path",
+        json!({"runs": v, "stroke": "#000000", "strokeWidth": 20}),
+    );
+    assert!(grey(&t.mean(past_tip.clone())) < 0x40);
+    t.run("layer.delete", json!({"layer": mitred["layer"]}));
+    t.run(
+        "vector.add_path",
+        json!({"runs": v, "stroke": "#000000", "strokeWidth": 20, "join": "round"}),
+    );
+    assert_eq!(grey(&t.mean(past_tip)), 0xFF);
+}
+
 #[test]
 fn an_atomic_batch_closes_the_document_it_opened() {
     let mut t = Setup::new();

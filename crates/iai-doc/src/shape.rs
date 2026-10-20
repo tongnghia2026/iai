@@ -374,6 +374,66 @@ impl ShapeData {
         }
     }
 
+    /// Whether this shape, re-described by the image of its box under the
+    /// linear map `x' = a·x + c·y, y' = b·x + d·y`, still draws the mapped
+    /// picture. A line's endpoints map exactly under any map. A rectangle or
+    /// ellipse survives any axis-preserving map (scale, quarter turn, mirror).
+    /// A polygon or star is built pointing up, so it survives only a map that
+    /// carries its corners onto corners — a mirror across the vertical axis
+    /// always does, a quarter turn only for some side counts. A gradient keeps
+    /// its own direction, so gradient paint survives only an unmirrored,
+    /// unrotated scale. When this is false the caller must keep the mapped
+    /// geometry some other way (a Path) or the next re-render jumps back.
+    pub fn survives_linear_map(&self, a: f32, b: f32, c: f32, d: f32) -> bool {
+        if ![a, b, c, d].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let eps = a.abs().max(b.abs()).max(c.abs()).max(d.abs()) * 1.0e-4;
+        let keeps_axes = b.abs() <= eps && c.abs() <= eps;
+        let swaps_axes = a.abs() <= eps && d.abs() <= eps;
+        let gradient = matches!(self.style.fill, Paint::Gradient(_))
+            || matches!(self.style.stroke, Paint::Gradient(_));
+        if gradient && !(keeps_axes && a > 0.0 && d > 0.0) {
+            return false;
+        }
+        match self.kind {
+            ShapeKind::Line => true,
+            _ if !(keeps_axes || swaps_axes) => false,
+            ShapeKind::Rectangle | ShapeKind::Ellipse => true,
+            ShapeKind::Polygon | ShapeKind::Star => {
+                let cx = (self.x0 + self.x1) * 0.5;
+                let cy = (self.y0 + self.y1) * 0.5;
+                let rx = (self.x1 - self.x0).abs() * 0.5;
+                let ry = (self.y1 - self.y0).abs() * 0.5;
+                let next_rx = a.abs() * rx + c.abs() * ry;
+                let next_ry = b.abs() * rx + d.abs() * ry;
+                let next = ShapeData {
+                    x0: -next_rx,
+                    y0: -next_ry,
+                    x1: next_rx,
+                    y1: next_ry,
+                    ..self.clone()
+                };
+                let target = next.polygon_vertices();
+                let tol = next_rx.max(next_ry).max(1.0) * 1.0e-3;
+                let mapped: Vec<(f32, f32)> = self
+                    .polygon_vertices()
+                    .into_iter()
+                    .map(|(x, y)| {
+                        let (dx, dy) = (x - cx, y - cy);
+                        (a * dx + c * dy, b * dx + d * dy)
+                    })
+                    .collect();
+                mapped.len() == target.len()
+                    && mapped.iter().all(|p| {
+                        target
+                            .iter()
+                            .any(|q| (p.0 - q.0).abs() <= tol && (p.1 - q.1).abs() <= tol)
+                    })
+            }
+        }
+    }
+
     /// Size of the tight raster that holds this shape.
     pub fn raster_size(&self) -> (u32, u32) {
         let pad = Self::pad(self.style.effective_stroke_width());
@@ -1409,5 +1469,55 @@ mod tests {
         assert!(((y0 + y1) * 0.5 - 65.0).abs() < 0.001);
         assert!(((x1 - x0) - 100.0).abs() < 0.001);
         assert!(((y1 - y0) - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn polygon_and_star_survive_only_maps_that_keep_their_corners() {
+        const CW: (f32, f32, f32, f32) = (0.0, 1.0, -1.0, 0.0);
+        const HALF: (f32, f32, f32, f32) = (-1.0, 0.0, 0.0, -1.0);
+        const MIRROR_X: (f32, f32, f32, f32) = (-1.0, 0.0, 0.0, 1.0);
+        const MIRROR_Y: (f32, f32, f32, f32) = (1.0, 0.0, 0.0, -1.0);
+        let survives = |kind, sides, (a, b, c, d): (f32, f32, f32, f32)| {
+            let mut shape = base(kind);
+            shape.sides = sides;
+            shape.survives_linear_map(a, b, c, d)
+        };
+        for kind in [ShapeKind::Rectangle, ShapeKind::Ellipse, ShapeKind::Line] {
+            for map in [CW, HALF, MIRROR_X, MIRROR_Y] {
+                assert!(survives(kind, 5, map), "{kind:?} {map:?}");
+            }
+        }
+        for kind in [ShapeKind::Polygon, ShapeKind::Star] {
+            // Built pointing up: always symmetric across the vertical axis.
+            assert!(survives(kind, 3, MIRROR_X), "{kind:?}");
+            assert!(survives(kind, 5, MIRROR_X), "{kind:?}");
+            // An odd count points somewhere else once turned or flipped upside down.
+            assert!(!survives(kind, 3, CW), "{kind:?}");
+            assert!(!survives(kind, 5, HALF), "{kind:?}");
+            assert!(!survives(kind, 5, MIRROR_Y), "{kind:?}");
+            assert!(!survives(kind, 6, CW), "{kind:?}");
+            assert!(survives(kind, 6, HALF), "{kind:?}");
+            assert!(survives(kind, 8, CW), "{kind:?}");
+        }
+        // Any non-axis rotation only keeps a line.
+        let (s, c) = 30f32.to_radians().sin_cos();
+        assert!(survives(ShapeKind::Line, 5, (c, s, -s, c)));
+        assert!(!survives(ShapeKind::Rectangle, 5, (c, s, -s, c)));
+    }
+
+    #[test]
+    fn gradient_paint_survives_only_a_plain_scale() {
+        use crate::vector::color::ColorValue;
+        use crate::vector::style::{Gradient, GradientKind};
+        let mut shape = base(ShapeKind::Rectangle);
+        shape.style.fill = Paint::Gradient(Gradient::two_color(
+            GradientKind::Linear,
+            ColorValue::BLACK,
+            ColorValue::WHITE,
+            iai_geom::vector::affine::AffineTransform::IDENTITY,
+        ));
+        assert!(shape.survives_linear_map(2.0, 0.0, 0.0, 3.0));
+        assert!(!shape.survives_linear_map(0.0, 1.0, -1.0, 0.0));
+        assert!(!shape.survives_linear_map(-1.0, 0.0, 0.0, 1.0));
     }
 }

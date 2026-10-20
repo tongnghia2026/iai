@@ -1,7 +1,8 @@
 // Freehand lasso selection — drag to trace a shape; release to close and fill.
 
+use super::selection_common::{self, SelectionOutcome};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
-use crate::core::selection::SelectionSnapshot;
+use crate::core::selection::{SelectionMode, SelectionSnapshot};
 
 pub struct LassoTool {
     pub feather: f32,
@@ -9,6 +10,10 @@ pub struct LassoTool {
     points: Vec<(f32, f32)>,
     dragging: bool,
     base_snap: Option<SelectionSnapshot>,
+    /// Picked at the press, as in Photoshop.
+    mode: SelectionMode,
+    by_keys: bool,
+    outcome: Option<SelectionOutcome>,
 
     is_moving_selection: bool,
     frac_x: f32,
@@ -31,6 +36,9 @@ impl LassoTool {
             points: Vec::new(),
             dragging: false,
             base_snap: None,
+            mode: SelectionMode::New,
+            by_keys: false,
+            outcome: None,
             is_moving_selection: false,
             frac_x: 0.0,
             frac_y: 0.0,
@@ -45,6 +53,11 @@ impl LassoTool {
         } else {
             &[]
         }
+    }
+
+    /// How the last gesture ended, once.
+    pub fn take_outcome(&mut self) -> Option<SelectionOutcome> {
+        self.outcome.take()
     }
 }
 
@@ -66,10 +79,7 @@ impl Tool for LassoTool {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let canvas = ctx.canvas_mut();
 
-        if event.selection_mode == crate::core::selection::SelectionMode::New
-            && canvas.selection.active
-            && canvas.selection.is_selected(cx as u32, cy as u32)
-        {
+        if selection_common::press_moves_selection(&event, &canvas.selection) {
             self.is_moving_selection = true;
             self.frac_x = 0.0;
             self.frac_y = 0.0;
@@ -80,6 +90,8 @@ impl Tool for LassoTool {
 
         self.points.clear();
         self.points.push((cx, cy));
+        self.mode = event.selection_mode;
+        self.by_keys = selection_common::mode_from_keys(&event);
         self.dragging = true;
         self.is_moving_selection = false;
         self.base_snap = Some(canvas.snapshot_selection());
@@ -137,6 +149,10 @@ impl Tool for LassoTool {
     fn on_release(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         if self.is_moving_selection {
             self.is_moving_selection = false;
+            self.outcome = Some(SelectionOutcome::Moved {
+                dx: self.total_dx,
+                dy: self.total_dy,
+            });
 
             if self.total_dx != 0 || self.total_dy != 0 {
                 let canvas = ctx.canvas_mut();
@@ -149,6 +165,9 @@ impl Tool for LassoTool {
             }
             return ToolResponse::repaint();
         }
+        if !self.dragging {
+            return ToolResponse::none();
+        }
 
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         self.points.push((cx, cy));
@@ -158,12 +177,15 @@ impl Tool for LassoTool {
             if let Some(snap) = &self.base_snap {
                 canvas.restore_selection_snapshot(snap);
             }
-            canvas.select_polygon_mode(
-                &self.points,
-                event.selection_mode,
-                self.feather,
-                self.anti_alias,
-            );
+            canvas.select_polygon_mode(&self.points, self.mode, self.feather, self.anti_alias);
+            self.outcome = Some(selection_common::drawn_outcome(
+                canvas,
+                self.base_snap.as_ref(),
+                self.mode,
+                self.by_keys,
+            ));
+        } else {
+            self.outcome = Some(SelectionOutcome::Click { mode: self.mode });
         }
 
         self.points.clear();

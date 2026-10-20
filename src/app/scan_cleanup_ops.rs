@@ -8,7 +8,8 @@ use super::render::CanvasEvent;
 use super::state::{App, ScanPreviewSession};
 use crate::core::canvas::Canvas;
 use crate::core::scan_cleanup::{
-    clean_scan_rgba, resolve_pages, ScanCleanScope, ScanCleanupParams, ScanCleanupRequest,
+    apply_with_background, clean_scan_rgba, resolve_pages, ScanBackground, ScanCleanScope,
+    ScanCleanupParams, ScanCleanupRequest,
 };
 use crate::core::tile::TileMap;
 
@@ -16,7 +17,7 @@ const CLEAN_LABEL: &str = "Làm sạch bản scan";
 
 impl App {
     /// Open the live preview: snapshot the active raster layer and pre-compute the
-    /// rolling-ball background + luma once (the params-independent, expensive part),
+    /// rolling-ball background once (the params-independent, expensive part),
     /// then show the default-params result on the canvas. No-op when the active
     /// layer can't be cleaned (CMYK / locked / non-raster) — the dialog then just
     /// applies without a live preview.
@@ -33,27 +34,18 @@ impl App {
         if (!layer.is_background && layer.locked) || !layer.is_raster() {
             return;
         }
-        let session = ScanPreviewSession {
+        let src_rgba = layer.flatten_tiles();
+        let background =
+            ScanBackground::estimate(&src_rgba, layer.width as usize, layer.height as usize);
+        self.shell.scan_preview = Some(ScanPreviewSession {
             doc_id: self.docs.documents[idx].id,
             layer_id: layer.id,
             w: layer.width,
             h: layer.height,
             original_tiles: layer.tiles.clone(),
-            src_rgba: layer.flatten_tiles(),
-            luma: Vec::new(),
-            bg: Vec::new(),
-            last: None,
-        };
-        let luma = crate::core::scan_cleanup::luma_of(&session.src_rgba);
-        let bg = crate::core::scan_cleanup::estimate_background(
-            &luma,
-            session.w as usize,
-            session.h as usize,
-        );
-        self.shell.scan_preview = Some(ScanPreviewSession {
-            luma,
-            bg,
-            ..session
+            src_rgba,
+            background,
+            shown: None,
         });
         self.update_scan_preview(ScanCleanupParams::default());
     }
@@ -67,25 +59,68 @@ impl App {
         let Some(session) = self.shell.scan_preview.as_ref() else {
             return;
         };
-        if session.doc_id != doc_id || session.last == Some(params) {
+        if session.doc_id != doc_id || session.shown.as_ref().is_some_and(|(p, _)| *p == params) {
             return;
         }
-        let cleaned = crate::core::scan_cleanup::apply_with_background(
-            &session.src_rgba,
-            &session.bg,
-            &session.luma,
-            params,
-        );
+        let cleaned = apply_with_background(&session.src_rgba, &session.background, params);
         let (layer_id, w, h) = (session.layer_id, session.w, session.h);
         let tiles = TileMap::from_rgba(&cleaned, w, h);
         self.docs.documents[idx]
             .canvas
-            .preview_layer_tiles(layer_id, tiles);
+            .preview_layer_tiles(layer_id, tiles.clone());
         if let Some(s) = self.shell.scan_preview.as_mut() {
-            s.last = Some(params);
+            s.shown = Some((params, tiles));
         }
         if let Some(win) = &self.win.window {
             win.request_redraw();
+        }
+    }
+
+    /// OK on the dialog: commit what the preview already shows, as one undo
+    /// step over the pristine layer, when it is the active layer of the active
+    /// document cleaned with `params`. Otherwise restore the layer and clean
+    /// what the request names afresh.
+    pub(crate) fn commit_scan_cleanup(&mut self, req: ScanCleanupRequest) {
+        let idx = self.docs.active_doc_idx;
+        let single = matches!(req.scope, ScanCleanScope::CurrentPage)
+            || (self.docs.documents[idx].pdf_document.is_none()
+                && !matches!(req.scope, ScanCleanScope::AllDocuments));
+        let doc = &self.docs.documents[idx];
+        let active_layer = doc
+            .canvas
+            .layer_stack
+            .layers
+            .get(doc.canvas.layer_stack.active_idx)
+            .map(|l| l.id);
+        let reusable = single
+            && self.shell.scan_preview.as_ref().is_some_and(|s| {
+                s.doc_id == doc.id
+                    && Some(s.layer_id) == active_layer
+                    && s.shown.as_ref().is_some_and(|(p, _)| *p == req.params)
+            });
+        if !reusable {
+            self.cancel_scan_preview();
+            self.apply_scan_cleanup(req);
+            return;
+        }
+        let Some(ScanPreviewSession {
+            layer_id,
+            original_tiles,
+            shown: Some((_, cleaned)),
+            ..
+        }) = self.shell.scan_preview.take()
+        else {
+            return;
+        };
+        let canvas = &mut self.docs.documents[idx].canvas;
+        if canvas.commit_layer_tiles_change(layer_id, original_tiles, cleaned, CLEAN_LABEL) {
+            self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
+            self.shell.status_msg = format!("{CLEAN_LABEL}: xong");
+        } else {
+            self.shell.status_msg = "Không thể làm sạch layer này".to_string();
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 
@@ -388,4 +423,86 @@ fn clean_scan_canvas_base(canvas: &mut Canvas, params: ScanCleanupParams) -> boo
     canvas.dirty.expand_full(canvas.width, canvas.height);
     canvas.flatten_full();
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::scan_cleanup::ScanCleanupMode;
+
+    /// A shaded grey page with dark strokes, as a phone photo of a document.
+    fn app_with_page() -> (App, Vec<u8>) {
+        let (w, h) = (300u32, 220u32);
+        let px: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                let v = if (y / 9) % 3 == 0 && (x / 2) % 3 == 0 {
+                    25
+                } else {
+                    (215 - (x + y) / 8) as u8
+                };
+                [v, v, v.saturating_sub(6), 255]
+            })
+            .collect();
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].canvas = Canvas::from_rgba(px.clone(), w, h);
+        (app, px)
+    }
+
+    fn layer_pixels(app: &App) -> Vec<u8> {
+        app.docs.documents[0].canvas.layer_stack.layers[0].flatten_tiles()
+    }
+
+    fn request(mode: ScanCleanupMode, strength: f32) -> ScanCleanupRequest {
+        ScanCleanupRequest {
+            params: ScanCleanupParams { mode, strength },
+            scope: ScanCleanScope::CurrentPage,
+        }
+    }
+
+    #[test]
+    fn ok_commits_what_the_preview_shows_as_one_undo_step() {
+        let (mut app, original) = app_with_page();
+        let req = request(ScanCleanupMode::Bilevel, 0.57);
+        let undo_before = app.docs.documents[0].canvas.undo_count();
+        app.begin_scan_preview();
+        app.update_scan_preview(req.params);
+        let shown = layer_pixels(&app);
+        assert_eq!(shown, clean_scan_rgba(&original, 300, 220, req.params));
+
+        app.commit_scan_cleanup(req);
+        assert!(app.shell.scan_preview.is_none());
+        assert_eq!(layer_pixels(&app), shown);
+        let canvas = &mut app.docs.documents[0].canvas;
+        assert_eq!(canvas.undo_count(), undo_before + 1);
+        canvas.undo();
+        assert_eq!(layer_pixels(&app), original);
+    }
+
+    #[test]
+    fn ok_with_other_params_than_shown_cleans_afresh() {
+        let (mut app, original) = app_with_page();
+        app.begin_scan_preview();
+        let req = request(ScanCleanupMode::Grayscale, 0.8);
+        app.commit_scan_cleanup(req);
+        assert!(app.shell.scan_preview.is_none());
+        assert_eq!(
+            layer_pixels(&app),
+            clean_scan_rgba(&original, 300, 220, req.params)
+        );
+        app.docs.documents[0].canvas.undo();
+        assert_eq!(layer_pixels(&app), original);
+    }
+
+    #[test]
+    fn cancel_puts_the_page_back() {
+        let (mut app, original) = app_with_page();
+        let undo_before = app.docs.documents[0].canvas.undo_count();
+        app.begin_scan_preview();
+        assert_ne!(layer_pixels(&app), original);
+        app.cancel_scan_preview();
+        assert_eq!(layer_pixels(&app), original);
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), undo_before);
+    }
 }

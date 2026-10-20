@@ -10,6 +10,8 @@
 //!   and write, sizes — checked before a call reaches the host.
 //! - [`bridge`]: the app's side of the link to a running window (loopback
 //!   TCP, a 256-bit token) and the client that uses it.
+//! - [`script`]: a script of calls (`iai.exe run`), longer than a batch when
+//!   it is not all or nothing.
 //!
 //! Plan: docs/planning/KIEN_TRUC_AGENT_NATIVE_2026-10-14.md (Phase 4).
 #![forbid(unsafe_code)]
@@ -22,6 +24,7 @@ pub mod host;
 pub mod jsonrpc;
 pub mod mcp;
 pub mod schema;
+pub mod script;
 
 pub use gate::{Gate, Roots};
 pub use host::{Host, LocalHost};
@@ -34,6 +37,8 @@ pub mod limits {
     pub const MAX_RESULT: usize = 8 << 20;
     /// The most calls in one batch.
     pub const MAX_BATCH: usize = iai_engine::MAX_BATCH;
+    /// The most calls in one script that is not atomic (run a batch at a time).
+    pub const MAX_SCRIPT: usize = 100_000;
     /// The most links to a running app at once.
     pub const MAX_LINKS: usize = 16;
 }

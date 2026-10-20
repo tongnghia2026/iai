@@ -8,7 +8,8 @@
 //!   it writes where it can be reached to `%APPDATA%\IAI\control.json`);
 //! - `iai.exe run SCRIPT.json [same options]`: run a script of commands
 //!   (`[{"command": …, "args": …}, …]`, or `{"calls": […], "atomic": true}`)
-//!   and print what each answered.
+//!   and print what each answered. A script that is not atomic may be longer
+//!   than a batch: it runs a batch at a time on the same documents.
 //!
 //! Files are read and written only inside the folders granted with
 //! `--read-root` / `--write-root`. Printing and the network are off unless
@@ -222,7 +223,7 @@ fn run_script(host: &mut dyn Host, mut gate: Gate, script: Option<&std::path::Pa
                 .unwrap_or(false),
         ),
     };
-    let mut calls: Vec<CommandCall> = match serde_json::from_value(calls) {
+    let calls: Vec<CommandCall> = match serde_json::from_value(calls) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("iai: {}: the calls do not read: {e}", path.display());
@@ -236,14 +237,7 @@ fn run_script(host: &mut dyn Host, mut gate: Gate, script: Option<&std::path::Pa
             return 1;
         }
     }
-    if let Err(e) = gate.check_batch(&mut calls) {
-        println!(
-            "{}",
-            serde_json::json!({"failed": {"index": null, "error": e}})
-        );
-        return 1;
-    }
-    let reply = match host.batch(calls, atomic) {
+    let reply = match iai_automation::script::run(host, &gate, calls, atomic) {
         Ok(r) => r,
         Err(e) => {
             println!(

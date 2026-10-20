@@ -8,27 +8,37 @@ use crate::core::snapping::{snap_1d, SnapKind, SNAP_THRESHOLD_PX};
 use crate::core::vector::object::VectorGeometry;
 use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
 
-/// The affine that rotates/flips a vector object about the layer-space pivot
-/// `(cx,cy)` — `T(c) ∘ M ∘ T(-c)`. Composed onto the object's transform so a
-/// Path's model (not its baked tiles) carries the rotation and stays editable.
+/// The canvas map of a Move-tool rotate/flip of the union box `[ux0,uy0]`
+/// sized `union_w × union_h` — exactly the map [`transformed_layer_placement`]
+/// applies to every layer rectangle (entries 0/±1, integer translation). Every
+/// selected layer turns about this one centre: a Path's model, a Text or Shape
+/// model and the raster layers alike, so a mixed selection keeps its layout.
 /// Screen space has y down, so a positive rotation reads clockwise.
-fn vector_action_pivot(
+fn move_action_turn(
     action: MoveTransformAction,
-    cx: f32,
-    cy: f32,
+    ux0: i32,
+    uy0: i32,
+    union_w: i32,
+    union_h: i32,
 ) -> crate::core::vector::affine::AffineTransform {
     use crate::core::vector::affine::AffineTransform;
-    use std::f32::consts::{FRAC_PI_2, PI};
-    let m = match action {
-        MoveTransformAction::Rotate90Cw => AffineTransform::rotate(FRAC_PI_2),
-        MoveTransformAction::Rotate90Ccw => AffineTransform::rotate(-FRAC_PI_2),
-        MoveTransformAction::Rotate180 => AffineTransform::rotate(PI),
-        MoveTransformAction::FlipHorizontal => AffineTransform::scale(-1.0, 1.0),
-        MoveTransformAction::FlipVertical => AffineTransform::scale(1.0, -1.0),
+    let sx = (union_w - union_h) / 2;
+    let sy = (union_h - union_w) / 2;
+    let (a, b, c, d, e, f) = match action {
+        MoveTransformAction::Rotate90Cw => (0, 1, -1, 0, ux0 + uy0 + union_h + sx, uy0 - ux0 + sy),
+        MoveTransformAction::Rotate90Ccw => (0, -1, 1, 0, ux0 - uy0 + sx, ux0 + uy0 + union_w + sy),
+        MoveTransformAction::Rotate180 => (-1, 0, 0, -1, 2 * ux0 + union_w, 2 * uy0 + union_h),
+        MoveTransformAction::FlipHorizontal => (-1, 0, 0, 1, 2 * ux0 + union_w, 0),
+        MoveTransformAction::FlipVertical => (1, 0, 0, -1, 0, 2 * uy0 + union_h),
     };
-    AffineTransform::translate(cx, cy)
-        .then(&m)
-        .then(&AffineTransform::translate(-cx, -cy))
+    AffineTransform {
+        a: a as f32,
+        b: b as f32,
+        c: c as f32,
+        d: d as f32,
+        e: e as f32,
+        f: f as f32,
+    }
 }
 
 /// New `(offset_x, offset_y, width, height)` for a layer flipped/rotated within the
@@ -62,30 +72,18 @@ fn transformed_layer_placement(
     }
 }
 
+/// Canvas-space box of a layer's visible pixels. An empty layer has none: its
+/// raster rectangle (a fresh layer is canvas-sized) must not widen the union
+/// the selection turns about.
 fn layer_transform_bounds(layer: &crate::core::layer::Layer) -> Option<(i32, i32, i32, i32)> {
-    layer
-        .tiles
-        .content_bounds()
-        .map(|(x0, y0, x1, y1)| {
-            (
-                layer.offset.0 + x0,
-                layer.offset.1 + y0,
-                layer.offset.0 + x1,
-                layer.offset.1 + y1,
-            )
-        })
-        .or_else(|| {
-            if layer.width == 0 || layer.height == 0 {
-                None
-            } else {
-                Some((
-                    layer.offset.0,
-                    layer.offset.1,
-                    layer.offset.0 + layer.width as i32,
-                    layer.offset.1 + layer.height as i32,
-                ))
-            }
-        })
+    layer.tiles.content_bounds().map(|(x0, y0, x1, y1)| {
+        (
+            layer.offset.0 + x0,
+            layer.offset.1 + y0,
+            layer.offset.0 + x1,
+            layer.offset.1 + y1,
+        )
+    })
 }
 
 fn is_full_canvas_background(
@@ -694,6 +692,7 @@ impl App {
     }
 
     pub(super) fn apply_move_transform_action(&mut self, action: MoveTransformAction) {
+        use crate::core::canvas::model_turn as turn_model;
         use crate::core::layer::{Layer, LayerMask, LayerType};
 
         fn can_transform(layer: &Layer) -> bool {
@@ -828,30 +827,24 @@ impl App {
                             canvas.height,
                         );
 
+                        let turn = move_action_turn(action, ux0, uy0, union_w, union_h);
                         for idx in targets {
                             let layer = &mut canvas.layer_stack.layers[idx];
-                            // Vector Path: rotate/flip the MODEL (about the object's
-                            // displayed centre) and re-derive the raster, so the
-                            // object stays editable and survives rebuild_path_caches
-                            // on reload. Never bake the tiles (Mục 3.2).
+                            // Text, Shape and Path layers re-render from their
+                            // model, so the model turns with the pixels or the
+                            // next edit snaps the layer back.
+                            let source =
+                                turn_model::has_turnable_model(layer).then(|| layer.clone());
+                            // Vector Path: rotate/flip the MODEL and re-derive the
+                            // raster, so the object stays editable and survives
+                            // rebuild_path_caches on reload. Never bake the tiles
+                            // (Mục 3.2).
                             if matches!(
                                 layer.layer_type,
                                 LayerType::Vector(VectorGeometry::Path(_))
                             ) {
-                                // Reconcile any pending Move-tool drag first so the
-                                // pivot is the displayed centre, not the stale model.
-                                crate::core::command_vector::fold_offset_into_model(layer);
-                                if let LayerType::Vector(VectorGeometry::Path(obj)) =
-                                    &layer.layer_type
-                                {
-                                    let mut obj = obj.clone();
-                                    let (cx, cy) = obj
-                                        .layer_bounds(0.25)
-                                        .map(|b| (b.x + b.w * 0.5, b.y + b.h * 0.5))
-                                        .unwrap_or((0.0, 0.0));
-                                    obj.transform =
-                                        vector_action_pivot(action, cx, cy).then(&obj.transform);
-                                    crate::core::command_vector::apply_object_to_layer(layer, obj);
+                                if let Some(source) = &source {
+                                    turn_model::turn_layer_model(layer, source, &turn);
                                 }
                                 if let Some(mask) = &mut layer.mask {
                                     transform_mask(mask, action);
@@ -892,6 +885,9 @@ impl App {
 
                             if let Some(mask) = &mut layer.mask {
                                 transform_mask(mask, action);
+                            }
+                            if let Some(source) = &source {
+                                turn_model::turn_layer_model(layer, source, &turn);
                             }
                         }
 
@@ -1276,33 +1272,43 @@ mod tests {
     }
 
     #[test]
-    fn vector_rotate_swaps_dims_keeps_centre_and_round_trips() {
-        use super::vector_action_pivot;
-        let obj = rect_path_object(40.0, 20.0, 100.0, 50.0);
-        let b0 = obj.layer_bounds(0.1).unwrap();
-        let (cx, cy) = (b0.x + b0.w * 0.5, b0.y + b0.h * 0.5);
-
-        let mut rot = obj.clone();
-        rot.transform =
-            vector_action_pivot(MoveTransformAction::Rotate90Cw, cx, cy).then(&rot.transform);
-        let b1 = rot.layer_bounds(0.1).unwrap();
-        assert!(
-            (b1.w - b0.h).abs() < 0.5 && (b1.h - b0.w).abs() < 0.5,
-            "90° swaps width/height: {b1:?}"
-        );
-        assert!(
-            ((b1.x + b1.w * 0.5) - cx).abs() < 0.5 && ((b1.y + b1.h * 0.5) - cy).abs() < 0.5,
-            "centre kept fixed"
-        );
-
-        // Rotating back restores the original placement.
-        rot.transform =
-            vector_action_pivot(MoveTransformAction::Rotate90Ccw, cx, cy).then(&rot.transform);
-        let b2 = rot.layer_bounds(0.1).unwrap();
-        assert!(
-            (b2.x - b0.x).abs() < 0.5 && (b2.y - b0.y).abs() < 0.5 && (b2.w - b0.w).abs() < 0.5,
-            "CW then CCW round-trips: {b2:?} vs {b0:?}"
-        );
+    fn move_action_turn_is_the_map_every_layer_placement_uses() {
+        use super::move_action_turn;
+        use crate::core::geometry::Point;
+        // Odd and even width/height differences, layers inside and around the
+        // union (padding can reach past the content union).
+        for (ux0, uy0, uw, uh) in [(10, 20, 400, 200), (-7, 3, 51, 120), (0, 0, 33, 33)] {
+            for (ox, oy, w, h) in [
+                (ux0, uy0, uw, uh),
+                (ux0 + 5, uy0 + 9, 13, 7),
+                (ux0 - 4, uy0 - 2, 30, 61),
+            ] {
+                for action in [
+                    MoveTransformAction::Rotate90Cw,
+                    MoveTransformAction::Rotate90Ccw,
+                    MoveTransformAction::Rotate180,
+                    MoveTransformAction::FlipHorizontal,
+                    MoveTransformAction::FlipVertical,
+                ] {
+                    let turn = move_action_turn(action, ux0, uy0, uw, uh);
+                    let a = turn.apply_point(Point::new(ox as f32, oy as f32));
+                    let b = turn.apply_point(Point::new((ox + w) as f32, (oy + h) as f32));
+                    let mapped = (
+                        a.x.min(b.x) as i32,
+                        a.y.min(b.y) as i32,
+                        (a.x - b.x).abs() as i32,
+                        (a.y - b.y).abs() as i32,
+                    );
+                    assert_eq!(
+                        mapped,
+                        transformed_layer_placement(action, ux0, uy0, uw, uh, ox, oy, w, h),
+                        "{action:?} union {:?} layer {:?}",
+                        (ux0, uy0, uw, uh),
+                        (ox, oy, w, h)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1577,6 +1583,230 @@ mod tests {
                 })
                 .count(),
             2
+        );
+    }
+
+    // --- Multi-layer audit, 19/10: Rotate/Flip buttons on Type, Shapes and
+    // several Paths. ---
+
+    fn content_size(layer: &crate::core::layer::Layer) -> (i32, i32) {
+        let (x0, y0, x1, y1) = layer.tiles.content_bounds().expect("content");
+        (x1 - x0, y1 - y0)
+    }
+
+    fn canvas_content_box(layer: &crate::core::layer::Layer) -> (i32, i32, i32, i32) {
+        let (x0, y0, x1, y1) = layer.tiles.content_bounds().expect("content");
+        let (ox, oy) = layer.offset;
+        (ox + x0, oy + y0, ox + x1, oy + y1)
+    }
+
+    fn select_only(app: &mut App, ids: &[u32]) {
+        let canvas = &mut app.docs.documents[0].canvas;
+        for layer in &mut canvas.layer_stack.layers {
+            layer.selected = ids.contains(&layer.id);
+        }
+        if let Some(idx) = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == ids[0])
+        {
+            canvas.layer_stack.active_idx = idx;
+        }
+    }
+
+    #[test]
+    fn move_rotate_and_flip_turn_the_text_model_with_its_pixels() {
+        use crate::core::layer::LayerType;
+        use crate::core::text::{rasterize_placed, TextData, TextFontFamily};
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(400, 300);
+        let td = TextData {
+            content: "Hello".to_string(),
+            font_family: TextFontFamily::DejaVuSans,
+            font_px: 32.0,
+            ..TextData::default()
+        };
+        let (raster, _) = rasterize_placed(&td).expect("text renders");
+        let id = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(raster.width, raster.height);
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.offset = (100, 80);
+            layer.layer_type = LayerType::Text(td);
+            layer.id
+        };
+        select_only(&mut app, &[id]);
+
+        for (action, rotation, flip_x) in [
+            (MoveTransformAction::Rotate90Cw, 90.0, false),
+            (MoveTransformAction::FlipHorizontal, 270.0, true),
+            (MoveTransformAction::Rotate180, 90.0, true),
+            (MoveTransformAction::FlipVertical, 90.0, false),
+        ] {
+            app.apply_move_transform_action(action);
+            let layer = find_layer(&app, id);
+            let LayerType::Text(td) = &layer.layer_type else {
+                panic!("{action:?}: type stays editable");
+            };
+            assert!(
+                (td.rotation_deg - rotation).abs() < 0.01 && td.flip_x == flip_x,
+                "{action:?}: rotation {} flip_x {}",
+                td.rotation_deg,
+                td.flip_x
+            );
+            // Re-rendering the model must draw what is on screen, or the next
+            // edit or transform flips the text back.
+            let (fresh, _) = rasterize_placed(td).expect("text renders");
+            let fresh = TileMap::from_rgba(&fresh.rgba, fresh.width, fresh.height);
+            let (fx0, fy0, fx1, fy1) = fresh.content_bounds().expect("ink");
+            let (w, h) = content_size(layer);
+            assert!(
+                ((fx1 - fx0) - w).abs() <= 2 && ((fy1 - fy0) - h).abs() <= 2,
+                "{action:?}: model draws {}x{}, layer shows {w}x{h}",
+                fx1 - fx0,
+                fy1 - fy0
+            );
+        }
+    }
+
+    #[test]
+    fn move_rotate_keeps_shapes_true_to_their_pixels() {
+        use crate::core::layer::LayerType;
+        use crate::core::shape::{ShapeData, ShapeKind};
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(400, 300);
+        let mut add_shape = |kind, sides| {
+            let (mut sd, off) = ShapeData::from_canvas_span(
+                kind,
+                60.0,
+                50.0,
+                180.0,
+                110.0,
+                0.0,
+                true,
+                [200, 30, 30, 255],
+                // Fill only: a Path draws sharp corners with mitred outlines.
+                0.0,
+                [0, 0, 0, 255],
+            );
+            sd.sides = sides;
+            let raster = sd.render().expect("shape renders");
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(raster.width, raster.height);
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.offset = off;
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(sd));
+            layer.id
+        };
+        let rect = add_shape(ShapeKind::Rectangle, 5);
+        let triangle = add_shape(ShapeKind::Polygon, 3);
+
+        for id in [rect, triangle] {
+            select_only(&mut app, &[id]);
+            let before = canvas_content_box(find_layer(&app, id));
+            app.apply_move_transform_action(MoveTransformAction::Rotate90Cw);
+            let layer = find_layer(&app, id);
+            let after = canvas_content_box(layer);
+            assert!(
+                ((after.2 - after.0) - (before.3 - before.1)).abs() <= 2
+                    && ((after.3 - after.1) - (before.2 - before.0)).abs() <= 2,
+                "a quarter turn swaps the box: {before:?} -> {after:?}"
+            );
+            match &layer.layer_type {
+                LayerType::Vector(VectorGeometry::Primitive(sd)) => {
+                    assert_eq!(id, rect, "only the rectangle can stay a ShapeData");
+                    // The model's next render is the turned picture.
+                    let fresh = sd.render().expect("shape renders");
+                    let fresh = TileMap::from_rgba(&fresh.rgba, fresh.width, fresh.height);
+                    let (fx0, fy0, fx1, fy1) = fresh.content_bounds().expect("ink");
+                    let (w, h) = content_size(layer);
+                    assert!(((fx1 - fx0) - w).abs() <= 1 && ((fy1 - fy0) - h).abs() <= 1);
+                }
+                LayerType::Vector(VectorGeometry::Path(_)) => {
+                    assert_eq!(id, triangle, "a triangle on its side becomes curves");
+                }
+                _ => panic!("the shape stays vector"),
+            }
+        }
+    }
+
+    #[test]
+    fn move_rotate_turns_several_paths_about_their_common_centre() {
+        use crate::core::command_vector::CreatePathLayer;
+        use crate::core::gateway::ChangeKind;
+        use crate::core::layer::LayerType;
+
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(400, 300);
+        for (tx, name) in [(50.0, "A"), (150.0, "B")] {
+            app.docs.documents[0]
+                .canvas
+                .execute(
+                    Box::new(CreatePathLayer::new(
+                        rect_path_object(40.0, 20.0, tx, 60.0),
+                        name,
+                    )),
+                    ChangeKind::LayerStructure,
+                )
+                .unwrap();
+        }
+        let ids: Vec<u32> = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .filter(|l| matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_))))
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        select_only(&mut app, &ids);
+        let centre = |app: &App, id| {
+            let (x0, y0, x1, y1) = canvas_content_box(find_layer(app, id));
+            ((x0 + x1) as f32 * 0.5, (y0 + y1) as f32 * 0.5)
+        };
+        let before: Vec<_> = ids.iter().map(|&id| centre(&app, id)).collect();
+        let (ux, uy) = (
+            (before[0].0 + before[1].0) * 0.5,
+            (before[0].1 + before[1].1) * 0.5,
+        );
+
+        app.apply_move_transform_action(MoveTransformAction::Rotate90Cw);
+
+        for (&id, b) in ids.iter().zip(&before) {
+            // Clockwise on screen: (dx, dy) -> (-dy, dx) about the pair's centre.
+            let expected = (ux - (b.1 - uy), uy + (b.0 - ux));
+            let got = centre(&app, id);
+            assert!(
+                (got.0 - expected.0).abs() <= 1.5 && (got.1 - expected.1).abs() <= 1.5,
+                "path {id} centre {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_rotate_ignores_an_empty_layer_in_the_selection() {
+        let (mut app, cx2, cy2) = app_with_padded_selected_layer();
+        let photo = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let photo = canvas.layer_stack.layers[canvas.layer_stack.active_idx].id;
+            // A fresh layer: canvas-sized, not one visible pixel.
+            let idx = canvas.layer_stack.add_layer(200, 160);
+            canvas.layer_stack.layers[idx].selected = true;
+            photo
+        };
+        app.apply_move_transform_action(MoveTransformAction::Rotate90Cw);
+
+        let layer = find_layer(&app, photo);
+        let (x0, y0, x1, y1) = layer.tiles.content_bounds().expect("content");
+        assert_eq!(
+            (layer.offset.0 * 2 + x0 + x1, layer.offset.1 * 2 + y0 + y1),
+            (cx2, cy2),
+            "the photo turns in place, not about the empty layer's canvas centre"
         );
     }
 }

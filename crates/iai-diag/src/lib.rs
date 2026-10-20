@@ -37,7 +37,26 @@ const THROTTLE_GAP: Duration = Duration::from_millis(250);
 /// Changes to one control closer together than this are one run.
 const RUN_GAP: Duration = Duration::from_secs(1);
 const JOURNAL_CAP_BYTES: u64 = 16 * 1024 * 1024;
+/// The user's sessions kept, newest first.
 const KEEP_SESSIONS: usize = 20;
+/// Runs with no window (`iai run`, `iai mcp`) kept, apart from the user's: a
+/// script that runs the exe over and over must not push the user's out.
+const KEEP_AGENT_SESSIONS: usize = 5;
+/// How long a session past the newest is still kept when the user marked a
+/// problem in it, or the app froze, hung or died in it.
+const KEEP_FLAGGED_FOR: Duration = Duration::from_secs(30 * 24 * 3600);
+/// A session whose journal was written to this recently may belong to a
+/// running instance, and is not removed.
+const MAYBE_RUNNING: Duration = Duration::from_secs(12 * 3600);
+/// An empty session folder this young may be one being opened right now.
+const OPENING: Duration = Duration::from_secs(10 * 60);
+/// What a windowless run's journal says it was asked to do begins with this;
+/// the pruning tells those sessions from the user's by it.
+const AGENT_TAG: &str = "agent:";
+/// Incident kinds, as `INDEX.log` names them, that keep their session for
+/// [`KEEP_FLAGGED_FOR`].
+const SEVERE_INCIDENTS: [&str; 4] = ["HANG", "FREEZE", "EXIT HANG", "ABNORMAL EXIT"];
+const MARK_TEXT: &str = "======== the user marked a problem here ========";
 /// The journal's last line when the app left on its own terms. The watcher
 /// takes a session that ends without it for a crash.
 const CLEAN_END: &str = "session closed normally";
@@ -376,6 +395,12 @@ fn local_parts(t: SystemTime) -> (i64, i64) {
     (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000))
 }
 
+/// `t` on this machine's wall clock, as seconds since 1970.
+fn local_secs(t: SystemTime) -> i64 {
+    let (days, ms) = local_parts(t);
+    days * 86_400 + ms / 1000
+}
+
 /// `HH:MM:SS.mmm`, local.
 fn time_of(t: SystemTime) -> String {
     let (_, ms) = local_parts(t);
@@ -424,9 +449,100 @@ fn is_session_dir_name(name: &str) -> bool {
     b.len() > 23 && b[4] == b'-' && b[7] == b'-' && b[10] == b'_' && &b[19..23] == b"_pid"
 }
 
-/// Keep the newest sessions, drop the rest. A folder whose journal was written
-/// to in the last half day is left alone: it may belong to a running instance.
-fn prune_old_sessions(root: &Path) {
+/// When a session began, in [`local_secs`], read from its folder's name.
+fn session_began(name: &str) -> Option<i64> {
+    let num = |range: std::ops::Range<usize>| name.get(range)?.parse::<i64>().ok();
+    let days = days_from_civil(num(0..4)?, num(5..7)?, num(8..10)?);
+    Some(days * 86_400 + num(11..13)? * 3600 + num(14..16)? * 60 + num(17..19)?)
+}
+
+/// One line of `INDEX.log`, where every session's incidents are listed together.
+#[cfg_attr(not(all(windows, target_arch = "x86_64")), allow(dead_code))]
+fn index_line(at: SystemTime, kind: &str, span: &str, about: &str, session: &str) -> String {
+    format!(
+        "{} {}  {kind:<13} {span:<8} {about}  ->  {session}\\incidents.log\n",
+        date_of(at),
+        &time_of(at)[..8],
+    )
+}
+
+/// The session an `INDEX.log` line is about, when its incident is one of
+/// [`SEVERE_INCIDENTS`].
+fn severe_incident_session(line: &str) -> Option<&str> {
+    let (head, target) = line.rsplit_once("  ->  ")?;
+    // The kind follows `YYYY-MM-DD HH:MM:SS  `; one inside a session is numbered.
+    let kind = head.get(21..)?;
+    let kind = match kind.strip_prefix('#') {
+        Some(numbered) => numbered.split_once(' ')?.1,
+        None => kind,
+    };
+    let severe = SEVERE_INCIDENTS.iter().any(|name| {
+        kind.strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(' '))
+    });
+    if !severe {
+        return None;
+    }
+    target.split('\\').next()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SessionKind {
+    User,
+    /// A run with no window, by the line [`start_without_window`] opens its journal with.
+    Agent,
+    /// Nothing inside: what a removal that could not finish leaves behind.
+    Empty,
+}
+
+fn session_kind(dir: &Path) -> SessionKind {
+    use std::io::Read;
+    if std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none()) {
+        return SessionKind::Empty;
+    }
+    let mut head = Vec::new();
+    if let Ok(file) = std::fs::File::open(dir.join("journal.log")) {
+        let _ = file.take(4096).read_to_end(&mut head);
+    }
+    let agent = String::from_utf8_lossy(&head).lines().take(8).any(|line| {
+        let mut words = line.split_whitespace();
+        words.nth(1) == Some("start") && words.next() == Some(AGENT_TAG)
+    });
+    if agent {
+        SessionKind::Agent
+    } else {
+        SessionKind::User
+    }
+}
+
+fn has_mark(dir: &Path) -> bool {
+    std::fs::read(dir.join("journal.log"))
+        .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(MARK_TEXT))
+}
+
+/// Whether the session's journal was written to less than `within` before `now`.
+fn written_within(dir: &Path, now: SystemTime, within: Duration) -> bool {
+    std::fs::metadata(dir.join("journal.log"))
+        .and_then(|m| m.modified())
+        // One written after `now` counts as recent: the clock has gone back.
+        .is_ok_and(|at| now.duration_since(at).map_or(true, |age| age < within))
+}
+
+/// Run from inside the Claude app (a packaged app), `remove_dir_all` deletes
+/// a session's files and then fails on its folder with a sharing violation;
+/// a plain `remove_dir` still takes the folder.
+fn remove_session_dir(dir: &Path) {
+    if std::fs::remove_dir_all(dir).is_err() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// Keep the user's newest sessions and, apart from them, a few of the runs
+/// with no window; drop the rest, and empty folders. A session past those is
+/// still kept while its journal was written to in the last half day (it may
+/// belong to a running instance), and for a month when the user marked a
+/// problem in it or the app froze, hung or died in it.
+fn prune_old_sessions(root: &Path, now: SystemTime) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -437,16 +553,44 @@ fn prune_old_sessions(root: &Path) {
         .filter(|name| is_session_dir_name(name))
         .collect();
     names.sort_unstable_by(|a, b| b.cmp(a));
-    for name in names.into_iter().skip(KEEP_SESSIONS) {
-        let dir = root.join(name);
-        let recent = std::fs::metadata(dir.join("journal.log"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|at| at.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(12 * 3600));
-        if !recent {
-            let _ = std::fs::remove_dir_all(dir);
+    let severe: std::collections::HashSet<String> = std::fs::read(root.join("INDEX.log"))
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(severe_incident_session)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let now_local = local_secs(now);
+    let age_secs = |name: &str| session_began(name).map(|began| now_local - began);
+    let (mut users, mut agents) = (0, 0);
+    for name in names {
+        let dir = root.join(&name);
+        let newest = match session_kind(&dir) {
+            SessionKind::Empty => {
+                if age_secs(&name).is_none_or(|age| age >= OPENING.as_secs() as i64) {
+                    let _ = std::fs::remove_dir(&dir);
+                }
+                continue;
+            }
+            SessionKind::User => {
+                users += 1;
+                users <= KEEP_SESSIONS
+            }
+            SessionKind::Agent => {
+                agents += 1;
+                agents <= KEEP_AGENT_SESSIONS
+            }
+        };
+        if newest || written_within(&dir, now, MAYBE_RUNNING) {
+            continue;
         }
+        let young = age_secs(&name).is_some_and(|age| age < KEEP_FLAGGED_FOR.as_secs() as i64);
+        if young && (severe.contains(&name) || has_mark(&dir)) {
+            continue;
+        }
+        remove_session_dir(&dir);
     }
 }
 
@@ -504,7 +648,16 @@ pub fn start(build: &str) {
 /// Open a journal for a process with no window (`iai.exe mcp`, `iai.exe
 /// run`): what it ran is written down, and nothing watches a UI thread.
 pub fn start_without_window(build: &str, what: &str) {
-    open_journal(build, what);
+    open_journal(build, &agent_what(what));
+}
+
+/// `what` as a windowless run's journal opens with it: after [`AGENT_TAG`].
+fn agent_what(what: &str) -> String {
+    if what.starts_with(AGENT_TAG) {
+        what.to_owned()
+    } else {
+        format!("{AGENT_TAG} {what}")
+    }
 }
 
 fn spawn_watcher_for_session() -> Result<u32, String> {
@@ -547,7 +700,7 @@ fn open_journal(build: &str, what: &str) -> bool {
         return false;
     }
     let _ = SESSION_DIR.set(dir.clone());
-    prune_old_sessions(&root);
+    prune_old_sessions(&root, now);
 
     let exe = std::env::current_exe().ok();
     let built = exe
@@ -692,7 +845,7 @@ pub fn widget(changing: bool, what: &str, value: &str) {
 pub fn mark() -> Option<String> {
     let mut journal = journal()?;
     let at = time_of(SystemTime::now());
-    journal.line("MARK", "======== the user marked a problem here ========");
+    journal.line("MARK", MARK_TEXT);
     Some(at[..8].to_owned())
 }
 
@@ -763,6 +916,213 @@ mod tests {
         assert!(is_session_dir_name("2026-10-05_15-42-10_pid1234"));
         assert!(!is_session_dir_name("autosave"));
         assert!(!is_session_dir_name("2026-10-05_15-42-10"));
+        assert_eq!(
+            session_began("2026-10-05_15-42-10_pid1234"),
+            Some(days_from_civil(2026, 10, 5) * 86_400 + 15 * 3600 + 42 * 60 + 10)
+        );
+    }
+
+    /// A folder of the test's own under the temp directory, empty.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("iai-diag-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// When the session in the folder `name` began.
+    fn began(name: &str) -> SystemTime {
+        let utc = session_began(name).unwrap() - utc_offset_secs();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(utc as u64)
+    }
+
+    /// A session folder whose journal holds `lines`, last written at `written`.
+    fn session_written(root: &Path, name: &str, lines: &[(&str, &str)], written: SystemTime) {
+        let sink = Sink::default();
+        let mut journal = Journal::new(Box::new(sink.clone()));
+        for (kind, text) in lines {
+            journal.line(kind, text);
+        }
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.log");
+        std::fs::write(&path, sink.text()).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(written).unwrap();
+    }
+
+    /// A session folder whose journal holds `lines`, last written as it began.
+    fn session(root: &Path, name: &str, lines: &[(&str, &str)]) {
+        session_written(root, name, lines, began(name));
+    }
+
+    const USER_START: [(&str, &str); 2] = [
+        (
+            "start",
+            "iAi 0.1.0 \u{2014} 2026-10-01 pid 1\nexe C:\\iAi\\iai.exe",
+        ),
+        ("start", "watcher running, pid 2"),
+    ];
+
+    /// The user's twenty newest sessions: 1 to 20 October, at eight.
+    fn twenty_user_sessions(root: &Path) -> Vec<String> {
+        (1..=20)
+            .map(|day| {
+                let name = format!("2026-10-{day:02}_08-00-00_pid{day}");
+                session(root, &name, &USER_START);
+                name
+            })
+            .collect()
+    }
+
+    fn folders(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn noon_20_october() -> SystemTime {
+        began("2026-10-20_12-00-00_pid1")
+    }
+
+    #[test]
+    fn windowless_runs_keep_a_few_of_their_own_and_leave_the_users_sessions_alone() {
+        let root = scratch("prune-agent");
+        let mut expected = twenty_user_sessions(&root);
+        session(&root, "2026-09-30_08-00-00_pid99", &USER_START);
+        // A script ran the exe 21 times in a row, the night before.
+        let runs: Vec<String> = (0..21)
+            .map(|i| {
+                let name = format!("2026-10-19_23-{:02}-00_pid{}", 13 + i, 100 + i);
+                let what = if i % 2 == 0 {
+                    agent_what("agent: iai run job.json")
+                } else {
+                    agent_what("iai mcp")
+                };
+                let lines = [
+                    (
+                        "start",
+                        "iAi 0.1.0 \u{2014} 2026-10-19 pid 100\nexe C:\\iAi\\iai.exe",
+                    ),
+                    ("start", "code abc"),
+                    ("start", what.as_str()),
+                    ("cmd", "agent file.open {}"),
+                ];
+                session(&root, &name, &lines);
+                name
+            })
+            .collect();
+        prune_old_sessions(&root, noon_20_october());
+        expected.extend_from_slice(&runs[21 - KEEP_AGENT_SESSIONS..]);
+        expected.sort();
+        assert_eq!(folders(&root), expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_session_marked_or_frozen_in_is_kept_for_a_month_past_the_newest() {
+        let root = scratch("prune-flagged");
+        let mut expected = twenty_user_sessions(&root);
+        let mark = [USER_START[0], ("MARK", MARK_TEXT), ("key", "Ctrl+Z")];
+        let incidents: [(&str, &str); 7] = [
+            ("2026-09-24_09-00-00_pid202", "#3 HANG"),
+            ("2026-09-23_09-00-00_pid203", "#12 FREEZE"),
+            ("2026-09-22_09-00-00_pid204", "ABNORMAL EXIT"),
+            ("2026-09-22_10-00-00_pid205", "EXIT HANG"),
+            ("2026-09-21_09-00-00_pid206", "#1 STALL"),
+            ("2026-09-21_09-00-00_pid206", "#2 DIALOG WAIT"),
+            ("2026-09-11_09-00-00_pid207", "#1 HANG"),
+        ];
+        let mut index = String::new();
+        for (name, kind) in incidents {
+            session(&root, name, &USER_START);
+            index.push_str(&index_line(
+                began(name),
+                kind,
+                "6 s",
+                "iai::app::App::frame",
+                name,
+            ));
+        }
+        std::fs::write(root.join("INDEX.log"), index).unwrap();
+        session(&root, "2026-09-25_09-00-00_pid201", &mark);
+        session(&root, "2026-09-10_09-00-00_pid208", &mark);
+        // Still open: its journal was written an hour ago.
+        let now = noon_20_october();
+        let open = now - Duration::from_secs(3600);
+        session_written(&root, "2026-09-26_09-00-00_pid209", &USER_START, open);
+
+        prune_old_sessions(&root, now);
+        expected.extend(
+            [
+                "2026-09-22_09-00-00_pid204",
+                "2026-09-22_10-00-00_pid205",
+                "2026-09-23_09-00-00_pid203",
+                "2026-09-24_09-00-00_pid202",
+                "2026-09-25_09-00-00_pid201",
+                "2026-09-26_09-00-00_pid209",
+            ]
+            .map(str::to_owned),
+        );
+        expected.sort();
+        // Gone: the one with only short stalls, and those older than a month.
+        assert_eq!(folders(&root), expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_session_folders_are_cleared_away_and_not_counted() {
+        let root = scratch("prune-empty");
+        let mut expected = twenty_user_sessions(&root);
+        for name in [
+            "2026-10-15_06-39-04_pid22580",
+            "2026-10-20_09-00-00_pid301",
+            "2026-10-20_09-30-00_pid302",
+            "2026-10-20_10-00-00_pid303",
+            // Being opened by an instance starting right now.
+            "2026-10-20_11-58-00_pid304",
+            "autosave",
+        ] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        prune_old_sessions(&root, noon_20_october());
+        expected.extend(["2026-10-20_11-58-00_pid304", "autosave"].map(str::to_owned));
+        expected.sort();
+        assert_eq!(folders(&root), expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_lines_name_the_session_of_a_freeze_hang_or_crash() {
+        let session = "2026-10-19_09-23-51_pid10396";
+        let at = began(session);
+        for (kind, severe) in [
+            ("#28 STALL", false),
+            ("#1 LAG BURST", false),
+            ("#2 DIALOG WAIT", false),
+            ("#3 HANG", true),
+            ("#112 FREEZE", true),
+            ("EXIT HANG", true),
+            ("ABNORMAL EXIT", true),
+        ] {
+            let line = index_line(
+                at,
+                kind,
+                "1.2 s",
+                "iai::tools::crop::CropTool::commit",
+                session,
+            );
+            assert_eq!(
+                severe_incident_session(line.trim_end()),
+                severe.then_some(session),
+                "{line}"
+            );
+        }
     }
 
     #[test]

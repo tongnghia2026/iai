@@ -72,6 +72,7 @@ impl App {
             self.shell.status_msg = notice.to_string();
         }
         self.maybe_autosave();
+        self.report_selection_outcome();
 
         if self.win.pending_view_change {
             let flushed_view = self.flush_pending_view_change();

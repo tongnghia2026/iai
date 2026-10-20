@@ -3,8 +3,8 @@
 
 use iai_doc::shape::{ShapeData, ShapeKind};
 use iai_doc::vector::object::VectorObjectData;
-use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
-use iai_doc::vector::style::VectorStyle;
+use iai_doc::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
+use iai_doc::vector::style::{LineCap, LineJoin, VectorStyle};
 use iai_geom::geometry::Point;
 use iai_geom::vector::affine::AffineTransform;
 use iai_history::command::LayerStructureCommand;
@@ -186,7 +186,8 @@ impl Command for AddShape {
     }
 }
 
-/// One run of a path: points joined by straight lines.
+/// One run of a path: points joined by straight lines, or by one smooth curve
+/// through them.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Run {
@@ -196,6 +197,71 @@ pub struct Run {
     /// Join the last point back to the first.
     #[serde(default)]
     pub closed: bool,
+    /// A smooth curve through every point instead of straight lines.
+    #[serde(default)]
+    pub smooth: bool,
+}
+
+impl Run {
+    fn contour(&self) -> Contour {
+        let at = |&[x, y]: &[f32; 2]| Point::new(x, y);
+        let nodes = self
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, point)| {
+                let anchor = at(point);
+                if !self.smooth {
+                    return Node::sharp(anchor);
+                }
+                // Catmull-Rom: the tangent at a point runs from the one before
+                // it to the one after; an open run's ends lean on themselves.
+                let prev = match i.checked_sub(1) {
+                    Some(j) => self.points.get(j),
+                    None if self.closed => self.points.last(),
+                    None => None,
+                };
+                let next = match self.points.get(i.saturating_add(1)) {
+                    Some(p) => Some(p),
+                    None if self.closed => self.points.first(),
+                    None => None,
+                };
+                let (from, to) = (prev.map_or(anchor, at), next.map_or(anchor, at));
+                let (dx, dy) = ((to.x - from.x) / 6.0, (to.y - from.y) / 6.0);
+                Node {
+                    anchor,
+                    in_handle: prev.map(|_| Point::new(anchor.x - dx, anchor.y - dy)),
+                    out_handle: next.map(|_| Point::new(anchor.x + dx, anchor.y + dy)),
+                    kind: NodeKind::Smooth,
+                }
+            })
+            .collect();
+        Contour::new(nodes, self.closed)
+    }
+}
+
+/// How an outline turns at a corner.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Join {
+    /// Pointed; a sharp corner can reach out up to 4 widths.
+    #[default]
+    Miter,
+    Round,
+    /// Cut off flat.
+    Bevel,
+}
+
+/// How an open outline ends.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Cap {
+    /// Flat, at the end point.
+    #[default]
+    Butt,
+    Round,
+    /// Flat, half a width past the end point.
+    Square,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -213,6 +279,13 @@ pub struct PathParams {
     #[serde(default = "two")]
     #[schemars(range(min = 0.0, max = 1000.0))]
     pub stroke_width: f32,
+    /// How the outline turns at a corner; `round` keeps sharp corners from
+    /// spiking.
+    #[serde(default)]
+    pub join: Join,
+    /// How an open outline ends.
+    #[serde(default)]
+    pub cap: Cap,
     /// Where runs overlap, holes alternate (`even_odd`) or the inside is
     /// filled whatever the direction (`non_zero`, default).
     #[serde(default)]
@@ -240,8 +313,9 @@ static PATH: CommandMeta = CommandMeta {
     id: "vector.add_path",
     label_vi: "Vẽ đường",
     label_en: "Add Path",
-    doc: "Draw a path of straight segments (one or more runs of points, open or closed) as a \
-          new editable vector layer, filled and/or outlined.",
+    doc: "Draw a path (one or more runs of points, open or closed; straight segments, or a \
+          smooth curve through the points with `smooth`) as a new editable vector layer, filled \
+          and/or outlined, with miter / round / bevel corners.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -257,18 +331,7 @@ impl Command for AddPath {
     fn plan(&self, s: &mut Session<'_>, p: PathParams) -> Result<Plan<Drawn>, CmdError> {
         let doc = s.doc_id(p.doc)?;
         let (fill, stroke) = look(&p.fill, &p.stroke)?;
-        let contours = p
-            .runs
-            .iter()
-            .map(|run| {
-                let nodes = run
-                    .points
-                    .iter()
-                    .map(|[x, y]| Node::sharp(Point::new(*x, *y)))
-                    .collect();
-                Contour::new(nodes, run.closed)
-            })
-            .collect();
+        let contours = p.runs.iter().map(Run::contour).collect();
         let rule = if p.even_odd {
             FillRule::EvenOdd
         } else {
@@ -282,12 +345,22 @@ impl Command for AddPath {
         } else {
             0.0
         };
-        let style = VectorStyle::from_shape_fields(
+        let mut style = VectorStyle::from_shape_fields(
             fill.is_some(),
             fill.unwrap_or([0, 0, 0, 0]),
             stroke_width,
             stroke.unwrap_or([0, 0, 0, 0]),
         );
+        style.stroke_style.join = match p.join {
+            Join::Miter => LineJoin::Miter,
+            Join::Round => LineJoin::Round,
+            Join::Bevel => LineJoin::Bevel,
+        };
+        style.stroke_style.cap = match p.cap {
+            Cap::Butt => LineCap::Butt,
+            Cap::Round => LineCap::Round,
+            Cap::Square => LineCap::Square,
+        };
         let object = VectorObjectData::new(path, style, AffineTransform::IDENTITY);
         let canvas = s.canvas_mut(Some(doc))?;
         let (cw, ch) = (canvas.width, canvas.height);

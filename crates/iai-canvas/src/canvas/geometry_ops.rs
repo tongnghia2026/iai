@@ -1054,7 +1054,11 @@ impl Canvas {
         footprint: f32,
         keep_edge: bool,
     ) -> iai_raster::tile::TileMap {
+        use iai_raster::fast_math::{round_u16, round_u8};
+        use iai_raster::tile::{BilinearCursor, Tile, TileGrid, TilePos, TILE_SIZE};
         use rayon::prelude::*;
+        // Per-pixel reads go through a dense index, not the map's hash.
+        let grid = TileGrid::new(src);
         let taps = if footprint.is_finite() {
             footprint.round().clamp(1.0, 5.0) as usize
         } else {
@@ -1063,16 +1067,19 @@ impl Canvas {
         let offsets: Vec<f32> = (0..taps)
             .map(|i| (i as f32 + 0.5) / taps as f32 - 0.5)
             .collect();
-        let sample8 = |u: f32, v: f32| -> (u8, u8, u8, u8) {
+        // One tap per output pixel (an enlargement): neighbours share their
+        // source pixels, which the cursor keeps. Several taps jump between
+        // source pixels, where it would only add work.
+        let sample8 = |cur: &mut BilinearCursor, u: f32, v: f32| {
             if taps == 1 {
                 let (sx, sy) = map(u, v);
-                return src.sample_bilinear(sx, sy);
+                return cur.sample_bilinear(sx, sy);
             }
             let mut acc = [0.0f32; 4];
             for &dv in &offsets {
                 for &du in &offsets {
                     let (sx, sy) = map(u + du, v + dv);
-                    let (r, g, b, a) = src.sample_bilinear(sx, sy);
+                    let (r, g, b, a) = grid.sample_bilinear(sx, sy);
                     let a = a as f32;
                     acc[0] += r as f32 * a;
                     acc[1] += g as f32 * a;
@@ -1083,20 +1090,20 @@ impl Canvas {
             if acc[3] <= 0.0 {
                 return (0, 0, 0, 0);
             }
-            let c = |v: f32| (v / acc[3]).round().clamp(0.0, 255.0) as u8;
-            let a = (acc[3] / (taps * taps) as f32).round().clamp(0.0, 255.0) as u8;
+            let c = |v: f32| round_u8(v / acc[3]);
+            let a = round_u8(acc[3] / (taps * taps) as f32);
             (c(acc[0]), c(acc[1]), c(acc[2]), a)
         };
         let sample16 = |u: f32, v: f32| -> (u16, u16, u16, u16) {
             if taps == 1 {
                 let (sx, sy) = map(u, v);
-                return src.sample_bilinear16(sx, sy);
+                return grid.sample_bilinear16(sx, sy);
             }
             let mut acc = [0.0f64; 4];
             for &dv in &offsets {
                 for &du in &offsets {
                     let (sx, sy) = map(u + du, v + dv);
-                    let (r, g, b, a) = src.sample_bilinear16(sx, sy);
+                    let (r, g, b, a) = grid.sample_bilinear16(sx, sy);
                     let a = a as f64;
                     acc[0] += r as f64 * a;
                     acc[1] += g as f64 * a;
@@ -1118,117 +1125,136 @@ impl Canvas {
         if src.tiles.is_empty() && background.is_none() {
             return new_tiles;
         }
-        let chunk = 256u32;
-        // Resample at 16 bits when the source carries a full master, so resize /
+        if !src.has_hdr() {
+            let pixel8 = |cur: &mut BilinearCursor, u: f32, v: f32| -> [u8; 4] {
+                let (mut rr, mut gg, mut bb, mut aa) = sample8(cur, u, v);
+                if keep_edge && aa > 0 {
+                    aa = u8::MAX;
+                }
+                // The blend below gives exactly these for an opaque sample (the
+                // sample itself) and for none over an opaque fill (the fill).
+                match background {
+                    Some(_) if aa == u8::MAX => return [rr, gg, bb, aa],
+                    Some([br, bg, bb_bg, u8::MAX]) if aa == 0 => {
+                        return [br, bg, bb_bg, u8::MAX];
+                    }
+                    _ => {}
+                }
+                if let Some([br, bg, bb_bg, ba]) = background {
+                    let src_a = aa as f32 / 255.0;
+                    let bg_a = ba as f32 / 255.0;
+                    let out_a = src_a + bg_a * (1.0 - src_a);
+                    if out_a > 0.0 {
+                        rr = round_u8(
+                            (rr as f32 * src_a + br as f32 * bg_a * (1.0 - src_a)) / out_a,
+                        );
+                        gg = round_u8(
+                            (gg as f32 * src_a + bg as f32 * bg_a * (1.0 - src_a)) / out_a,
+                        );
+                        bb = round_u8(
+                            (bb as f32 * src_a + bb_bg as f32 * bg_a * (1.0 - src_a)) / out_a,
+                        );
+                    }
+                    aa = round_u8(out_a * 255.0);
+                }
+                [rr, gg, bb, aa]
+            };
+            // Each output tile is sampled straight into its own storage on one
+            // worker; a tile left all transparent stays absent (sparse), as a
+            // chunk written through write_region would.
+            let cols = out_w.div_ceil(TILE_SIZE);
+            let rows = out_h.div_ceil(TILE_SIZE);
+            let built: Vec<(TilePos, Tile)> = (0..cols * rows)
+                .into_par_iter()
+                .filter_map(|i| {
+                    let (tx, ty) = (i % cols, i / cols);
+                    let (bx, by) = (tx * TILE_SIZE, ty * TILE_SIZE);
+                    let cw = TILE_SIZE.min(out_w - bx) as usize;
+                    let ch = TILE_SIZE.min(out_h - by);
+                    let mut tile = Tile::new_empty();
+                    let mut cur = grid.cursor();
+                    let stride = (TILE_SIZE * 4) as usize;
+                    for (r, row) in tile
+                        .pixels
+                        .chunks_exact_mut(stride)
+                        .take(ch as usize)
+                        .enumerate()
+                    {
+                        let v = (by + r as u32) as f32 + 0.5;
+                        for (c, px) in row.chunks_exact_mut(4).take(cw).enumerate() {
+                            let u = (bx + c as u32) as f32 + 0.5;
+                            px.copy_from_slice(&pixel8(&mut cur, u, v));
+                        }
+                    }
+                    let pos = TilePos {
+                        x: tx as i32,
+                        y: ty as i32,
+                    };
+                    tile.pixels.iter().any(|&b| b != 0).then_some((pos, tile))
+                })
+                .collect();
+            for (pos, tile) in built {
+                new_tiles.tiles.insert(pos, std::sync::Arc::new(tile));
+            }
+            new_tiles.bump_all_revisions();
+            return new_tiles;
+        }
+        // A source with a full 16-bit master resamples at 16 bits, so resize /
         // rotate-by-angle / perspective keep precision instead of quantizing.
         // write_region16 also refreshes each tile's 8-bit mirror.
-        let src_hdr = src.has_hdr();
+        let chunk = 256u32;
         let mut by = 0;
         while by < out_h {
             let ch = chunk.min(out_h - by);
             let mut bx = 0;
             while bx < out_w {
                 let cw = chunk.min(out_w - bx);
-                if src_hdr {
-                    let mut buf = vec![0u16; (cw * ch * 4) as usize];
-                    buf.par_chunks_mut((cw * 4) as usize)
-                        .enumerate()
-                        .for_each(|(r, row)| {
-                            let v = (by + r as u32) as f32 + 0.5;
-                            for c in 0..cw as usize {
-                                let u = (bx + c as u32) as f32 + 0.5;
-                                let (mut rr, mut gg, mut bb, mut aa) = sample16(u, v);
-                                if keep_edge && aa > 0 {
-                                    aa = u16::MAX;
-                                }
-                                if let Some([br, bg, bb_bg, ba]) = background {
-                                    // Background is an 8-bit fill colour; lift to 16 bits.
-                                    let (br, bg, bb_bg, ba) = (
-                                        br as u16 * 257,
-                                        bg as u16 * 257,
-                                        bb_bg as u16 * 257,
-                                        ba as u16 * 257,
+                let mut buf = vec![0u16; (cw * ch * 4) as usize];
+                buf.par_chunks_mut((cw * 4) as usize)
+                    .enumerate()
+                    .for_each(|(r, row)| {
+                        let v = (by + r as u32) as f32 + 0.5;
+                        for c in 0..cw as usize {
+                            let u = (bx + c as u32) as f32 + 0.5;
+                            let (mut rr, mut gg, mut bb, mut aa) = sample16(u, v);
+                            if keep_edge && aa > 0 {
+                                aa = u16::MAX;
+                            }
+                            if let Some([br, bg, bb_bg, ba]) = background {
+                                // Background is an 8-bit fill colour; lift to 16 bits.
+                                let (br, bg, bb_bg, ba) = (
+                                    br as u16 * 257,
+                                    bg as u16 * 257,
+                                    bb_bg as u16 * 257,
+                                    ba as u16 * 257,
+                                );
+                                let src_a = aa as f32 / 65535.0;
+                                let bg_a = ba as f32 / 65535.0;
+                                let out_a = src_a + bg_a * (1.0 - src_a);
+                                if out_a > 0.0 {
+                                    rr = round_u16(
+                                        (rr as f32 * src_a + br as f32 * bg_a * (1.0 - src_a))
+                                            / out_a,
                                     );
-                                    let src_a = aa as f32 / 65535.0;
-                                    let bg_a = ba as f32 / 65535.0;
-                                    let out_a = src_a + bg_a * (1.0 - src_a);
-                                    if out_a > 0.0 {
-                                        rr = ((rr as f32 * src_a
-                                            + br as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 65535.0)
-                                            as u16;
-                                        gg = ((gg as f32 * src_a
-                                            + bg as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 65535.0)
-                                            as u16;
-                                        bb = ((bb as f32 * src_a
-                                            + bb_bg as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 65535.0)
-                                            as u16;
-                                    }
-                                    aa = (out_a * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                                    gg = round_u16(
+                                        (gg as f32 * src_a + bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a,
+                                    );
+                                    bb = round_u16(
+                                        (bb as f32 * src_a + bb_bg as f32 * bg_a * (1.0 - src_a))
+                                            / out_a,
+                                    );
                                 }
-                                let idx = c * 4;
-                                row[idx] = rr;
-                                row[idx + 1] = gg;
-                                row[idx + 2] = bb;
-                                row[idx + 3] = aa;
+                                aa = round_u16(out_a * 65535.0);
                             }
-                        });
-                    new_tiles.write_region16(bx, by, cw, ch, &buf);
-                } else {
-                    let mut buf = vec![0u8; (cw * ch * 4) as usize];
-                    buf.par_chunks_mut((cw * 4) as usize)
-                        .enumerate()
-                        .for_each(|(r, row)| {
-                            let v = (by + r as u32) as f32 + 0.5;
-                            for c in 0..cw as usize {
-                                let u = (bx + c as u32) as f32 + 0.5;
-                                let (mut rr, mut gg, mut bb, mut aa) = sample8(u, v);
-                                if keep_edge && aa > 0 {
-                                    aa = u8::MAX;
-                                }
-                                if let Some([br, bg, bb_bg, ba]) = background {
-                                    let src_a = aa as f32 / 255.0;
-                                    let bg_a = ba as f32 / 255.0;
-                                    let out_a = src_a + bg_a * (1.0 - src_a);
-                                    if out_a > 0.0 {
-                                        rr = ((rr as f32 * src_a
-                                            + br as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 255.0)
-                                            as u8;
-                                        gg = ((gg as f32 * src_a
-                                            + bg as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 255.0)
-                                            as u8;
-                                        bb = ((bb as f32 * src_a
-                                            + bb_bg as f32 * bg_a * (1.0 - src_a))
-                                            / out_a)
-                                            .round()
-                                            .clamp(0.0, 255.0)
-                                            as u8;
-                                    }
-                                    aa = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
-                                }
-                                let idx = c * 4;
-                                row[idx] = rr;
-                                row[idx + 1] = gg;
-                                row[idx + 2] = bb;
-                                row[idx + 3] = aa;
-                            }
-                        });
-                    new_tiles.write_region(bx, by, cw, ch, &buf);
-                }
+                            let idx = c * 4;
+                            row[idx] = rr;
+                            row[idx + 1] = gg;
+                            row[idx + 2] = bb;
+                            row[idx + 3] = aa;
+                        }
+                    });
+                new_tiles.write_region16(bx, by, cw, ch, &buf);
                 bx += cw;
             }
             by += ch;
@@ -1248,6 +1274,7 @@ impl Canvas {
             &self.selection,
         );
         let canvas_w = self.width as i32;
+        let models = self.turnable_model_sources();
         for layer in &mut self.layer_stack.layers {
             let lw = layer.width as i32;
             let old_ox = layer.offset.0;
@@ -1271,7 +1298,15 @@ impl Canvas {
             self.selection.mask_revision += 1;
             self.selection.mark_bbox_dirty();
         }
-        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        let turn = AffineTransform {
+            a: -1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: canvas_w as f32,
+            f: 0.0,
+        };
+        self.record_turn_with_models("Flip Horizontal", Box::new(cmd), models, turn);
         self.flatten_full();
     }
 
@@ -1286,6 +1321,7 @@ impl Canvas {
             &self.selection,
         );
         let canvas_h = self.height as i32;
+        let models = self.turnable_model_sources();
         for layer in &mut self.layer_stack.layers {
             let lh = layer.height as i32;
             let old_oy = layer.offset.1;
@@ -1309,7 +1345,15 @@ impl Canvas {
             self.selection.mask_revision += 1;
             self.selection.mark_bbox_dirty();
         }
-        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        let turn = AffineTransform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            e: 0.0,
+            f: canvas_h as f32,
+        };
+        self.record_turn_with_models("Flip Vertical", Box::new(cmd), models, turn);
         self.flatten_full();
     }
 
@@ -1324,6 +1368,7 @@ impl Canvas {
             &self.selection,
         );
         let canvas_h = self.height as i32;
+        let models = self.turnable_model_sources();
         for layer in &mut self.layer_stack.layers {
             let old_lh = layer.height as i32;
             let old_ox = layer.offset.0;
@@ -1351,7 +1396,16 @@ impl Canvas {
             self.selection.mask_revision += 1;
             self.selection.mark_bbox_dirty();
         }
-        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        // (x, y) -> (H - y, x): a quarter turn clockwise on screen.
+        let turn = AffineTransform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: canvas_h as f32,
+            f: 0.0,
+        };
+        self.record_turn_with_models("Rotate 90 CW", Box::new(cmd), models, turn);
         self.flatten_full();
     }
 
@@ -1366,6 +1420,7 @@ impl Canvas {
             &self.selection,
         );
         let canvas_w = self.width as i32;
+        let models = self.turnable_model_sources();
         for layer in &mut self.layer_stack.layers {
             let old_lw = layer.width as i32;
             let old_ox = layer.offset.0;
@@ -1393,7 +1448,16 @@ impl Canvas {
             self.selection.mask_revision += 1;
             self.selection.mark_bbox_dirty();
         }
-        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        // (x, y) -> (y, W - x): a quarter turn counter-clockwise on screen.
+        let turn = AffineTransform {
+            a: 0.0,
+            b: -1.0,
+            c: 1.0,
+            d: 0.0,
+            e: 0.0,
+            f: canvas_w as f32,
+        };
+        self.record_turn_with_models("Rotate 90 CCW", Box::new(cmd), models, turn);
         self.flatten_full();
     }
 

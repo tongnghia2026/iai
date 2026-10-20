@@ -89,6 +89,14 @@ pub struct RasterTransformLineage {
     pub source: LayerOrigState,
     pub source_to_current: [f32; 9],
     pub rendered_fingerprint: u64,
+    /// Where the rendered pixels were placed. A later plain move changes only
+    /// the layer offset, so the next session adds that shift to
+    /// `source_to_current` instead of rendering at the old place.
+    pub rendered_offset: (i32, i32),
+    /// The mask the commit produced. Painting the mask afterwards leaves the
+    /// pixel fingerprint alone, so this is what tells the stored source's mask
+    /// is out of date.
+    pub rendered_mask_fingerprint: Option<u64>,
 }
 
 /// All state for an ongoing Ctrl+T free-transform session.
@@ -526,9 +534,13 @@ pub struct UiState {
 }
 
 /// Pixels for [`App::make_perspective_crop_cursor`]: `(rgba, w, h, hot_x, hot_y)`.
-/// A rounded "pointer" arrow (dark fill, white outline, faint dark rim so it
-/// reads on white paper) with the Phosphor crop glyph in its notch.
 fn perspective_crop_cursor_rgba() -> Option<(Vec<u8>, u16, u16, u16, u16)> {
+    badged_pointer_cursor_rgba(egui_phosphor::regular::CROP)
+}
+
+/// A rounded "pointer" arrow (dark fill, white outline, faint dark rim so it
+/// reads on white paper) with a tool's Phosphor glyph in its notch.
+fn badged_pointer_cursor_rgba(badge: &str) -> Option<(Vec<u8>, u16, u16, u16, u16)> {
     use ab_glyph::Font;
 
     const SIZE: usize = 32;
@@ -662,7 +674,7 @@ fn perspective_crop_cursor_rgba() -> Option<(Vec<u8>, u16, u16, u16, u16)> {
 
     let font =
         ab_glyph::FontRef::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok()?;
-    let ch = egui_phosphor::regular::CROP.chars().next()?;
+    let ch = badge.chars().next()?;
     let glyph = font.outline_glyph(font.glyph_id(ch).with_scale(ab_glyph::PxScale::from(15.0)))?;
     let bounds = glyph.px_bounds();
     let gw = bounds.width().ceil() as usize;
@@ -819,10 +831,11 @@ pub struct FilterPreviewResult {
     pub tiles: crate::core::tile::TileMap,
 }
 
-/// Live-preview session for "Làm sạch bản scan". The rolling-ball background and
-/// luma are computed once on open (they don't depend on the params); each slider
-/// change reruns only the cheap final pass and shows it via `preview_layer_tiles`.
-/// OK commits undoably from `original_tiles`; Cancel restores them.
+/// Live-preview session for "Làm sạch bản scan". The rolling-ball background is
+/// computed once on open (it doesn't depend on the params); each slider change
+/// reruns only the cheap final pass and shows it via `preview_layer_tiles`.
+/// OK commits the shown result undoably over `original_tiles` when its params
+/// match; Cancel restores them.
 pub struct ScanPreviewSession {
     pub doc_id: crate::core::document::DocumentId,
     pub layer_id: u32,
@@ -830,9 +843,11 @@ pub struct ScanPreviewSession {
     pub h: u32,
     pub original_tiles: crate::core::tile::TileMap,
     pub src_rgba: Vec<u8>,
-    pub luma: Vec<f32>,
-    pub bg: Vec<f32>,
-    pub last: Option<crate::core::scan_cleanup::ScanCleanupParams>,
+    pub background: crate::core::scan_cleanup::ScanBackground,
+    pub shown: Option<(
+        crate::core::scan_cleanup::ScanCleanupParams,
+        crate::core::tile::TileMap,
+    )>,
 }
 
 pub struct DevelopPreviewState {
@@ -1485,6 +1500,7 @@ impl App {
                 cursor_crosshair: None,
                 cursor_selection_crosshair: None,
                 cursor_lasso: None,
+                selection_cursors: Default::default(),
                 cursor_crop: None,
                 cursor_perspective_crop: None,
                 surface_retry_at: None,
@@ -2143,47 +2159,18 @@ impl App {
     /// can't be rasterized (should never happen — the font is embedded).
     /// Tiny marquee cursor for selection tools.
     pub fn make_selection_cursor(event_loop: &ActiveEventLoop) -> winit::window::CustomCursor {
-        let size = 19usize;
-        let center = size / 2;
-        let gap = 2usize;
-        let mut rgba = vec![0u8; size * size * 4];
-
-        for i in 0..size {
-            let in_gap = i >= center.saturating_sub(gap) && i <= center + gap;
-            if in_gap {
-                continue;
-            }
-
-            for (off, col, alpha) in [(-1i32, 0u8, 210u8), (0, 255, 245), (1, 0, 210)] {
-                let y = center as i32 + off;
-                if y >= 0 && (y as usize) < size {
-                    let idx = (y as usize * size + i) * 4;
-                    rgba[idx] = col;
-                    rgba[idx + 1] = col;
-                    rgba[idx + 2] = col;
-                    rgba[idx + 3] = alpha;
-                }
-
-                let x = center as i32 + off;
-                if x >= 0 && (x as usize) < size {
-                    let idx = (i * size + x as usize) * 4;
-                    rgba[idx] = col;
-                    rgba[idx + 1] = col;
-                    rgba[idx + 2] = col;
-                    rgba[idx + 3] = alpha;
-                }
-            }
-        }
-
-        let src = winit::window::CustomCursor::from_rgba(
-            rgba,
-            size as u16,
-            size as u16,
-            center as u16,
-            center as u16,
-        )
-        .expect("selection cursor: always valid");
+        let (rgba, w, h, hot_x, hot_y) = crate::app::selection_feedback::marquee_cursor_rgba(
+            crate::core::selection::SelectionMode::New,
+        );
+        let src = winit::window::CustomCursor::from_rgba(rgba, w, h, hot_x, hot_y)
+            .expect("selection cursor: always valid");
         event_loop.create_custom_cursor(src)
+    }
+
+    /// The Move-selection pointer: what a press inside the selection does
+    /// with a marquee / lasso in New mode.
+    pub(in crate::app) fn move_selection_cursor_rgba() -> Option<(Vec<u8>, u16, u16, u16, u16)> {
+        badged_pointer_cursor_rgba(egui_phosphor::regular::SELECTION)
     }
 
     /// Tiny crosshair for the gradient tool (identical to selection cursor for now, but decoupled).
@@ -2233,6 +2220,21 @@ impl App {
 
     /// standard lasso cursor: a small arrow plus the lasso tool mark.
     pub fn make_lasso_cursor(event_loop: &ActiveEventLoop) -> winit::window::CustomCursor {
+        let Some((rgba, w, h, hot_x, hot_y)) =
+            Self::lasso_cursor_rgba(crate::core::selection::SelectionMode::New)
+        else {
+            return Self::make_selection_cursor(event_loop);
+        };
+        let src = winit::window::CustomCursor::from_rgba(rgba, w, h, hot_x, hot_y)
+            .expect("lasso cursor: rgba data is always valid (constructed inline)");
+        event_loop.create_custom_cursor(src)
+    }
+
+    /// A small arrow plus the lasso tool mark, and the selection mode's badge
+    /// (none for New) to the lower right.
+    pub(in crate::app) fn lasso_cursor_rgba(
+        mode: crate::core::selection::SelectionMode,
+    ) -> Option<(Vec<u8>, u16, u16, u16, u16)> {
         const W: usize = 32;
         const H: usize = 32;
         let mut rgba = vec![0u8; W * H * 4];
@@ -2242,15 +2244,10 @@ impl App {
         Self::fill_cursor_polygon(&mut rgba, W, H, &arrow_outline, [255, 255, 255, 245]);
         Self::fill_cursor_polygon(&mut rgba, W, H, &arrow_fill, [0, 0, 0, 255]);
 
-        if Self::paint_cursor_glyph(&mut rgba, W, H, egui_phosphor::regular::LASSO, 15.0, 10, 11)
-            .is_err()
-        {
-            return Self::make_selection_cursor(event_loop);
-        }
-
-        let src = winit::window::CustomCursor::from_rgba(rgba, W as u16, H as u16, 2, 2)
-            .expect("lasso cursor: rgba data is always valid (constructed inline)");
-        event_loop.create_custom_cursor(src)
+        Self::paint_cursor_glyph(&mut rgba, W, H, egui_phosphor::regular::LASSO, 15.0, 10, 11)
+            .ok()?;
+        crate::app::selection_feedback::paint_mode_badge(&mut rgba, W, H, 23, 23, mode);
+        Some((rgba, W as u16, H as u16, 2, 2))
     }
 
     fn fill_cursor_polygon(
@@ -3241,6 +3238,13 @@ impl App {
         if needs_hand_cursor && self.win.cursor_hand.is_none() {
             self.win.cursor_hand = Some(Self::make_hand_cursor(event_loop));
         }
+        // Marquee / lasso: badged with the mode a press draws in, or the
+        // Move-selection pointer where a press would drag the selection.
+        let selection_cursor = if needs_hand_cursor {
+            None
+        } else {
+            self.selection_tool_cursor(event_loop)
+        };
 
         if let Some(w) = &self.win.window {
             // I-beam over the canvas/overlay while editing text, but not over
@@ -3351,7 +3355,10 @@ impl App {
                         }
                     }
                     ToolId::Lasso | ToolId::PolygonLasso | ToolId::Patch => {
-                        if let Some(lasso) = &self.win.cursor_lasso {
+                        if let Some(cursor) = selection_cursor {
+                            w.set_cursor_visible(true);
+                            w.set_cursor(cursor);
+                        } else if let Some(lasso) = &self.win.cursor_lasso {
                             w.set_cursor_visible(true);
                             w.set_cursor(lasso.clone());
                         } else {
@@ -3423,7 +3430,10 @@ impl App {
                         }
                     }
                     ToolId::SelectionRect | ToolId::SelectionEllipse | ToolId::Arrow => {
-                        if let Some(cc) = &self.win.cursor_selection_crosshair {
+                        if let Some(cursor) = selection_cursor {
+                            w.set_cursor_visible(true);
+                            w.set_cursor(cursor);
+                        } else if let Some(cc) = &self.win.cursor_selection_crosshair {
                             w.set_cursor_visible(true);
                             w.set_cursor(cc.clone());
                         } else {

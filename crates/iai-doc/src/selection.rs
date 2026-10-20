@@ -558,6 +558,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_snapshot_tells_an_unchanged_selection_from_a_changed_one() {
+        let mut sel = Selection::new(40, 30);
+        let empty = sel.snapshot();
+        assert!(empty.selects_same_as(&sel));
+
+        sel.select_rect(5, 5, 20, 15);
+        assert!(!empty.selects_same_as(&sel));
+        let rect = sel.snapshot();
+        assert!(rect.selects_same_as(&sel));
+
+        // Adding a box that lies inside the selection selects nothing new.
+        let mut inner = vec![0u8; 40 * 30];
+        for y in 8..12 {
+            for x in 8..12 {
+                inner[y * 40 + x] = 255;
+            }
+        }
+        sel.apply_with_mode(inner.clone(), SelectionMode::Add);
+        assert!(rect.selects_same_as(&sel));
+        sel.apply_with_mode(inner, SelectionMode::Subtract);
+        assert!(!rect.selects_same_as(&sel));
+    }
+
+    #[test]
+    fn a_moved_selection_is_compared_where_it_shows() {
+        let mut sel = Selection::new(40, 30);
+        sel.select_rect(5, 5, 20, 15);
+        sel.offset = (3, 2);
+        let moved = sel.snapshot();
+        // Add folds the offset into the mask: same pixels, different storage.
+        sel.apply_with_mode(vec![0u8; 40 * 30], SelectionMode::Add);
+        assert_eq!(sel.offset, (0, 0));
+        assert!(moved.selects_same_as(&sel));
+        sel.offset = (1, 0);
+        assert!(!moved.selects_same_as(&sel));
+    }
+
+    #[test]
     fn color_range_selects_matching_colours_and_fades_with_distance() {
         // 3 pixels: exact match, a near colour, and a far colour.
         let target = [200u8, 50, 50];
@@ -691,6 +729,34 @@ impl Selection {
         self.offset = snap.offset;
         self.bbox_dirty = true;
         self.mask_revision += 1;
+    }
+}
+
+impl SelectionSnapshot {
+    /// Whether `selection` selects exactly what this snapshot did, each mask
+    /// read where its offset puts it on the canvas (Add / Subtract fold a
+    /// moved selection's offset into its mask first).
+    pub fn selects_same_as(&self, selection: &Selection) -> bool {
+        if !self.active || !selection.active {
+            return self.active == selection.active;
+        }
+        if self.offset == selection.offset {
+            return self.mask == selection.mask;
+        }
+        let (w, h) = (selection.width as i64, selection.height as i64);
+        let at = |mask: &[u8], offset: (i32, i32), x: i64, y: i64| {
+            let (sx, sy) = (x - offset.0 as i64, y - offset.1 as i64);
+            if sx < 0 || sy < 0 || sx >= w || sy >= h {
+                0
+            } else {
+                mask.get((sy * w + sx) as usize).copied().unwrap_or(0)
+            }
+        };
+        (0..h).all(|y| {
+            (0..w).all(|x| {
+                at(&self.mask, self.offset, x, y) == at(&selection.mask, selection.offset, x, y)
+            })
+        })
     }
 }
 

@@ -1,7 +1,9 @@
 //! What the flight recorder's journal is told about the user's input and the
 //! state it lands on (see `crate::diag`).
 
-use crate::app::state::App;
+use crate::app::state::{App, InputState};
+use crate::core::selection::SelectionMode;
+use crate::tools::ToolId;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -45,6 +47,33 @@ fn speaks_while_typing(code: KeyCode) -> bool {
             | KeyCode::F11
             | KeyCode::F12
     )
+}
+
+/// The keys held and, for a marquee / lasso, the mode a press draws in (and
+/// the top bar's when Shift / Alt change it) — a stuck Alt or Space turns
+/// every drag into something else.
+fn held_and_mode(input: &InputState, modes: Option<(SelectionMode, SelectionMode)>) -> String {
+    let held: Vec<&str> = [
+        (input.ctrl_held, "Ctrl"),
+        (input.shift_held, "Shift"),
+        (input.alt_held, "Alt"),
+        (input.space_held, "Space"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect();
+    let mut text = String::new();
+    if !held.is_empty() {
+        text.push_str(", held ");
+        text.push_str(&held.join("+"));
+    }
+    if let Some((mode, top_bar)) = modes {
+        text.push_str(&format!(", selection mode {mode:?}"));
+        if mode != top_bar {
+            text.push_str(&format!(" (top bar {top_bar:?})"));
+        }
+    }
+    text
 }
 
 fn chord(ctrl: bool, shift: bool, alt: bool, code: KeyCode) -> String {
@@ -147,15 +176,24 @@ impl App {
                 }
                 let zoom = self.edit.view.zoom.max(1e-6);
                 let tool = self.edit.tools.active_id();
+                let modes = matches!(
+                    tool,
+                    ToolId::SelectionRect
+                        | ToolId::SelectionEllipse
+                        | ToolId::Lasso
+                        | ToolId::PolygonLasso
+                )
+                .then(|| (self.tool_event().selection_mode, self.edit.selection_mode));
                 crate::diag::note(
                     "mouse",
                     &format!(
-                        "{button:?} {} on the canvas at ({:.0}, {:.0}), tool {}, zoom {:.0}%",
+                        "{button:?} {} on the canvas at ({:.0}, {:.0}), tool {}, zoom {:.0}%{}",
                         if pressed { "down" } else { "up" },
                         (input.mouse_x - self.edit.view.offset_x) / zoom,
                         (input.mouse_y - self.edit.view.offset_y) / zoom,
                         tool.name(),
                         zoom * 100.0,
+                        held_and_mode(input, modes),
                     ),
                 );
             }
@@ -235,6 +273,25 @@ mod tests {
         assert_eq!(chord(true, true, false, KeyCode::KeyT), "Ctrl+Shift+T");
         assert_eq!(chord(false, false, true, KeyCode::Digit1), "Alt+1");
         assert_eq!(chord(false, false, false, KeyCode::Enter), "Enter");
+    }
+
+    #[test]
+    fn a_canvas_mouse_line_names_the_keys_held_and_the_selection_mode() {
+        let mut app = App::new();
+        let input = &mut app.edit.input;
+        assert_eq!(held_and_mode(input, None), "");
+        input.alt_held = true;
+        input.space_held = true;
+        assert_eq!(
+            held_and_mode(input, Some((SelectionMode::Subtract, SelectionMode::Add))),
+            ", held Alt+Space, selection mode Subtract (top bar Add)"
+        );
+        input.alt_held = false;
+        input.space_held = false;
+        assert_eq!(
+            held_and_mode(input, Some((SelectionMode::Add, SelectionMode::Add))),
+            ", selection mode Add"
+        );
     }
 
     #[test]

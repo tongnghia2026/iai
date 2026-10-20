@@ -11,7 +11,7 @@
 //! and stack; the walk runs afterwards, on the copy. dbghelp never runs while
 //! a thread of the app is suspended, so nothing it does can leave one that way.
 
-use super::{date_of, time_of, Phase, CLEAN_END, MAGIC};
+use super::{date_of, index_line, time_of, Phase, CLEAN_END, MAGIC};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, OsString};
@@ -1101,11 +1101,7 @@ impl Watcher {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let line = format!(
-            "{} {}  {kind:<13} {span:<8} {about}  ->  {session}\\incidents.log\n",
-            date_of(at),
-            &time_of(at)[..8],
-        );
+        let line = index_line(at, kind, span, about, &session);
         if let Some(root) = self.dir.parent() {
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)

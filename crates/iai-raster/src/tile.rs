@@ -1,3 +1,4 @@
+use crate::fast_math::{floor_i32, round_u16, round_u8};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1796,87 +1797,13 @@ impl TileMap {
     /// Uses pre-multiplied alpha for correct blending across transparent boundaries.
     /// Returns (0,0,0,0) for out-of-bounds positions.
     pub fn sample_bilinear(&self, x: f32, y: f32) -> (u8, u8, u8, u8) {
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let fx = x - x0 as f32;
-        let fy = y - y0 as f32;
-
-        let samp = |px: i32, py: i32| -> [f32; 4] {
-            if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-                return [0.0; 4];
-            }
-            let (r, g, b, a) = self.get_pixel(px as u32, py as u32);
-            let af = a as f32 / 255.0;
-            [
-                r as f32 * af / 255.0,
-                g as f32 * af / 255.0,
-                b as f32 * af / 255.0,
-                af,
-            ]
-        };
-
-        let (c00, c10, c01, c11) = if x0 >= 0
-            && y0 >= 0
-            && ((x0 + 1) as u32) < self.width
-            && ((y0 + 1) as u32) < self.height
-        {
-            let xu = x0 as u32;
-            let yu = y0 as u32;
-            let lx = xu % TILE_SIZE;
-            let ly = yu % TILE_SIZE;
-            if lx + 1 < TILE_SIZE && ly + 1 < TILE_SIZE {
-                let pos = TilePos {
-                    x: (xu / TILE_SIZE) as i32,
-                    y: (yu / TILE_SIZE) as i32,
-                };
-                match self.tiles.get(&pos) {
-                    Some(tile) => {
-                        let p = &tile.pixels;
-                        let row = (TILE_SIZE * 4) as usize;
-                        let base = ((ly * TILE_SIZE + lx) * 4) as usize;
-                        let pm = |i: usize| -> [f32; 4] {
-                            let af = p[i + 3] as f32 / 255.0;
-                            [
-                                p[i] as f32 * af / 255.0,
-                                p[i + 1] as f32 * af / 255.0,
-                                p[i + 2] as f32 * af / 255.0,
-                                af,
-                            ]
-                        };
-                        (pm(base), pm(base + 4), pm(base + row), pm(base + row + 4))
-                    }
-                    None => ([0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
-                }
-            } else {
-                (
-                    samp(x0, y0),
-                    samp(x0 + 1, y0),
-                    samp(x0, y0 + 1),
-                    samp(x0 + 1, y0 + 1),
-                )
-            }
-        } else {
-            (
-                samp(x0, y0),
-                samp(x0 + 1, y0),
-                samp(x0, y0 + 1),
-                samp(x0 + 1, y0 + 1),
-            )
-        };
-
-        let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
-        let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
-        if a < f32::EPSILON {
-            return (0, 0, 0, 0);
-        }
-        let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
-        let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
-        let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
-
-        fn to_u8(v: f32) -> u8 {
-            (v * 255.0).round().clamp(0.0, 255.0) as u8
-        }
-        (to_u8(r), to_u8(g), to_u8(b), to_u8(a))
+        sample_bilinear_in(
+            self.width,
+            self.height,
+            |p| self.tiles.get(&p).map(|t| &**t),
+            x,
+            y,
+        )
     }
 
     /// 16-bit counterpart of [`sample_bilinear`]: same premultiplied-alpha bilinear
@@ -1884,43 +1811,13 @@ impl TileMap {
     /// mirror) so resampling a 16-bit layer keeps precision. Out-of-bounds →
     /// `(0,0,0,0)`.
     pub fn sample_bilinear16(&self, x: f32, y: f32) -> (u16, u16, u16, u16) {
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let fx = x - x0 as f32;
-        let fy = y - y0 as f32;
-
-        let samp = |px: i32, py: i32| -> [f32; 4] {
-            if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-                return [0.0; 4];
-            }
-            let (r, g, b, a) = self.get_pixel16(px as u32, py as u32);
-            let af = a as f32 / 65535.0;
-            [
-                r as f32 * af / 65535.0,
-                g as f32 * af / 65535.0,
-                b as f32 * af / 65535.0,
-                af,
-            ]
-        };
-
-        let c00 = samp(x0, y0);
-        let c10 = samp(x0 + 1, y0);
-        let c01 = samp(x0, y0 + 1);
-        let c11 = samp(x0 + 1, y0 + 1);
-
-        let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
-        let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
-        if a < f32::EPSILON {
-            return (0, 0, 0, 0);
-        }
-        let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
-        let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
-        let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
-
-        fn to_u16(v: f32) -> u16 {
-            (v * 65535.0).round().clamp(0.0, 65535.0) as u16
-        }
-        (to_u16(r), to_u16(g), to_u16(b), to_u16(a))
+        sample_bilinear16_in(
+            self.width,
+            self.height,
+            |p| self.tiles.get(&p).map(|t| &**t),
+            x,
+            y,
+        )
     }
 
     /// Returns the tight bounding box of all non-transparent pixels in layer-local coords.
@@ -2098,9 +1995,384 @@ pub fn apply_write_mask(before: [u8; 4], px: &mut [u8; 4], wm: [bool; 4]) {
     px[3] = before[3];
 }
 
+/// One 8-bit pixel as premultiplied `[r, g, b, a]` in 0..1.
+#[inline]
+fn premultiplied(r: u8, g: u8, b: u8, a: u8) -> [f32; 4] {
+    let af = a as f32 / 255.0;
+    [
+        r as f32 * af / 255.0,
+        g as f32 * af / 255.0,
+        b as f32 * af / 255.0,
+        af,
+    ]
+}
+
+/// [`TileMap::sample_bilinear`] over any tile lookup (the map's hash, or a
+/// [`TileGrid`]).
+#[inline]
+fn sample_bilinear_in<'t>(
+    width: u32,
+    height: u32,
+    tile_at: impl Fn(TilePos) -> Option<&'t Tile>,
+    x: f32,
+    y: f32,
+) -> (u8, u8, u8, u8) {
+    let x0 = floor_i32(x);
+    let y0 = floor_i32(y);
+    let taps = bilinear_taps(width, height, tile_at, x0, y0);
+    blend_taps(&taps, x - x0 as f32, y - y0 as f32)
+}
+
+/// The premultiplied pixels at `(x0, y0)`, `(x0+1, y0)`, `(x0, y0+1)` and
+/// `(x0+1, y0+1)`; outside the map reads as transparent.
+#[inline]
+fn bilinear_taps<'t>(
+    width: u32,
+    height: u32,
+    tile_at: impl Fn(TilePos) -> Option<&'t Tile>,
+    x0: i32,
+    y0: i32,
+) -> [[f32; 4]; 4] {
+    let samp = |px: i32, py: i32| -> [f32; 4] {
+        if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+            return [0.0; 4];
+        }
+        let (r, g, b, a) = tile_at(TilePos::from_pixel(px as u32, py as u32))
+            .map_or((0, 0, 0, 0), |t| {
+                t.get_pixel(px as u32 % TILE_SIZE, py as u32 % TILE_SIZE)
+            });
+        premultiplied(r, g, b, a)
+    };
+
+    let (c00, c10, c01, c11) =
+        if x0 >= 0 && y0 >= 0 && ((x0 + 1) as u32) < width && ((y0 + 1) as u32) < height {
+            let xu = x0 as u32;
+            let yu = y0 as u32;
+            let lx = xu % TILE_SIZE;
+            let ly = yu % TILE_SIZE;
+            if lx + 1 < TILE_SIZE && ly + 1 < TILE_SIZE {
+                let pos = TilePos {
+                    x: (xu / TILE_SIZE) as i32,
+                    y: (yu / TILE_SIZE) as i32,
+                };
+                match tile_at(pos) {
+                    Some(tile) => {
+                        let p = &tile.pixels;
+                        let row = (TILE_SIZE * 4) as usize;
+                        let base = ((ly * TILE_SIZE + lx) * 4) as usize;
+                        let pm = |i: usize| premultiplied(p[i], p[i + 1], p[i + 2], p[i + 3]);
+                        (pm(base), pm(base + 4), pm(base + row), pm(base + row + 4))
+                    }
+                    None => ([0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
+                }
+            } else {
+                (
+                    samp(x0, y0),
+                    samp(x0 + 1, y0),
+                    samp(x0, y0 + 1),
+                    samp(x0 + 1, y0 + 1),
+                )
+            }
+        } else {
+            (
+                samp(x0, y0),
+                samp(x0 + 1, y0),
+                samp(x0, y0 + 1),
+                samp(x0 + 1, y0 + 1),
+            )
+        };
+
+    [c00, c10, c01, c11]
+}
+
+/// Bilinear blend of [`bilinear_taps`] at fraction `(fx, fy)`, un-premultiplied.
+#[inline]
+fn blend_taps(taps: &[[f32; 4]; 4], fx: f32, fy: f32) -> (u8, u8, u8, u8) {
+    let [c00, c10, c01, c11] = taps;
+    let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
+    let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
+    if a < f32::EPSILON {
+        return (0, 0, 0, 0);
+    }
+    let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
+    let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
+    let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
+
+    let to_u8 = |v: f32| round_u8(v * 255.0);
+    (to_u8(r), to_u8(g), to_u8(b), to_u8(a))
+}
+
+/// [`TileMap::sample_bilinear16`] over any tile lookup.
+#[inline]
+fn sample_bilinear16_in<'t>(
+    width: u32,
+    height: u32,
+    tile_at: impl Fn(TilePos) -> Option<&'t Tile>,
+    x: f32,
+    y: f32,
+) -> (u16, u16, u16, u16) {
+    let x0 = floor_i32(x);
+    let y0 = floor_i32(y);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+
+    let samp = |px: i32, py: i32| -> [f32; 4] {
+        if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+            return [0.0; 4];
+        }
+        let (r, g, b, a) = tile_at(TilePos::from_pixel(px as u32, py as u32))
+            .map_or((0, 0, 0, 0), |t| {
+                t.get_pixel16(px as u32 % TILE_SIZE, py as u32 % TILE_SIZE)
+            });
+        let af = a as f32 / 65535.0;
+        [
+            r as f32 * af / 65535.0,
+            g as f32 * af / 65535.0,
+            b as f32 * af / 65535.0,
+            af,
+        ]
+    };
+
+    let c00 = samp(x0, y0);
+    let c10 = samp(x0 + 1, y0);
+    let c01 = samp(x0, y0 + 1);
+    let c11 = samp(x0 + 1, y0 + 1);
+
+    let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
+    let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
+    if a < f32::EPSILON {
+        return (0, 0, 0, 0);
+    }
+    let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
+    let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
+    let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
+
+    let to_u16 = |v: f32| round_u16(v * 65535.0);
+    (to_u16(r), to_u16(g), to_u16(b), to_u16(a))
+}
+
+/// A map's tiles in a dense grid, for passes that read them per pixel
+/// (resampling): an index instead of a hash lookup for every read.
+pub struct TileGrid<'a> {
+    width: u32,
+    height: u32,
+    cols: usize,
+    tiles: Vec<Option<&'a Tile>>,
+}
+
+impl<'a> TileGrid<'a> {
+    pub fn new(map: &'a TileMap) -> Self {
+        let cols = map.width.div_ceil(TILE_SIZE) as usize;
+        let rows = map.height.div_ceil(TILE_SIZE) as usize;
+        let mut tiles = vec![None; cols * rows];
+        for (pos, tile) in &map.tiles {
+            let (Ok(x), Ok(y)) = (usize::try_from(pos.x), usize::try_from(pos.y)) else {
+                continue;
+            };
+            if x < cols && y < rows {
+                if let Some(slot) = tiles.get_mut(y * cols + x) {
+                    *slot = Some(&**tile);
+                }
+            }
+        }
+        Self {
+            width: map.width,
+            height: map.height,
+            cols,
+            tiles,
+        }
+    }
+
+    #[inline]
+    fn tile(&self, pos: TilePos) -> Option<&'a Tile> {
+        let (Ok(x), Ok(y)) = (usize::try_from(pos.x), usize::try_from(pos.y)) else {
+            return None;
+        };
+        if x >= self.cols {
+            return None;
+        }
+        self.tiles.get(y * self.cols + x).copied().flatten()
+    }
+
+    /// Same result as [`TileMap::sample_bilinear`] on the map this was made from.
+    #[inline]
+    pub fn sample_bilinear(&self, x: f32, y: f32) -> (u8, u8, u8, u8) {
+        sample_bilinear_in(self.width, self.height, |p| self.tile(p), x, y)
+    }
+
+    /// A sampler for one run of nearby reads (a row of an enlargement, where
+    /// neighbouring outputs share their four source pixels).
+    pub fn cursor(&self) -> BilinearCursor<'_, 'a> {
+        BilinearCursor {
+            grid: self,
+            key: None,
+            taps: [[0.0; 4]; 4],
+        }
+    }
+
+    /// Same result as [`TileMap::sample_bilinear16`] on the map this was made from.
+    #[inline]
+    pub fn sample_bilinear16(&self, x: f32, y: f32) -> (u16, u16, u16, u16) {
+        sample_bilinear16_in(self.width, self.height, |p| self.tile(p), x, y)
+    }
+}
+
+/// [`TileGrid::sample_bilinear`] that reuses the four source pixels while
+/// consecutive reads stay between the same ones: the same result, without
+/// fetching and premultiplying them again.
+pub struct BilinearCursor<'g, 'a> {
+    grid: &'g TileGrid<'a>,
+    key: Option<(i32, i32)>,
+    taps: [[f32; 4]; 4],
+}
+
+impl BilinearCursor<'_, '_> {
+    #[inline]
+    pub fn sample_bilinear(&mut self, x: f32, y: f32) -> (u8, u8, u8, u8) {
+        let x0 = floor_i32(x);
+        let y0 = floor_i32(y);
+        if self.key != Some((x0, y0)) {
+            let grid = self.grid;
+            self.taps = bilinear_taps(grid.width, grid.height, |p| grid.tile(p), x0, y0);
+            self.key = Some((x0, y0));
+        }
+        blend_taps(&self.taps, x - x0 as f32, y - y0 as f32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bilinear sampler as it was before it read through a dense index
+    /// and a reusing cursor; every path must still match it exactly.
+    fn old_sample_bilinear(map: &TileMap, x: f32, y: f32) -> (u8, u8, u8, u8) {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let samp = |px: i32, py: i32| -> [f32; 4] {
+            if px < 0 || py < 0 || px >= map.width as i32 || py >= map.height as i32 {
+                return [0.0; 4];
+            }
+            let (r, g, b, a) = map.get_pixel(px as u32, py as u32);
+            let af = a as f32 / 255.0;
+            [
+                r as f32 * af / 255.0,
+                g as f32 * af / 255.0,
+                b as f32 * af / 255.0,
+                af,
+            ]
+        };
+
+        let (c00, c10, c01, c11) = if x0 >= 0
+            && y0 >= 0
+            && ((x0 + 1) as u32) < map.width
+            && ((y0 + 1) as u32) < map.height
+        {
+            let xu = x0 as u32;
+            let yu = y0 as u32;
+            let lx = xu % TILE_SIZE;
+            let ly = yu % TILE_SIZE;
+            if lx + 1 < TILE_SIZE && ly + 1 < TILE_SIZE {
+                let pos = TilePos {
+                    x: (xu / TILE_SIZE) as i32,
+                    y: (yu / TILE_SIZE) as i32,
+                };
+                match map.tiles.get(&pos) {
+                    Some(tile) => {
+                        let p = &tile.pixels;
+                        let row = (TILE_SIZE * 4) as usize;
+                        let base = ((ly * TILE_SIZE + lx) * 4) as usize;
+                        let pm = |i: usize| -> [f32; 4] {
+                            let af = p[i + 3] as f32 / 255.0;
+                            [
+                                p[i] as f32 * af / 255.0,
+                                p[i + 1] as f32 * af / 255.0,
+                                p[i + 2] as f32 * af / 255.0,
+                                af,
+                            ]
+                        };
+                        (pm(base), pm(base + 4), pm(base + row), pm(base + row + 4))
+                    }
+                    None => ([0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
+                }
+            } else {
+                (
+                    samp(x0, y0),
+                    samp(x0 + 1, y0),
+                    samp(x0, y0 + 1),
+                    samp(x0 + 1, y0 + 1),
+                )
+            }
+        } else {
+            (
+                samp(x0, y0),
+                samp(x0 + 1, y0),
+                samp(x0, y0 + 1),
+                samp(x0 + 1, y0 + 1),
+            )
+        };
+
+        let lerp = |a: f32, b: f32, t: f32| -> f32 { a * (1.0 - t) + b * t };
+        let a = lerp(lerp(c00[3], c10[3], fx), lerp(c01[3], c11[3], fx), fy);
+        if a < f32::EPSILON {
+            return (0, 0, 0, 0);
+        }
+        let r = lerp(lerp(c00[0], c10[0], fx), lerp(c01[0], c11[0], fx), fy) / a;
+        let g = lerp(lerp(c00[1], c10[1], fx), lerp(c01[1], c11[1], fx), fy) / a;
+        let b = lerp(lerp(c00[2], c10[2], fx), lerp(c01[2], c11[2], fx), fy) / a;
+
+        fn to_u8(v: f32) -> u8 {
+            (v * 255.0).round().clamp(0.0, 255.0) as u8
+        }
+        (to_u8(r), to_u8(g), to_u8(b), to_u8(a))
+    }
+
+    #[test]
+    fn grid_and_cursor_sample_exactly_as_the_map_did() {
+        let (w, h) = (600u32, 300u32);
+        let mut map = TileMap::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                // Leave one tile out (sparse) and vary alpha, edges included.
+                if (256..512).contains(&x) && y < 256 {
+                    continue;
+                }
+                let a = match (x + y) % 7 {
+                    0 => 0,
+                    1 => 128,
+                    _ => 255,
+                };
+                map.set_pixel(x, y, (x * 7) as u8, (y * 3) as u8, (x ^ y) as u8, a);
+            }
+        }
+        let grid = TileGrid::new(&map);
+        let mut cursor = grid.cursor();
+        let mut points = vec![
+            (f32::NAN, 3.0),
+            (-0.5, -0.5),
+            (-1.0, 10.0),
+            (599.5, 299.5),
+            (600.0, 0.0),
+            (255.5, 255.5),
+            (256.0, 255.0),
+            (1.0e9, -1.0e9),
+        ];
+        // A slow enlargement sweep (the cursor's reuse) and a scattered one.
+        for i in 0..40_000u32 {
+            let t = i as f32;
+            points.push((t * 0.017 - 3.0, (t * 0.0071) % 305.0 - 2.0));
+            points.push(((t * 37.31) % 610.0 - 5.0, (t * 11.7) % 310.0 - 5.0));
+        }
+        for (x, y) in points {
+            let want = old_sample_bilinear(&map, x, y);
+            assert_eq!(map.sample_bilinear(x, y), want, "map at ({x}, {y})");
+            assert_eq!(grid.sample_bilinear(x, y), want, "grid at ({x}, {y})");
+            assert_eq!(cursor.sample_bilinear(x, y), want, "cursor at ({x}, {y})");
+        }
+    }
 
     #[test]
     fn rotate_and_flip_preserve_16bit_master() {

@@ -14,7 +14,7 @@ use crate::app::render::CanvasEvent;
 use crate::core::canvas::Canvas;
 use crate::core::document::GuideOrientation;
 use crate::core::layer::{Layer, LayerType};
-use crate::core::shape::{ShapeData, ShapeKind};
+use crate::core::shape::ShapeData;
 use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
 use crate::core::text::{rasterize_placed, TextData};
 use crate::core::tile::TileMap;
@@ -447,7 +447,17 @@ fn transformed_shape_span(
     {
         return None;
     }
-    if sd.kind != ShapeKind::Line && !axis_preserving_angle(ts.angle_deg) {
+    // Linear part of the gesture, R(angle)·S(sx, sy). A shape that cannot
+    // redraw the mapped picture from a mapped box (a rotated rectangle, an
+    // odd-sided polygon turned on its side, a gradient that would stay put)
+    // must leave ShapeData, or the commit re-renders it upright.
+    let (sin, cos) = ts.angle_deg.to_radians().sin_cos();
+    if !sd.survives_linear_map(
+        cos * ts.scale_x,
+        sin * ts.scale_x,
+        -sin * ts.scale_y,
+        cos * ts.scale_y,
+    ) {
         return None;
     }
     let (cx0, cy0, cx1, cy1) = sd.canvas_span(ls.offset);
@@ -537,7 +547,23 @@ fn transformable_layer(layer: &Layer) -> bool {
 }
 
 fn layer_orig_state(layer: &Layer, layer_idx: usize) -> LayerOrigState {
-    let (c_ox, c_oy, c_w, c_h) = match layer.tiles.content_bounds() {
+    orig_state_with_bounds(layer, layer_idx, layer.tiles.content_bounds())
+}
+
+/// `None` for a layer without one visible pixel. It has nothing to transform,
+/// and its raster rectangle (a fresh layer is canvas-sized) must not stretch
+/// the box every other selected layer is scaled and turned about.
+fn inked_layer_orig_state(layer: &Layer, layer_idx: usize) -> Option<LayerOrigState> {
+    let bounds = layer.tiles.content_bounds()?;
+    Some(orig_state_with_bounds(layer, layer_idx, Some(bounds)))
+}
+
+fn orig_state_with_bounds(
+    layer: &Layer,
+    layer_idx: usize,
+    content_bounds: Option<(i32, i32, i32, i32)>,
+) -> LayerOrigState {
+    let (c_ox, c_oy, c_w, c_h) = match content_bounds {
         Some((x0, y0, x1, y1)) => (
             layer.offset.0 + x0,
             layer.offset.1 + y0,
@@ -849,6 +875,10 @@ fn bake_transform_commit(
                 source,
                 source_to_current: final_source_to_canvas,
                 rendered_fingerprint: tile_content_fingerprint(&new_tiles),
+                rendered_offset: out_offset,
+                rendered_mask_fingerprint: new_mask
+                    .as_ref()
+                    .map(|m| tile_content_fingerprint(&m.tiles)),
             }
         });
         updates.push(TransformCommitLayer {
@@ -1013,6 +1043,17 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
+        // Move's handles are drawn on the layers' raster rectangles. The press
+        // that starts this session is hit-tested against the session's own box,
+        // so it has to be that same box: a shape's content sits a few pixels
+        // inside its padded raster, and a press on the drawn corner would miss
+        // the content corner and start a rotation instead of a scale.
+        let move_box = if select_transform_tool {
+            None
+        } else {
+            self.move_selection_transform_box()
+                .map(|(corners, _, _)| (corners[0], corners[3]))
+        };
         let canvas = &self.docs.active().canvas;
         let active_idx = canvas.layer_stack.active_idx;
 
@@ -1100,24 +1141,34 @@ impl App {
                     continue;
                 }
                 let l = &canvas.layer_stack.layers[idx];
-                layer_states.push(layer_orig_state(l, idx));
+                if let Some(ls) = inked_layer_orig_state(l, idx) {
+                    layer_states.push(ls);
+                }
             }
         }
         if layer_states.is_empty() {
             return;
         }
 
-        let (u_x0, u_y0, u_x1, u_y1) = layer_states.iter().fold(
-            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
-            |(x0, y0, x1, y1), ls| {
-                (
-                    x0.min(ls.content_offset.0),
-                    y0.min(ls.content_offset.1),
-                    x1.max(ls.content_offset.0 + ls.content_w as i32),
-                    y1.max(ls.content_offset.1 + ls.content_h as i32),
-                )
-            },
-        );
+        let (u_x0, u_y0, u_x1, u_y1) = match move_box {
+            Some((top_left, bottom_right)) => (
+                top_left.0 as i32,
+                top_left.1 as i32,
+                bottom_right.0 as i32,
+                bottom_right.1 as i32,
+            ),
+            None => layer_states.iter().fold(
+                (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+                |(x0, y0, x1, y1), ls| {
+                    (
+                        x0.min(ls.content_offset.0),
+                        y0.min(ls.content_offset.1),
+                        x1.max(ls.content_offset.0 + ls.content_w as i32),
+                        y1.max(ls.content_offset.1 + ls.content_h as i32),
+                    )
+                },
+            ),
+        };
         let orig_offset = (u_x0, u_y0);
         let orig_w = (u_x1 - u_x0).max(1) as u32;
         let orig_h = (u_y1 - u_y0).max(1) as u32;
@@ -1127,8 +1178,8 @@ impl App {
         // Reuse the untouched raster source from preceding Free Transform
         // commits. The current layer bounds above remain the UI box for this
         // session, while the worker receives the original pixels plus the
-        // accumulated source→current mapping. Any intervening pixel edit changes
-        // the fingerprint and automatically breaks the lineage.
+        // accumulated source→current mapping. Any intervening pixel or mask edit
+        // changes a fingerprint and automatically breaks the lineage.
         let doc_id = self.docs.active().id;
         for ls in &mut layer_states {
             if !matches!(ls.layer_type, LayerType::Raster) {
@@ -1136,12 +1187,23 @@ impl App {
             }
             let key = (doc_id, ls.layer_id);
             let current_fp = tile_content_fingerprint(&ls.tiles);
+            let current_mask_fp = ls.mask.as_ref().map(|m| tile_content_fingerprint(&m.tiles));
             match self.edit.raster_transform_lineage.get(&key) {
-                Some(lineage) if lineage.rendered_fingerprint == current_fp => {
+                Some(lineage)
+                    if lineage.rendered_fingerprint == current_fp
+                        && lineage.rendered_mask_fingerprint == current_mask_fp =>
+                {
+                    // A plain move since that commit (Move tool, arrow keys,
+                    // Align, a drag-only Free Transform) shifted the offset but
+                    // not the pixels. Carry the shift, or this commit would
+                    // render the layer back where the last one left it.
+                    let dx = (ls.offset.0 - lineage.rendered_offset.0) as f32;
+                    let dy = (ls.offset.1 - lineage.rendered_offset.1) as f32;
+                    let shift = [1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0, 1.0];
                     let layer_idx = ls.layer_idx;
                     *ls = lineage.source.clone();
                     ls.layer_idx = layer_idx;
-                    ls.source_to_current = lineage.source_to_current;
+                    ls.source_to_current = mat3_mul(shift, lineage.source_to_current);
                 }
                 Some(_) => {
                     self.edit.raster_transform_lineage.remove(&key);
@@ -1580,7 +1642,8 @@ impl App {
             if !layer.visible || xform_ids.contains(&layer.id) {
                 continue;
             }
-            if layer.width == 0 || layer.height == 0 {
+            // An empty (or group) layer's rectangle is not anything on screen.
+            if layer.width == 0 || layer.height == 0 || !layer.has_renderable_content() {
                 continue;
             }
             let lx0 = layer.offset.0 as f32;
@@ -2225,6 +2288,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::shape::ShapeKind;
 
     #[test]
     fn shift_constrains_transform_move_to_horizontal_axis() {
@@ -3158,5 +3222,281 @@ mod tests {
         assert_eq!(out[0], (10.0, 5.0));
         assert_eq!(out[3], (-10.0, 80.0));
         assert_eq!(out[1], (100.0, -5.0));
+    }
+
+    // --- Multi-layer audit, 19/10: a transform after a plain move, polygons on
+    // their side, and the Move-handle box of a shape. ---
+
+    fn app_with_selected_boxes(
+        boxes: &[(i32, i32, u32, u32)],
+    ) -> (crate::app::state::App, Vec<u32>) {
+        let mut app = crate::app::state::App::new();
+        app.docs.documents[0].canvas = Canvas::new(600, 600);
+        let canvas = &mut app.docs.documents[0].canvas;
+        for layer in &mut canvas.layer_stack.layers {
+            layer.selected = false;
+        }
+        let mut ids = Vec::new();
+        for (i, &(x, y, w, h)) in boxes.iter().enumerate() {
+            let idx = canvas.layer_stack.add_layer(w, h);
+            let mut px = vec![0u8; (w * h * 4) as usize];
+            for (n, chunk) in px.chunks_exact_mut(4).enumerate() {
+                let column = n as u32 % w;
+                let green = if column == 0 { 0 } else { 200 };
+                chunk.copy_from_slice(&[60 + 40 * i as u8, green, 90, 255]);
+            }
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.tiles = TileMap::from_rgba(&px, w, h);
+            layer.offset = (x, y);
+            layer.selected = true;
+            ids.push(layer.id);
+            canvas.layer_stack.active_idx = idx;
+        }
+        (app, ids)
+    }
+
+    fn finish_transform_commit(app: &mut crate::app::state::App) {
+        let started = std::time::Instant::now();
+        while app.edit.pending_transform_commit.is_some() {
+            app.poll_transform_commit();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "transform bake never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Canvas-space content box `(x0, y0, x1, y1)` of the layer with `id`.
+    fn content_box(app: &crate::app::state::App, id: u32) -> (i32, i32, i32, i32) {
+        let layer = app.docs.documents[0]
+            .canvas
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .expect("layer");
+        let (x0, y0, x1, y1) = layer.tiles.content_bounds().expect("content");
+        let (ox, oy) = layer.offset;
+        (ox + x0, oy + y0, ox + x1, oy + y1)
+    }
+
+    #[test]
+    fn transform_after_a_plain_move_keeps_layers_where_they_were_moved() {
+        // Scale two photos (the commit remembers their untouched source), move
+        // them with the arrow keys and with a drag-only Free Transform, then turn
+        // them half way round together. Each must land mirrored about the moved
+        // pair's centre — not back where it sat before the moves.
+        let (mut app, ids) = app_with_selected_boxes(&[(50, 60, 40, 20), (150, 100, 30, 30)]);
+        app.begin_transform();
+        app.transform_set_scale_x(1.5);
+        app.transform_set_scale_y(1.5);
+        app.commit_transform();
+        finish_transform_commit(&mut app);
+
+        assert!(app.docs.documents[0].canvas.nudge_selected_layers(40, 25));
+        app.begin_transform();
+        app.transform_set_translate_x(-15.0);
+        app.transform_set_translate_y(30.0);
+        app.commit_transform();
+        finish_transform_commit(&mut app);
+
+        let moved: Vec<_> = ids.iter().map(|&id| content_box(&app, id)).collect();
+        let cx2 =
+            moved.iter().map(|b| b.0).min().unwrap() + moved.iter().map(|b| b.2).max().unwrap();
+        let cy2 =
+            moved.iter().map(|b| b.1).min().unwrap() + moved.iter().map(|b| b.3).max().unwrap();
+
+        app.begin_transform();
+        app.transform_set_angle(180.0);
+        app.commit_transform();
+        finish_transform_commit(&mut app);
+
+        for (&id, before) in ids.iter().zip(&moved) {
+            let after = content_box(&app, id);
+            // A half turn about c maps [x0, x1] to [2c - x1, 2c - x0].
+            let expected = (
+                cx2 - before.2,
+                cy2 - before.3,
+                cx2 - before.0,
+                cy2 - before.1,
+            );
+            let off = [
+                after.0 - expected.0,
+                after.1 - expected.1,
+                after.2 - expected.2,
+                after.3 - expected.3,
+            ];
+            assert!(
+                off.iter().all(|d| d.abs() <= 1),
+                "layer {id} landed at {after:?}, expected {expected:?} (moved box {before:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn mask_painted_after_a_transform_survives_the_next_one() {
+        let (mut app, ids) = app_with_selected_boxes(&[(50, 60, 40, 20)]);
+        let flat_mask = |w: u32, h: u32, v: u8| LayerMask {
+            tiles: TileMap::from_rgba(&[v, v, v, 255].repeat((w * h) as usize), w, h),
+            width: w,
+            height: h,
+            enabled: true,
+            inverted: false,
+            bake_offset: (0, 0),
+            bake_frame_offset: (0, 0),
+        };
+        let id = ids[0];
+        let find = |app: &crate::app::state::App| {
+            app.docs.documents[0]
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.id == id)
+                .expect("layer")
+        };
+        let idx = find(&app);
+        app.docs.documents[0].canvas.layer_stack.layers[idx].mask = Some(flat_mask(40, 20, 255));
+        app.begin_transform();
+        app.transform_set_scale_x(2.0);
+        app.transform_set_scale_y(2.0);
+        app.commit_transform();
+        finish_transform_commit(&mut app);
+
+        // Paint the whole mask black: pixels untouched, mask changed.
+        let idx = find(&app);
+        let layer = &mut app.docs.documents[0].canvas.layer_stack.layers[idx];
+        let (mw, mh) = {
+            let mask = layer.mask.as_ref().expect("mask follows the transform");
+            (mask.width, mask.height)
+        };
+        layer.mask = Some(flat_mask(mw, mh, 0));
+
+        app.begin_transform();
+        app.transform_set_angle(180.0);
+        app.commit_transform();
+        finish_transform_commit(&mut app);
+
+        let idx = find(&app);
+        let mask = app.docs.documents[0].canvas.layer_stack.layers[idx]
+            .mask
+            .clone()
+            .expect("mask kept");
+        for y in 0..mask.height {
+            for x in 0..mask.width {
+                assert!(
+                    mask.tiles.get_pixel(x, y).0 < 10,
+                    "the painted mask came back white at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polygon_turned_on_its_side_leaves_shapedata_instead_of_snapping_upright() {
+        let bake = |ts| {
+            bake_transform_commit(
+                DocumentId(1),
+                ts,
+                crate::core::geometry::InterpolationMode::Bilinear,
+            )
+            .expect("bake succeeds")
+        };
+        let (pentagon, ls) = shape_orig_state(ShapeKind::Polygon, 9);
+        assert_eq!(pentagon.sides, 5);
+        for (sx, sy, angle) in [(1.0, 1.0, 90.0), (1.0, 1.0, 180.0), (1.0, -1.0, 0.0)] {
+            let result = bake(shape_transform_state(ls.clone(), sx, sy, angle));
+            assert!(
+                matches!(
+                    result.layers[0].layer_type,
+                    LayerType::Vector(VectorGeometry::Path(_))
+                ),
+                "a pentagon at {angle} deg / scale ({sx},{sy}) cannot stay a pointing-up ShapeData"
+            );
+        }
+        // Mirrored across the vertical axis it looks the same: stays a live shape.
+        let result = bake(shape_transform_state(ls, -1.0, 1.0, 0.0));
+        assert!(matches!(
+            result.layers[0].layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        ));
+        // A rectangle at a quarter turn is still a rectangle.
+        let (_, rect) = shape_orig_state(ShapeKind::Rectangle, 9);
+        let result = bake(shape_transform_state(rect, 1.0, 1.0, 90.0));
+        assert!(matches!(
+            result.layers[0].layer_type,
+            LayerType::Vector(VectorGeometry::Primitive(_))
+        ));
+    }
+
+    #[test]
+    fn move_handle_on_a_thick_outline_corner_scales_instead_of_rotating() {
+        let mut app = crate::app::state::App::new();
+        app.docs.documents[0].canvas = Canvas::new(300, 300);
+        let (sd, off) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            60.0,
+            60.0,
+            160.0,
+            120.0,
+            0.0,
+            true,
+            [200, 30, 30, 255],
+            14.0,
+            [0, 0, 0, 255],
+        );
+        let raster = sd.render().expect("shape renders");
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(raster.width, raster.height);
+            for layer in &mut canvas.layer_stack.layers {
+                layer.selected = false;
+            }
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.offset = off;
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(sd));
+            layer.selected = true;
+            canvas.layer_stack.active_idx = idx;
+        }
+        app.edit.tools.select(crate::tools::ToolId::Move);
+        app.edit.view.zoom = 4.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+
+        let (corners, _, _) = app
+            .move_selection_transform_box()
+            .expect("Move shows a box");
+        let (cx, cy) = corners[0];
+        let (sx, sy) = (cx * 4.0, cy * 4.0);
+        assert!(app.move_selection_transform_hit(sx, sy));
+        app.begin_move_transform();
+        app.transform_on_press(cx, cy, sx, sy);
+        let ts = app.edit.transform_state.as_ref().expect("session started");
+        assert_eq!(
+            ts.drag_handle,
+            Some(Some(TransformHandle::TopLeft)),
+            "the drawn corner must grab the corner handle, not the rotate ring"
+        );
+    }
+
+    #[test]
+    fn an_empty_layer_in_the_selection_does_not_stretch_the_transform_box() {
+        let (mut app, _) = app_with_selected_boxes(&[(50, 60, 40, 20), (150, 100, 30, 30)]);
+        {
+            // A fresh layer: canvas-sized, not one visible pixel.
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(600, 600);
+            canvas.layer_stack.layers[idx].selected = true;
+        }
+        app.begin_transform();
+        let ts = app.edit.transform_state.as_ref().expect("session started");
+        assert_eq!(
+            (ts.orig_offset, ts.orig_w, ts.orig_h),
+            ((50, 60), 130, 70),
+            "the box wraps the two photos, not the empty layer's whole canvas"
+        );
+        assert_eq!(ts.layer_states.len(), 2);
     }
 }

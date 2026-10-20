@@ -230,14 +230,59 @@ impl PdfImporter {
         pages: &[usize],
         target_dpi: Option<f32>,
     ) -> Result<Vec<Canvas>, String> {
+        let pdf = PdfPages::open(path)?;
+        let plan = pdf.plan(pages, target_dpi)?;
+        if plan.pixels > MAX_PDF_RENDER_BATCH_PIXELS {
+            return Err(format!(
+                "PDF render batch exceeds {} megapixels; render fewer pages at a time",
+                MAX_PDF_RENDER_BATCH_PIXELS / 1_000_000
+            ));
+        }
+        pdf.renders(&plan)
+            .map(|page| page.map(|(_, canvas)| canvas))
+            .collect()
+    }
+}
+
+/// An opened PDF whose pages are rendered one at a time, so a caller holding
+/// many pages decides itself how many it can keep (see [`PdfPages::plan`]).
+pub struct PdfPages {
+    pdf: hayro::hayro_syntax::Pdf,
+    dims: Vec<(f32, f32)>,
+}
+
+/// Which pages a render makes and how large they come out, known before any
+/// page is rendered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfRenderPlan {
+    /// 0-based, ascending, each once.
+    pub pages: Vec<usize>,
+    /// The resolution every page is rendered at: the one asked for, lowered
+    /// as far as the largest page needs to stay within the per-page limits.
+    pub dpi: f32,
+    /// The pixels of all the pages together (`u64::MAX` past counting).
+    pub pixels: u64,
+}
+
+impl PdfPages {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let pdf = PdfImporter::open_pdf(path)?;
+        let dims = PdfImporter::collect_dims(&pdf)?;
+        Ok(Self { pdf, dims })
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.dims.len()
+    }
+
+    /// Plan rendering `pages` (0-based; duplicate/unsorted input is
+    /// normalized) at `target_dpi`, an upper bound; `None` uses the Auto cap.
+    /// Page count never changes a page's DPI.
+    pub fn plan(&self, pages: &[usize], target_dpi: Option<f32>) -> Result<PdfRenderPlan, String> {
         if pages.is_empty() {
             return Err("No PDF pages selected".to_string());
         }
-        let pdf = Self::open_pdf(path)?;
-        let all_dims = Self::collect_dims(&pdf)?;
-        let page_count = all_dims.len();
-
-        // Sorted, unique set of the pages to render.
+        let page_count = self.dims.len();
         let wanted: std::collections::BTreeSet<usize> = pages.iter().copied().collect();
         if let Some(&max_idx) = wanted.iter().next_back() {
             if max_idx >= page_count {
@@ -248,11 +293,10 @@ impl PdfImporter {
             }
         }
 
-        // Per-page limits only: page count must never change a page's DPI.
         let mut dimension_scale = f32::INFINITY;
         let mut pixel_scale = f32::INFINITY;
         for &idx in &wanted {
-            let (page_width, page_height) = all_dims[idx];
+            let (page_width, page_height) = self.dims[idx];
             dimension_scale = dimension_scale
                 .min(iai_canvas::canvas::MAX_DIMENSION as f32 / page_width)
                 .min(iai_canvas::canvas::MAX_DIMENSION as f32 / page_height);
@@ -273,52 +317,87 @@ impl PdfImporter {
                 PDF_MIN_IMPORT_DPI as u32
             ));
         }
-        let import_dpi = render_scale * 72.0;
 
-        let batch_pixels = wanted.iter().try_fold(0u64, |total, &idx| {
-            let (page_width, page_height) = all_dims[idx];
-            let width = (page_width * render_scale).ceil() as u64;
-            let height = (page_height * render_scale).ceil() as u64;
-            total.checked_add(width.checked_mul(height)?)
-        });
-        if batch_pixels.is_none_or(|pixels| pixels > MAX_PDF_RENDER_BATCH_PIXELS) {
-            return Err(format!(
-                "PDF render batch exceeds {} megapixels; render fewer pages at a time",
-                MAX_PDF_RENDER_BATCH_PIXELS / 1_000_000
-            ));
+        let pixels = wanted
+            .iter()
+            .try_fold(0u64, |total, &idx| {
+                let (width, height) = self.page_size(idx, render_scale);
+                total.checked_add(u64::from(width).checked_mul(u64::from(height))?)
+            })
+            .unwrap_or(u64::MAX);
+        Ok(PdfRenderPlan {
+            pages: wanted.into_iter().collect(),
+            dpi: render_scale * 72.0,
+            pixels,
+        })
+    }
+
+    /// The pages of `plan`, rendered one at a time as the iterator is driven.
+    pub fn renders<'a>(&'a self, plan: &'a PdfRenderPlan) -> PdfPageRenders<'a> {
+        PdfPageRenders {
+            doc: self,
+            pages: plan.pages.iter(),
+            scale: plan.dpi / 72.0,
+            dpi: plan.dpi,
+            cache: hayro::RenderCache::new(),
+            interpreter_settings: hayro::hayro_interpret::InterpreterSettings::default(),
         }
+    }
 
-        let cache = hayro::RenderCache::new();
-        let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
+    fn page_size(&self, index: usize, scale: f32) -> (u32, u32) {
+        let (page_width, page_height) = self.dims[index];
+        (
+            (page_width * scale).ceil() as u32,
+            (page_height * scale).ceil() as u32,
+        )
+    }
+}
 
-        let mut canvases = Vec::with_capacity(wanted.len());
-        for (page_index, page) in pdf.pages().iter().enumerate() {
-            if !wanted.contains(&page_index) {
-                continue;
-            }
-            let (page_width, page_height) = all_dims[page_index];
-            let width = (page_width * render_scale).ceil() as u32;
-            let height = (page_height * render_scale).ceil() as u32;
-            let render_settings = hayro::RenderSettings {
-                x_scale: render_scale,
-                y_scale: render_scale,
-                width: Some(width as u16),
-                height: Some(height as u16),
-                bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-            };
-            let pixmap = hayro::render(page, &cache, &interpreter_settings, &render_settings);
-            let width = u32::from(pixmap.width());
-            let height = u32::from(pixmap.height());
-            if width == 0 || height == 0 {
-                return Err(format!("PDF page {} has zero size", page_index + 1));
-            }
-            let rgba = pixmap.data_as_u8_slice().to_vec();
-            let mut canvas = Canvas::from_rgba(rgba, width, height);
-            canvas.metadata.resolution_ppi = import_dpi;
-            canvases.push(canvas);
+/// See [`PdfPages::renders`]: yields each page's index and canvas.
+pub struct PdfPageRenders<'a> {
+    doc: &'a PdfPages,
+    pages: std::slice::Iter<'a, usize>,
+    scale: f32,
+    dpi: f32,
+    cache: hayro::RenderCache<'a>,
+    interpreter_settings: hayro::hayro_interpret::InterpreterSettings,
+}
+
+impl Iterator for PdfPageRenders<'_> {
+    type Item = Result<(usize, Canvas), String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let page_index = *self.pages.next()?;
+        let Some(page) = self.doc.pdf.pages().get(page_index) else {
+            return Some(Err(format!("PDF page {} is missing", page_index + 1)));
+        };
+        let (width, height) = self.doc.page_size(page_index, self.scale);
+        let render_settings = hayro::RenderSettings {
+            x_scale: self.scale,
+            y_scale: self.scale,
+            width: Some(width as u16),
+            height: Some(height as u16),
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        };
+        let pixmap = hayro::render(
+            page,
+            &self.cache,
+            &self.interpreter_settings,
+            &render_settings,
+        );
+        let width = u32::from(pixmap.width());
+        let height = u32::from(pixmap.height());
+        if width == 0 || height == 0 {
+            return Some(Err(format!("PDF page {} has zero size", page_index + 1)));
         }
+        let rgba = pixmap.data_as_u8_slice().to_vec();
+        let mut canvas = Canvas::from_rgba(rgba, width, height);
+        canvas.metadata.resolution_ppi = self.dpi;
+        Some(Ok((page_index, canvas)))
+    }
 
-        Ok(canvases)
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.pages.size_hint()
     }
 }
 
@@ -1968,6 +2047,28 @@ mod tests {
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].metadata.resolution_ppi, 300.0);
         assert_eq!((rendered[0].width, rendered[0].height), (1667, 1667));
+    }
+
+    #[test]
+    fn pages_are_planned_then_rendered_one_at_a_time_in_the_pdfs_order() {
+        let path = temp_pdf_path("pdf-pages-one-at-a-time");
+        std::fs::write(&path, minimal_pdf(&[(72, 36), (144, 72), (72, 36)])).unwrap();
+
+        let pdf = PdfPages::open(&path).unwrap();
+        assert_eq!(pdf.page_count(), 3);
+        let plan = pdf.plan(&[2, 0, 2], Some(144.0)).unwrap();
+        assert_eq!(plan.pages, vec![0, 2]);
+        assert_eq!(plan.dpi, 144.0);
+        assert_eq!(plan.pixels, 2 * 144 * 72);
+        let rendered: Vec<_> = pdf
+            .renders(&plan)
+            .map(|page| page.map(|(index, canvas)| (index, canvas.width, canvas.height)))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(pdf.plan(&[3], None).is_err());
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(rendered, vec![(0, 144, 72), (2, 144, 72)]);
     }
 
     #[test]

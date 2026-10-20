@@ -62,6 +62,8 @@ pub struct WindowRuntime {
     pub(in crate::app) cursor_selection_crosshair: Option<winit::window::CustomCursor>,
     /// Tiny high-contrast crosshair used while placing Perspective Crop points.
     pub(in crate::app) cursor_lasso: Option<winit::window::CustomCursor>,
+    /// Marquee / lasso cursors per selection mode, and Move-selection.
+    pub(in crate::app) selection_cursors: crate::app::selection_feedback::SelectionCursors,
     pub(in crate::app) cursor_crop: Option<winit::window::CustomCursor>,
     pub(in crate::app) cursor_perspective_crop: Option<winit::window::CustomCursor>,
     /// Earliest time to retry presenting after the surface stalled (acquire
