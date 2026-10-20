@@ -73,8 +73,9 @@ script's first call). An MCP batch (`iai_command_batch`) holds at most 256 calls
 - one tool per featured command, named `iai_<command with _>`: `iai_file_open`,
   `iai_doc_inspect`, `iai_image_crop`, `iai_image_resize`, `iai_ai_remove_background`,
   `iai_ai_inpaint`, `iai_text_add`, `iai_vector_add_shape`, `iai_analyze_region`,
-  `iai_export_pdf`, `iai_file_save`, and (Pro) `iai_id_photo_make`,
-  `iai_print_impose_sheet`;
+  `iai_export_pdf`, `iai_file_save`, `iai_file_list`, `iai_file_contact_sheet`,
+  `iai_image_perspective_crop`, and (Pro) `iai_id_photo_make`, `iai_id_photo_batch`,
+  `iai_print_impose_sheet`, `iai_print_card_sheet`;
 - `iai_command_list` (optionally by `prefix`, with each command's JSON Schema),
   `iai_command_run`, `iai_command_batch` (atomic by default: all or nothing);
 - `iai_job_status` / `iai_job_cancel` for long commands started with `background: true`
@@ -97,8 +98,9 @@ listed. Resources: `iai://session`, `iai://commands`, `iai://doc/{id}`.
 - **The person comes first.** On the open window, while the person is in the middle of an
   edit (a transform, a text being typed, a dialog with a preview, Develop), changes are
   refused with `busy` — queries still answer. Ask again a little later.
-- **Pro commands** (`id_photo.make`, `print.impose_sheet`) run when this machine's Pro is
-  unlocked or on trial; otherwise `permission_denied`.
+- **Pro commands** (`id_photo.make`, `id_photo.batch`, `print.impose_sheet`,
+  `print.card_sheet`) run when this machine's Pro is unlocked or on trial; otherwise
+  `permission_denied`.
 
 ## An errand, start to end
 
@@ -114,6 +116,25 @@ Twenty portraits in `D:\Photos\khach` → 3×4 ID photos on blue → 10×15 shee
 
 The test `agent::e2e` runs this through MCP (a light one in the suite; the full one with
 `IAI_AGENT_E2E_PHOTOS=<folder of portraits>`, ignored by default).
+
+## ID cards and ID photos a customer sent
+
+A folder holds, in no order, ID card fronts and backs photographed at a slant, phone
+screenshots of the electronic ID, and portraits:
+
+1. `file.contact_sheet {path}` — every photo small and numbered in one picture, with the
+   list of what each number is: tell the fronts, backs, screenshots and portraits apart, and
+   whose they are (the name and number on the card);
+2. `print.card_sheet {items: [{front: {path}, back: {path}}, {screen: {path}}], copies}` —
+   each card found and laid flat at 85.6 × 53.98 mm, front and back in a row, a screenshot
+   turned to lie down, four rows an A4 page, one document; a photo whose card is not found
+   is named in the error: give its `corners` (read off a preview);
+3. `id_photo.batch {items: [{path, copies, name}], size, backdrop, paper}` — an ID photo of
+   each portrait, all on photo paper, each person as many times as asked;
+4. `export.pdf {doc, path}` for each.
+
+`image.perspective_crop` lays one card (or any sheet, with `widthMm`/`heightMm`) flat in a
+document. The saved skills `in-can-cuoc-len-a4` and `anh-the-nhieu-nguoi` do steps 2–4.
 
 ## A many-page PDF
 

@@ -3,6 +3,11 @@
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
 20/10/2026
+- Trợ lý AI nay in được căn cước cho khách: đưa nó thư mục ảnh khách gửi (căn cước chụp nghiêng, mờ, ảnh chụp màn hình căn cước điện tử, ảnh chân dung để lẫn), nó tự nhận ra ảnh nào là mặt trước, mặt sau, của ai, cắt thẳng từng thẻ đúng cỡ thật rồi xếp 4 thẻ một trang A4: mặt trước và mặt sau một hàng, ảnh màn hình xoay ngang một hàng.
+- Trợ lý AI làm ảnh thẻ cho nhiều người một lần, mỗi người in đúng số tấm bạn dặn, xếp chung lên giấy ảnh 10x15 có dấu cắt.
+- Kết quả là file PDF trong thư mục con «iAi_ket_qua» ngay trong thư mục ảnh của khách; ảnh gốc giữ nguyên.
+
+20/10/2026
 - Trợ lý AI điều khiển iAi nay tự nhớ cách làm: việc nào làm xong tốt được cất thành một «kỹ năng» trong thư mục Tài liệu ▸ iAi_Ky_nang. Lần sau nhờ việc giống vậy (đổi thư mục, đổi số ảnh) thì AI lấy ra làm ngay, nhanh hơn và tốn ít lượt hơn rất nhiều.
 - Cửa sổ Help ▸ «Cho AI điều khiển iAi» có thêm mục «Kỹ năng đã lưu»: xem các kỹ năng, mở thư mục kỹ năng, xóa kỹ năng không cần (xóa xong vẫn lấy lại được).
 - Trợ lý AI xem được trong một thư mục có những ảnh nào, cỡ bao nhiêu, trước khi làm hàng loạt, nên ít làm sót ảnh hơn.

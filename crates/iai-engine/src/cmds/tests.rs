@@ -710,3 +710,131 @@ fn a_folder_is_listed_by_name_with_image_sizes_and_endings_filtered() {
     assert_eq!(e.code, ErrorCode::NotFound);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A phone photo of an ID card lying on a red stool: the card's corners are
+/// (163, 440) to (797, 840), with lines of print on it.
+fn card_photo(path: &str) {
+    let img = image::RgbaImage::from_fn(960, 1280, |x, y| {
+        let inside = (163..797).contains(&x) && (440..840).contains(&y);
+        if !inside {
+            let n = ((x * 7 + y * 13) % 17) as u8;
+            return image::Rgba([185 + n, 40 + n / 2, 45, 255]);
+        }
+        let print = (360..760).contains(&x) && (y / 24) % 2 == 1 && (520..800).contains(&y);
+        let photo = (190..330).contains(&x) && (560..760).contains(&y);
+        if print {
+            image::Rgba([60, 70, 80, 255])
+        } else if photo {
+            image::Rgba([120, 100, 90, 255])
+        } else {
+            image::Rgba([210, 230, 220, 255])
+        }
+    });
+    img.save(path).unwrap();
+}
+
+#[test]
+fn an_id_card_shot_at_a_slant_is_found_and_laid_flat() {
+    let dir = TempDir::new("perspective");
+    let photo = dir.path("the.png");
+    card_photo(&photo);
+    let mut s = Setup::new();
+    s.run("file.open", json!({"path": photo}));
+    let flat = s.run("image.perspective_crop", json!({}));
+    assert_eq!(
+        (
+            flat["widthPx"].clone(),
+            flat["heightPx"].clone(),
+            flat["dpi"].clone()
+        ),
+        (json!(1011), json!(638), json!(300.0))
+    );
+    let want = [
+        [163.0, 440.0],
+        [797.0, 440.0],
+        [797.0, 840.0],
+        [163.0, 840.0],
+    ];
+    for (got, want) in flat["corners"].as_array().unwrap().iter().zip(want) {
+        let (x, y) = (got[0].as_f64().unwrap(), got[1].as_f64().unwrap());
+        assert!(
+            (x - want[0]).abs() <= 2.0 && (y - want[1]).abs() <= 2.0,
+            "{flat}"
+        );
+    }
+    assert!(flat["found"].as_f64().unwrap() > 0.3, "{flat}");
+    // Nothing of the stool is left, but for the blur of the edge itself.
+    assert_eq!(
+        s.mean(json!({"x": 3, "y": 300, "w": 6, "h": 30})),
+        "#D2E6DC"
+    );
+
+    // Corners read roughly off a preview are fitted to the edges.
+    s.run("edit.undo", json!({}));
+    assert_eq!(s.inspect()["widthPx"], json!(960));
+    let given = s.run(
+        "image.perspective_crop",
+        json!({"corners": [[805, 832], [170, 452], [155, 830], [790, 447]], "widthMm": 60, "heightMm": 40, "dpi": 254}),
+    );
+    assert_eq!(
+        (given["widthPx"].clone(), given["heightPx"].clone()),
+        (json!(600), json!(400))
+    );
+    assert!(given["found"].is_null());
+    let first = &given["corners"][0];
+    assert!(
+        (first[0].as_f64().unwrap() - 163.0).abs() <= 2.0
+            && (first[1].as_f64().unwrap() - 440.0).abs() <= 2.0,
+        "{given}"
+    );
+
+    // A photo with no card in it says so.
+    s.run("file.new", json!({"widthPx": 400, "heightPx": 300}));
+    let e = s.try_run("image.perspective_crop", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn a_contact_sheet_numbers_a_folders_photos_in_one_picture() {
+    let dir = TempDir::new("contact");
+    for (name, w, h) in [
+        ("b.png", 300u32, 200u32),
+        ("a.png", 120, 240),
+        ("c.jpg", 50, 50),
+    ] {
+        image::RgbImage::from_pixel(w, h, image::Rgb([90, 120, 150]))
+            .save(dir.path(name))
+            .unwrap();
+    }
+    std::fs::write(dir.path("ghi_chu.txt"), b"x").unwrap();
+    std::fs::write(dir.path("hong.png"), b"not a png").unwrap();
+    let mut s = Setup::new();
+    let sheet = s.run(
+        "file.contact_sheet",
+        json!({"path": dir.0.display().to_string(), "cellPx": 128}),
+    );
+    let names: Vec<(u64, &str)> = sheet["photos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["n"].as_u64().unwrap(), p["name"].as_str().unwrap()))
+        .collect();
+    assert_eq!(names, [(1, "a.png"), (2, "b.png"), (3, "c.jpg")]);
+    assert_eq!(sheet["photos"][1]["widthPx"], json!(300));
+    assert_eq!(sheet["unread"], json!(["hong.png"]));
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(sheet["pngBase64"].as_str().unwrap())
+        .unwrap();
+    let picture = image::load_from_memory(&png).unwrap();
+    // Three copies of 128 in a row, 8 apart.
+    assert_eq!((picture.width(), picture.height()), (3 * 136 + 8, 136 + 8));
+
+    // Files given are shown in their order.
+    let given = s.run(
+        "file.contact_sheet",
+        json!({"files": [{"path": dir.path("c.jpg")}, {"path": dir.path("a.png")}]}),
+    );
+    assert_eq!(given["photos"][0]["name"], json!("c.jpg"));
+    assert_eq!(given["photos"][1]["n"], json!(2));
+}

@@ -879,3 +879,37 @@ fn a_photo_opened_to_look_at_is_not_kept_and_a_skill_with_more_is_its_version() 
         Saved::Version("lat-anh-2".to_string(), "lat-anh".to_string())
     );
 }
+
+/// C1 (20/10): ID cards with one skill, ID photos with another, in one task:
+/// a use of each, nothing new kept.
+#[test]
+fn a_task_of_saved_skills_one_after_another_is_a_use_of_each() {
+    let (lib, out) = (Dir::new("lib6"), Dir::new("out12"));
+    let store = Store::new(&lib.0);
+    store.write("lat-anh", &flip_recipe()).unwrap();
+    store.write("lat-anh-nua", &flip_recipe()).unwrap();
+    let ran = |name: &str| Recorded {
+        skill: Some((
+            name.to_string(),
+            json!({"vao": out.0.display().to_string()}),
+        )),
+        result: Some(json!({"calls": 2})),
+        writes: true,
+        ..Recorded::default()
+    };
+    let mut calls = vec![ran("lat-anh"), ran("lat-anh-nua")];
+    // Looking at the result is no step of the job.
+    calls.push(Recorded {
+        query: true,
+        ..call("doc.preview", json!({"doc": 1}), json!({"doc": 1}))
+    });
+    let d = generalize(&calls, &BTreeMap::new()).unwrap();
+    assert_eq!(
+        store.learn(d, &lesson("lật ảnh rồi lật nữa")).unwrap(),
+        Saved::Reused("lat-anh".to_string())
+    );
+    assert_eq!(store.list().len(), 2);
+    for name in ["lat-anh", "lat-anh-nua"] {
+        assert_eq!(store.load(name).unwrap().meta.uses, 1, "{name}");
+    }
+}

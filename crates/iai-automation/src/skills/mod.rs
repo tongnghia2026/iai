@@ -393,12 +393,22 @@ impl Store {
                 &lesson.client
             }
         );
-        // The whole task was one skill: one more use of it.
-        if let [only] = draft.steps.as_slice() {
-            if let (Some(name), None) = (&only.skill, &only.command) {
-                self.record_use(name, true, false, &lesson.request, &how)?;
-                return Ok(Saved::Reused(name.clone()));
+        // The whole task was saved skills, one after another: one more use of
+        // each, and nothing new (they are each kept already).
+        let ran: Vec<&String> = draft
+            .steps
+            .iter()
+            .filter_map(|s| s.skill.as_ref().filter(|_| s.command.is_none()))
+            .collect();
+        if let Some(first) = ran.first().filter(|_| ran.len() == draft.steps.len()) {
+            let mut counted: Vec<&String> = Vec::new();
+            for name in &ran {
+                if !counted.contains(name) {
+                    self.record_use(name, true, false, &lesson.request, &how)?;
+                    counted.push(name);
+                }
             }
+            return Ok(Saved::Reused((*first).clone()));
         }
         let skills = self.list();
         for (name, existing) in &skills {

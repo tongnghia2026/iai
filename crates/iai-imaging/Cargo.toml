@@ -19,5 +19,9 @@ iai-doc = { path = "../iai-doc" }
 iai-raster = { path = "../iai-raster" }
 rayon = "1"
 
+[dev-dependencies]
+# The probe reads real photos.
+image = "0.25"
+
 [lints]
 workspace = true

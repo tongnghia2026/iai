@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod analyze;
 pub mod common;
+pub mod contact;
 pub mod doc;
 pub mod edit;
 pub mod export;
@@ -25,6 +26,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(doc::RenderPreview);
     r.register(file::NewDocument);
     r.register(file::ListFiles);
+    r.register(contact::ContactSheet);
     r.register(file::OpenFile);
     r.register(file::SaveFile);
     r.register(file::ExportImage);
@@ -40,6 +42,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(select::SelectRect);
     r.register(select::SelectSubject);
     r.register(image::Crop);
+    r.register(image::PerspectiveCrop);
     r.register(image::Resize);
     r.register(image::Rotate);
     r.register(image::Flip);

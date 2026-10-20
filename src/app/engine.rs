@@ -444,7 +444,12 @@ mod tests {
         });
         let findings = hunt(
             &command_registry(),
-            &["print.impose_sheet", "id_photo.make"],
+            &[
+                "print.impose_sheet",
+                "id_photo.make",
+                "print.card_sheet",
+                "id_photo.batch",
+            ],
             fixture,
             &scratch,
             crate::core::ai::MODEL_TEST_PATIENCE,

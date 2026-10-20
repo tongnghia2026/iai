@@ -38,7 +38,9 @@ with typed params; the featured ones are tools of their own, and `iai_command_li
 with their JSON Schema, `iai_command_run` runs any. Documents, pages and layers are named by the \
 ids `doc.list` / `doc.inspect` give; leave `doc` out for the document shown. Files: paths are \
 read relative to the folders this session was granted (absolute paths must lie inside them); \
-`iai_file_list` shows what a folder holds. \
+`iai_file_list` shows what a folder holds, `iai_file_contact_sheet` its photos numbered in one \
+picture (to sort a customer's photos at a glance). Cards shot at a slant: \
+`image.perspective_crop` lays one flat, `print.card_sheet` (Pro) lays ID cards out on A4. \
 Long commands (AI models, files) answer when done, or with a job id to poll with \
 `iai_job_status`. Every change is one undo step (`edit.undo`). To check work, measure it: \
 `analyze.region` gives the average colour, spread and coverage of a rectangle; \
@@ -265,6 +267,28 @@ struct Task {
 enum Answer {
     Value(Value),
     Image { png_base64: String, about: Value },
+}
+
+/// A command's answer, shown as a picture when its result carries one
+/// (`pngBase64`, as `file.contact_sheet` gives).
+fn pictured(mut answer: Value) -> Answer {
+    let png = answer
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .and_then(|result| result.remove("pngBase64"));
+    match png {
+        Some(Value::String(png_base64)) => Answer::Image {
+            png_base64,
+            about: answer,
+        },
+        Some(other) => {
+            if let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) {
+                result.insert("pngBase64".into(), other);
+            }
+            Answer::Value(answer)
+        }
+        None => Answer::Value(answer),
+    }
 }
 
 impl<'a> Server<'a> {
@@ -693,10 +717,10 @@ impl<'a> Server<'a> {
         match &tool.kind {
             Kind::Command(id) => self
                 .run(CommandCall::new(id.clone(), args), true)
-                .map(Answer::Value),
+                .map(pictured),
             Kind::Run => {
                 let call: CommandCall = serde_json::from_value(args).map_err(bad)?;
-                self.run(call, true).map(Answer::Value)
+                self.run(call, true).map(pictured)
             }
             Kind::Batch => {
                 #[derive(Deserialize)]

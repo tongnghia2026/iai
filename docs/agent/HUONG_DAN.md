@@ -47,5 +47,20 @@ nhau.
   **Xóa**. iAi cất nó sang thư mục `.da_xoa` trong kho, cần thì lấy lại được.
 - Việc giống hệt lần trước thì iAi chỉ ghi thêm một lần dùng; cùng việc nhưng khác cỡ ảnh, màu
   nền… thì iAi thêm chỗ chọn vào kỹ năng cũ, không đẻ thêm kỹ năng mới.
-- Có sẵn ba kỹ năng mẫu: **ảnh thẻ hàng loạt → tờ in → PDF**, **thiệp 20/10 tô màu cho cả
-  lớp** (cần Python trên máy), **thêm lớp cỏ hoa lên mọi trang PDF**.
+- Có sẵn các kỹ năng mẫu: **ảnh thẻ hàng loạt → tờ in → PDF**, **thiệp 20/10 tô màu cho cả
+  lớp** (cần Python trên máy), **thêm lớp cỏ hoa lên mọi trang PDF**, **in căn cước lên A4**
+  và **ảnh thẻ nhiều người, mỗi người số tấm riêng**.
+
+## Căn cước và ảnh thẻ khách gửi
+
+Khách gửi một mớ ảnh: căn cước chụp nghiêng (mặt trước, mặt sau), ảnh chụp màn hình căn cước
+điện tử, ảnh chân dung. Tải hết vào một thư mục rồi nói với AI, ví dụ:
+
+> Thư mục `C:\Users\...\Downloads\khach_A`: in căn cước lên A4; ảnh thẻ 3x4 nền trắng, chị
+> Lan 4 tấm, anh Minh 6 tấm.
+
+AI xem cả thư mục trong một tấm ảnh ghép, tự chia ảnh nào là mặt trước, mặt sau, của ai; mỗi
+thẻ được tự tìm bốn góc và cắt thẳng đúng cỡ thật; mặt trước và mặt sau nằm một hàng, ảnh màn
+hình xoay ngang, bốn hàng một trang A4. Ảnh chân dung thành ảnh thẻ, xếp chung lên giấy ảnh,
+mỗi người đúng số tấm. Kết quả là hai file PDF trong thư mục con `iAi_ket_qua`. Thư mục của
+khách phải nằm trong thư mục bạn cho AI dùng (ví dụ Downloads).

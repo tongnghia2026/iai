@@ -1,11 +1,14 @@
-//! The whole page: crop, resize, rotate, flip.
+//! The whole page: crop, straighten a card shot at a slant, resize, rotate,
+//! flip.
 
 use iai_canvas::canvas::MAX_DIMENSION;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::common::{not_enabled, RectPx};
-use crate::{CmdError, Command, CommandMeta, Effect, EngineEvent, Plan, Session, Validate};
+use crate::{
+    CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session, Validate,
+};
 
 /// The page's size after the change.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -104,6 +107,153 @@ impl Command for Crop {
             canvas.deselect();
         }
         sized(s, doc).map(Plan::Done)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PerspectiveCropParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The card's four corners `[x, y]` in document pixels, in any order
+    /// round it (e.g. read off `doc.preview` and scaled up); each side is
+    /// then fitted to the edge near it. Left out, the card is looked for.
+    #[schemars(length(min = 4, max = 4))]
+    pub corners: Option<Vec<[f32; 2]>>,
+    /// The flat card's width and height in millimetres, given together; an
+    /// ID card lying down (85.6 × 53.98) when left out.
+    #[schemars(range(min = 5.0, max = 2000.0))]
+    pub width_mm: Option<f32>,
+    #[schemars(range(min = 5.0, max = 2000.0))]
+    pub height_mm: Option<f32>,
+    /// Pixels per inch of the result.
+    #[serde(default = "dpi_300")]
+    #[schemars(range(min = 72, max = 1200))]
+    pub dpi: u32,
+}
+
+fn dpi_300() -> u32 {
+    300
+}
+
+/// An ID card's size, in millimetres.
+pub const ID_CARD_MM: (f32, f32) = (85.6, 53.98);
+
+impl Validate for PerspectiveCropParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.corners.as_ref().is_some_and(|c| c.len() != 4) {
+            return Err(CmdError::bad_param("corners", "four [x, y] corners"));
+        }
+        if self.width_mm.is_some() != self.height_mm.is_some() {
+            return Err(CmdError::bad_param(
+                "widthMm",
+                "widthMm and heightMm together",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The page after a perspective crop, and the corners it was cut along.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Straightened {
+    pub doc: u32,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub dpi: f32,
+    /// Top-left, top-right, bottom-right, bottom-left, in the photo's pixels.
+    pub corners: Vec<[f32; 2]>,
+    /// When the card was looked for: how much what was found looks like
+    /// one, 0 to 1 (below 0.3, check the result with `doc.preview`).
+    pub found: Option<f32>,
+}
+
+static PERSPECTIVE_CROP: CommandMeta = CommandMeta {
+    id: "image.perspective_crop",
+    label_vi: "Cắt phối cảnh",
+    label_en: "Perspective Crop",
+    doc: "Cut a card (an ID card by default) or sheet photographed at a slant out of the page \
+          and lay it flat, at its size in millimetres: its corners are found, or given and \
+          fitted to the edges. The card's long sides come out on top and at the bottom; turn \
+          it with `image.rotate` if it is upside down. One undo step.",
+    effects: &[Effect::Edit],
+    featured: true,
+};
+
+pub struct PerspectiveCrop;
+
+impl Command for PerspectiveCrop {
+    type Params = PerspectiveCropParams;
+    type Output = Straightened;
+    fn meta(&self) -> &'static CommandMeta {
+        &PERSPECTIVE_CROP
+    }
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: PerspectiveCropParams,
+    ) -> Result<Plan<Straightened>, CmdError> {
+        use iai_imaging::card_find::{find_card, snap_corners};
+        let doc = s.doc_id(p.doc)?;
+        let (width_mm, height_mm) = match (p.width_mm, p.height_mm) {
+            (Some(w), Some(h)) => (w, h),
+            _ => ID_CARD_MM,
+        };
+        let aspect = width_mm.max(height_mm) / width_mm.min(height_mm);
+        let px = |mm: f32| (mm / 25.4 * p.dpi as f32).round().max(1.0) as u32;
+        let (out_w, out_h) = (px(width_mm), px(height_mm));
+        if out_w > MAX_DIMENSION || out_h > MAX_DIMENSION {
+            return Err(CmdError::bad_param(
+                "dpi",
+                &format!("a result of at most {MAX_DIMENSION} pixels a side"),
+            ));
+        }
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (w, h) = (canvas.width, canvas.height);
+        let rgba = canvas.flatten_for_export();
+        let (corners, found) = match &p.corners {
+            Some(given) => {
+                let rough = [0, 1, 2, 3].map(|i| {
+                    let c = given.get(i).copied().unwrap_or_default();
+                    (c[0], c[1])
+                });
+                (snap_corners(&rgba, w, h, rough), None)
+            }
+            None => {
+                let card = find_card(&rgba, w, h, aspect).ok_or_else(|| {
+                    CmdError::new(
+                        ErrorCode::NotFound,
+                        "no card found in the photo: give its `corners`, read off `doc.preview`",
+                    )
+                    .vi("Không tìm thấy thẻ trong ảnh")
+                })?;
+                (card.corners, Some(card.score))
+            }
+        };
+        // Long sides on top: a card asked for standing up starts at its
+        // top-right corner.
+        let quad = if width_mm >= height_mm {
+            corners
+        } else {
+            [corners[1], corners[2], corners[3], corners[0]]
+        };
+        if !canvas.crop_perspective(quad, out_w, out_h, true) {
+            return Err(not_enabled(
+                "the corners make no card shape",
+                "Bốn góc không tạo thành hình thẻ",
+            ));
+        }
+        canvas.metadata.resolution_ppi = p.dpi as f32;
+        let size = sized(s, doc)?;
+        Ok(Plan::Done(Straightened {
+            doc,
+            width_px: size.width_px,
+            height_px: size.height_px,
+            dpi: size.dpi,
+            corners: quad.iter().map(|&(x, y)| [x, y]).collect(),
+            found,
+        }))
     }
 }
 
