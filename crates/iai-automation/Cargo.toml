@@ -13,7 +13,9 @@ path = "src/lib.rs"
 
 [dependencies]
 iai-canvas = { path = "../iai-canvas" }
+iai-diag = { path = "../iai-diag" }
 iai-engine = { path = "../iai-engine" }
+iai-platform = { path = "../iai-platform" }
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

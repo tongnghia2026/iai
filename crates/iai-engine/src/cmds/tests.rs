@@ -662,3 +662,51 @@ fn a_patch_fill_closes_a_hole_in_a_flat_colour() {
         "#336699"
     );
 }
+
+#[test]
+fn a_folder_is_listed_by_name_with_image_sizes_and_endings_filtered() {
+    let dir = std::env::temp_dir().join(format!("iai-file-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lop_a")).unwrap();
+    std::fs::create_dir_all(dir.join(".an")).unwrap();
+    let mut s = Setup::new();
+    s.run("file.new", json!({"widthPx": 30, "heightPx": 20}));
+    for name in ["b.png", "A.png"] {
+        s.run(
+            "file.export",
+            json!({"path": dir.join(name).display().to_string()}),
+        );
+    }
+    std::fs::write(dir.join("ghi_chu.txt"), b"x").unwrap();
+    std::fs::write(dir.join(".an.png"), b"x").unwrap();
+    let all = s.run("file.list", json!({"path": dir.display().to_string()}));
+    let names: Vec<&str> = all["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["A.png", "b.png", "ghi_chu.txt"]);
+    assert_eq!(all["folders"], json!(["lop_a"]));
+    assert_eq!(
+        (
+            all["files"][0]["widthPx"].clone(),
+            all["files"][0]["heightPx"].clone()
+        ),
+        (json!(30), json!(20))
+    );
+    assert!(all["files"][2].get("widthPx").is_none());
+    let png = s.run(
+        "file.list",
+        json!({"path": dir.display().to_string(), "ext": [".PNG"]}),
+    );
+    assert_eq!(png["files"].as_array().unwrap().len(), 2);
+    let e = s
+        .try_run(
+            "file.list",
+            json!({"path": dir.join("khong").display().to_string()}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound);
+    let _ = std::fs::remove_dir_all(&dir);
+}

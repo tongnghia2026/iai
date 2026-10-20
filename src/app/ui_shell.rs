@@ -108,6 +108,8 @@ pub struct UiShell {
     pub(in crate::app) agent_link: Option<crate::app::agent_link::AgentLink>,
     /// Why turning it on failed, for the dialog to show.
     pub(in crate::app) agent_link_error: Option<String>,
+    /// The skill library as the agent dialog shows it, and when it was read.
+    pub(in crate::app) agent_skills: Option<(std::time::Instant, Vec<crate::ui::SkillRow>)>,
     /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.
     pub(in crate::app) crop_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     pub(in crate::app) canvas_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,

@@ -1914,6 +1914,7 @@ impl App {
                 print_folder: None,
                 agent_link: None,
                 agent_link_error: None,
+                agent_skills: None,
                 crop_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
                     crate::core::presets::SizePresetList::Crop,
                 )),

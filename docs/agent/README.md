@@ -150,3 +150,46 @@ export. `vector.add_path` draws
 straight segments, or with `"smooth": true` a curve through the points; `join` is `miter`
 (default: a sharp corner reaches out up to 4 stroke widths), `round` or `bevel`; `cap` is
 `butt` (default), `round` or `square`.
+
+## Saved skills
+
+iAi keeps the tasks agents finish well as **skills**, so the next agent — any model — runs a
+saved one instead of working the steps out again (fewer tokens, the same result every time).
+The library is a folder, `Documents\iAi_Ky_nang` unless `--skills DIR` says otherwise: one
+folder per skill with `kich_ban.json` (the recipe), `SKILL.md` (written from it, in the Agent
+Skills layout), `lich_su.md` (each use) and, for a tier-2 skill, its programs in `helpers/`.
+
+The flow, also in the server's instructions:
+
+1. `iai_task_begin {request}` with what the person asked, in their words. It answers with the
+   saved skills that fit best (name, what it does, its params). From here iAi records the
+   calls of the task.
+2. A skill fits: `iai_skill_run {name, params}` (params left out take their defaults; folders
+   must be granted). `dryRun: true` checks params and commands and says what the loops will
+   take. A run longer than one tool call answers `{"status": "running", "run": id}`: call
+   `iai_skill_run {run: id}` until it is `done`. A tier-2 skill answers `next`: the lines to run
+   with your shell. `iai_skill_get {name}` gives its `SKILL.md`; `recipe: true` its steps.
+3. No skill fits: work step by step as usual and check the result.
+4. `iai_task_end {status: "done", params: {...}, title, description}`. Name in `params` the
+   values from the request that a like request would change (`{"size": "3x4", "copies": 2}`).
+   iAi then keeps the task by itself:
+   - ids a call used that an earlier call answered become references to that answer;
+   - the folders read and written become params (`vao`, `ra`; a single file outside a loop
+     `tep_vao`, `tep_ra`), and so do the values named;
+   - calls repeated for each file of a folder, each item of an answer (`sheets`) or a number
+     of rounds (pages) become one loop, when what changes between rounds is the round's file,
+     item or number;
+   - the same job again only counts a use; the same job with other literal values gains them
+     as params; a job close to a kept one is saved as its version; anything else is new.
+   With `status` other than `done` nothing is kept. A task never begun or ended is kept, as
+   *unconfirmed*, when the session ends, only if every call in it worked.
+
+`iai_skill_search {query}` finds skills by words (Vietnamese marks optional); an empty query
+lists them all. Without an agent: `iai.exe run --skill NAME --param NAME=VALUE ... [--dry-run]`
+with the usual `--read-root` / `--write-root`.
+
+A recipe (`kich_ban.json`) is plain JSON; steps are commands (`command` + `args`), loops
+(`foreach` over `files` of a folder with `ext` / `names`, `items` of an array, or a `count`,
+`as` naming the item) or other skills (`skill` + `params`). Templates: `${name}` from the params
+and the loops (`${f.path}`, `${f.name}`, `${f.stem}`, `${it.doc}`, `${i}` from 0, `${n}` from 1);
+`{"$ref": "s1", "path": "/doc"}` reads step `s1`'s latest answer.

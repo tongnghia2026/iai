@@ -118,6 +118,12 @@ impl App {
         if let Some(on) = actions.chrome.agent_control.take() {
             self.set_agent_control(on);
         }
+        if std::mem::take(&mut actions.chrome.open_skills_folder) {
+            self.open_skills_folder();
+        }
+        if let Some(name) = actions.chrome.remove_skill.take() {
+            self.remove_skill(&name);
+        }
         // The first start of a new build: what is new in it and the ask for
         // support, once the user is free to read them.
         if self.shell.updated_notice && self.free_for_update() {

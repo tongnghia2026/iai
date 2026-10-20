@@ -738,6 +738,22 @@ pub struct AgentView {
     pub error: Option<String>,
     /// This program, for the agent's settings.
     pub exe: String,
+    /// The skill library's folder and what it holds (only while the dialog
+    /// is open).
+    pub skills_dir: String,
+    pub skills: Vec<SkillRow>,
+}
+
+/// One saved skill as the agent dialog lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SkillRow {
+    /// Its folder's name.
+    pub name: String,
+    pub title: String,
+    /// "tự lưu", "đã dùng 3 lần"…
+    pub status: String,
+    /// When it was last used (or saved), as the user reads a date.
+    pub when: String,
 }
 
 /// Where the app's self-update stands (see `crate::update`).

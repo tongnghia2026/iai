@@ -2802,7 +2802,9 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "iai-canvas",
+ "iai-diag",
  "iai-engine",
+ "iai-platform",
  "serde",
  "serde_json",
 ]

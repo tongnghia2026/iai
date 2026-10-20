@@ -339,3 +339,169 @@ fn the_server_serves_a_stream_line_by_line() {
     assert_eq!(answers[1]["error"]["code"], crate::jsonrpc::PARSE_ERROR);
     assert_eq!(answers[2]["id"], 2);
 }
+
+#[test]
+fn an_agents_task_is_kept_as_a_skill_and_the_next_agent_runs_it_instead() {
+    use crate::skills::Store;
+
+    let (input, output, lib) = (Dir::new("sk-in"), Dir::new("sk-out"), Dir::new("sk-lib"));
+    let roots = Roots::new(&[input.0.clone()], &[output.0.clone()]).unwrap();
+    let canon = |d: &Dir| {
+        let c = std::fs::canonicalize(&d.0).unwrap().display().to_string();
+        c.strip_prefix(r"\\?\").unwrap_or(&c).to_string()
+    };
+    let (input_dir, output_dir) = (canon(&input), canon(&output));
+    let mut host = host();
+    // Two photos to work on.
+    for (name, w) in [("a.png", 40), ("b.png", 64)] {
+        use crate::host::Host;
+        host.execute(iai_engine::CommandCall::new(
+            "file.new",
+            json!({"widthPx": w, "heightPx": 30}),
+        ))
+        .unwrap();
+        host.execute(iai_engine::CommandCall::new(
+            "file.export",
+            json!({"path": input.0.join(name).display().to_string()}),
+        ))
+        .unwrap();
+    }
+    let request = "Lật ngang hết ảnh PNG trong thư mục rồi lưu sang thư mục kết quả";
+    {
+        let gate = Gate::new(Policy::agent(), roots.clone());
+        let mut server = Server::new(&mut host, gate, "test")
+            .unwrap()
+            .with_skills(Store::new(&lib.0));
+        let init = rpc(
+            &mut server,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code", "version": "2.1"}}),
+        );
+        assert!(init["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("iai_task_begin"));
+        let begun = tool(&mut server, "iai_task_begin", json!({"request": request}));
+        assert_eq!(begun["skills"], json!([]));
+        // The agent works step by step.
+        for name in ["a.png", "b.png"] {
+            let opened = tool(&mut server, "iai_file_open", json!({"path": name}));
+            let doc = opened["result"]["doc"].clone();
+            tool(&mut server, "iai_doc_inspect", json!({"doc": doc}));
+            tool(
+                &mut server,
+                "iai_command_run",
+                json!({"command": "image.flip", "args": {"doc": doc, "axis": "horizontal"}}),
+            );
+            tool(
+                &mut server,
+                "iai_command_run",
+                json!({"command": "file.export", "args": {"doc": doc, "path": format!("lat_{name}")}}),
+            );
+        }
+        let ended = tool(
+            &mut server,
+            "iai_task_end",
+            json!({"status": "done", "title": "Lật ngang ảnh hàng loạt",
+                   "description": "Lật ngang mọi ảnh PNG trong một thư mục, lưu bản lật sang thư mục khác.",
+                   "params": {"chieu": "horizontal"}, "checks": ["mở lại ảnh ra thấy đã lật"]}),
+        );
+        assert_eq!(ended["saved"]["action"], "created", "{ended}");
+    }
+    let store = Store::new(&lib.0);
+    let skills = store.list();
+    assert_eq!(skills.len(), 1);
+    let (name, recipe) = &skills[0];
+    assert_eq!(
+        recipe.meta.signature,
+        "each(file.open,image.flip,file.export)"
+    );
+    assert!(recipe.params.contains_key("chieu") && recipe.params.contains_key("vao"));
+    assert_eq!(recipe.params["vao"].default, json!(input_dir));
+    assert_eq!(recipe.params["ra"].default, json!(output_dir));
+    std::fs::remove_file(output.0.join("lat_a.png")).unwrap();
+
+    // The next agent, another session: finds it and runs it.
+    let gate = Gate::new(Policy::agent(), roots);
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(Store::new(&lib.0));
+    let begun = tool(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "lật ngang ảnh trong thư mục"}),
+    );
+    assert_eq!(begun["skills"][0]["name"], json!(name), "{begun}");
+    let checked = tool(
+        &mut server,
+        "iai_skill_run",
+        json!({"name": name, "dryRun": true}),
+    );
+    assert_eq!(checked["plan"]["loops"][0]["files"], json!(2), "{checked}");
+    let ran = tool(
+        &mut server,
+        "iai_skill_run",
+        json!({"name": name, "params": {"chieu": "vertical"}}),
+    );
+    assert_eq!(
+        (ran["status"].as_str(), ran["calls"].as_u64()),
+        (Some("done"), Some(6)),
+        "{ran}"
+    );
+    assert!(output.0.join("lat_a.png").is_file());
+    // The agent opens what the skill wrote, to check it (as Haiku did in 4f-b).
+    tool(
+        &mut server,
+        "iai_file_open",
+        json!({"path": output.0.join("lat_a.png").display().to_string()}),
+    );
+    let ended = tool(&mut server, "iai_task_end", json!({"status": "done"}));
+    assert_eq!(ended["saved"]["action"], "reused", "{ended}");
+    let r = store.load(name).unwrap();
+    assert_eq!(r.meta.uses, 1);
+    assert_eq!(store.list().len(), 1);
+    let got = tool(&mut server, "iai_skill_get", json!({"name": name}));
+    assert!(
+        got["skillMd"].as_str().unwrap().contains("đã dùng 1 lần"),
+        "{got}"
+    );
+
+    // A param it does not have is refused before anything runs.
+    let e = tool_error(
+        &mut server,
+        "iai_skill_run",
+        json!({"name": name, "params": {"mau": "x"}}),
+    );
+    assert_eq!(e["code"], "bad_params");
+
+    // An agent that never says what it is doing: kept when the session ends.
+    tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "file.new", "args": {"widthPx": 10, "heightPx": 10}}),
+    );
+    tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "layer.new", "args": {}}),
+    );
+    server.end_session();
+    let all = store.list();
+    assert_eq!(all.len(), 2);
+    let unended = all.iter().find(|(n, _)| n != name).unwrap();
+    assert_eq!(unended.1.meta.status, crate::skills::Status::Unconfirmed);
+    drop(server);
+
+    // An agent that only runs a skill and never ends its task: the use counts.
+    let gate = Gate::new(
+        Policy::agent(),
+        Roots::new(&[input.0.clone()], &[output.0.clone()]).unwrap(),
+    );
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(Store::new(&lib.0));
+    tool(&mut server, "iai_skill_run", json!({"name": name}));
+    server.end_session();
+    assert_eq!(store.load(name).unwrap().meta.uses, 2);
+    assert_eq!(store.list().len(), 2);
+}

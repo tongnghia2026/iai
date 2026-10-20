@@ -940,6 +940,10 @@ pub struct ChromeIntent {
     pub pro_issue: Option<crate::pro::issue::Ask>,
     /// Let AI agents on this machine run commands in the window, or stop.
     pub agent_control: Option<bool>,
+    /// Show the skill library's folder in Explorer.
+    pub open_skills_folder: bool,
+    /// Take this skill out of the library (it is kept aside, not deleted).
+    pub remove_skill: Option<String>,
     pub cursor_left: bool,
     pub cursor_entered: bool,
     pub window_minimize: bool,

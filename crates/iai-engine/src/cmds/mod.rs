@@ -24,6 +24,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(doc::Show);
     r.register(doc::RenderPreview);
     r.register(file::NewDocument);
+    r.register(file::ListFiles);
     r.register(file::OpenFile);
     r.register(file::SaveFile);
     r.register(file::ExportImage);

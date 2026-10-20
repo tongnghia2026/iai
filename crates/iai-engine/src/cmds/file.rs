@@ -160,6 +160,131 @@ impl Validate for OpenParams {
     }
 }
 
+/// Image endings `file.list` reads the pixel size of.
+const LISTED_IMAGES: [&str; 8] = ["jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp", "gif"];
+/// The most files one listing names.
+const MAX_LISTED: usize = 2000;
+
+static LIST: CommandMeta = CommandMeta {
+    id: "file.list",
+    label_vi: "Xem file trong thư mục",
+    label_en: "List Files",
+    doc: "The files and sub-folders of a folder (inside the folders granted): each file's name, \
+          full path and size, and an image's size in pixels; by name. `ext` keeps only those \
+          endings (`[\"jpg\", \"png\"]`). Use it to find what to open; it changes nothing.",
+    effects: &[Effect::ReadFiles],
+    featured: true,
+};
+
+pub struct ListFiles;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListFilesParams {
+    /// The folder.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: String,
+    /// Only files with these endings, without the dot, any case; every file when left out.
+    #[serde(default)]
+    pub ext: Vec<String>,
+}
+impl Validate for ListFilesParams {}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedFile {
+    pub name: String,
+    pub path: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_px: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_px: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    pub folder: String,
+    pub files: Vec<ListedFile>,
+    pub folders: Vec<String>,
+    /// Files past the first 2000, not named.
+    pub more: usize,
+}
+
+impl Command for ListFiles {
+    type Params = ListFilesParams;
+    type Output = Listing;
+
+    fn meta(&self) -> &'static CommandMeta {
+        &LIST
+    }
+
+    fn plan(&self, _: &mut Session<'_>, p: ListFilesParams) -> Result<Plan<Listing>, CmdError> {
+        let dir = PathBuf::from(&p.path);
+        let read = std::fs::read_dir(&dir).map_err(|e| {
+            CmdError::new(
+                ErrorCode::NotFound,
+                format!("no folder {}: {e}", dir.display()),
+            )
+            .vi(format!("Không có thư mục {}", dir.display()))
+        })?;
+        let want: Vec<String> = p
+            .ext
+            .iter()
+            .map(|e| e.trim_start_matches('.').to_lowercase())
+            .collect();
+        let mut files = Vec::new();
+        let mut folders = Vec::new();
+        for entry in read.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => folders.push(name),
+                Ok(t) if t.is_file() => {
+                    let ext = Path::new(&name)
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    if want.is_empty() || want.contains(&ext) {
+                        files.push((name, entry.path(), ext));
+                    }
+                }
+                _ => {}
+            }
+        }
+        files.sort_by_key(|(name, ..)| name.to_lowercase());
+        folders.sort_by_key(|n| n.to_lowercase());
+        let more = files.len().saturating_sub(MAX_LISTED);
+        files.truncate(MAX_LISTED);
+        let files = files
+            .into_iter()
+            .map(|(name, path, ext)| {
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let size = LISTED_IMAGES
+                    .contains(&ext.as_str())
+                    .then(|| image::image_dimensions(&path).ok())
+                    .flatten();
+                ListedFile {
+                    name,
+                    path: path.display().to_string(),
+                    bytes,
+                    width_px: size.map(|s| s.0),
+                    height_px: size.map(|s| s.1),
+                }
+            })
+            .collect();
+        Ok(Plan::Done(Listing {
+            folder: dir.display().to_string(),
+            files,
+            folders,
+            more,
+        }))
+    }
+}
+
 static OPEN: CommandMeta = CommandMeta {
     id: "file.open",
     label_vi: "Mở file",

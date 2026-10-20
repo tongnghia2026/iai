@@ -197,11 +197,91 @@ impl App {
             } else {
                 String::new()
             },
+            skills_dir: if open {
+                iai_automation::skills::default_root().display().to_string()
+            } else {
+                String::new()
+            },
+            skills: if open {
+                self.shell
+                    .agent_skills
+                    .as_ref()
+                    .map(|(_, rows)| rows.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         }
     }
 
-    /// Every frame: answer what agents asked.
+    /// The library as the dialog lists it: last used first.
+    fn read_skills() -> Vec<crate::ui::SkillRow> {
+        let store = iai_automation::skills::Store::new(iai_automation::skills::default_root());
+        let mut skills = store.list();
+        skills.sort_by_key(|(_, r)| std::cmp::Reverse(r.meta.last_used_at.max(r.meta.created_at)));
+        skills
+            .into_iter()
+            .map(|(name, r)| {
+                let at = r.meta.last_used_at.max(r.meta.created_at);
+                crate::ui::SkillRow {
+                    title: if r.meta.title.trim().is_empty() {
+                        name.clone()
+                    } else {
+                        r.meta.title.clone()
+                    },
+                    name,
+                    status: r.meta.status.vi(r.meta.uses),
+                    when: if at == 0 {
+                        String::new()
+                    } else {
+                        crate::diag::local_minute(
+                            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(at),
+                        )
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Show the library's folder (made if it is not there yet).
+    pub(crate) fn open_skills_folder(&mut self) {
+        let dir = iai_automation::skills::default_root();
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(windows)]
+        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+    }
+
+    /// Take a skill out of the library, into its `.da_xoa` folder.
+    pub(crate) fn remove_skill(&mut self, name: &str) {
+        let store = iai_automation::skills::Store::new(iai_automation::skills::default_root());
+        let title = store
+            .load(name)
+            .map(|r| r.meta.title)
+            .unwrap_or_else(|_| name.to_string());
+        self.shell.status_msg = match store.remove(name) {
+            Ok(_) => format!(
+                "Đã xóa kỹ năng «{title}» (cất trong thư mục {} của kho kỹ năng)",
+                iai_automation::skills::REMOVED
+            ),
+            Err(e) => format!("Không xóa được kỹ năng «{title}»: {}", e.message),
+        };
+        self.shell.agent_skills = None;
+    }
+
+    /// Every frame: answer what agents asked; while the dialog is open, keep
+    /// its list of skills fresh (an agent may be saving one meanwhile).
     pub(crate) fn poll_agent_link(&mut self) {
+        let open = self.shell.ui.support_dialog == Some(crate::ui::SupportDialog::Agent);
+        if !open {
+            self.shell.agent_skills = None;
+        } else if self
+            .shell
+            .agent_skills
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(3))
+        {
+            self.shell.agent_skills = Some((std::time::Instant::now(), Self::read_skills()));
+        }
         // A few at most a frame: the window keeps drawing.
         for _ in 0..8 {
             let Some(request) = self.shell.agent_link.as_ref().and_then(|l| l.server.next()) else {

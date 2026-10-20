@@ -119,6 +119,11 @@ impl Gate {
         self.commands = commands.iter().map(|c| (c.id.clone(), c.clone())).collect();
     }
 
+    /// A command the host has, by id.
+    pub fn info(&self, id: &str) -> Option<&CommandInfo> {
+        self.commands.get(id)
+    }
+
     /// Whether a command may run at all for this agent: its effects were
     /// granted, and the file ones have a folder to work in.
     pub fn allows(&self, info: &CommandInfo) -> bool {

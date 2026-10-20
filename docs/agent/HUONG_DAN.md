@@ -31,3 +31,21 @@ làm ảnh thẻ, xếp ảnh in, xuất PDF… Bạn chỉ cần nói việc b�
 - Làm ảnh thẻ và xếp ảnh in là phần của gói Pro: máy phải đã mở khóa Pro hoặc đang dùng thử.
 - Không muốn mở iAi: xóa chữ `"--bridge",` trong đoạn cấu hình; khi đó AI tự làm việc
   riêng, kết quả ghi ra thư mục đã cho.
+
+## Kỹ năng đã lưu
+
+Mỗi việc AI làm xong và đạt, iAi **tự lưu thành một kỹ năng** — bạn không phải làm gì. Lần
+sau bạn nhờ việc tương tự (kể cả với một AI khác), AI tìm trong kho trước, có rồi thì lấy ra
+chạy ngay, không phải mò lại từ đầu: nhanh hơn, tốn ít lượt AI hơn, kết quả lần nào cũng như
+nhau.
+
+- Kho nằm ở thư mục `Documents\iAi_Ky_nang` (mỗi kỹ năng một thư mục con, có file `SKILL.md`
+  đọc được bằng mắt).
+- Xem danh sách trong **Help ▸ Cho AI điều khiển iAi…**, phần **Kỹ năng đã lưu**: tên, đã dùng
+  mấy lần, lần dùng gần nhất. Bấm **Mở thư mục kỹ năng** để xem file.
+- Không muốn giữ một kỹ năng: bấm dòng **Xóa kỹ năng…** dưới danh sách, chọn kỹ năng, bấm
+  **Xóa**. iAi cất nó sang thư mục `.da_xoa` trong kho, cần thì lấy lại được.
+- Việc giống hệt lần trước thì iAi chỉ ghi thêm một lần dùng; cùng việc nhưng khác cỡ ảnh, màu
+  nền… thì iAi thêm chỗ chọn vào kỹ năng cũ, không đẻ thêm kỹ năng mới.
+- Có sẵn ba kỹ năng mẫu: **ảnh thẻ hàng loạt → tờ in → PDF**, **thiệp 20/10 tô màu cho cả
+  lớp** (cần Python trên máy), **thêm lớp cỏ hoa lên mọi trang PDF**.

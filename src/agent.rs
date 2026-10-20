@@ -10,6 +10,11 @@
 //!   (`[{"command": …, "args": …}, …]`, or `{"calls": […], "atomic": true}`)
 //!   and print what each answered. A script that is not atomic may be longer
 //!   than a batch: it runs a batch at a time on the same documents.
+//! - `iai.exe run --skill NAME [--param NAME=VALUE]… [same options]`: run a
+//!   saved skill from the library, no agent needed.
+//!
+//! The skill library (`--skills DIR`, `Documents\iAi_Ky_nang` by default)
+//! is where `iai.exe mcp` keeps the tasks agents finish well.
 //!
 //! Files are read and written only inside the folders granted with
 //! `--read-root` / `--write-root`. Printing and the network are off unless
@@ -28,12 +33,15 @@ iAi for AI agents and scripts (no window)
   iai.exe mcp [options]            MCP server on stdin/stdout
   iai.exe mcp --bridge [options]   MCP server on the iAi window that is open
   iai.exe run SCRIPT.json [options]
+  iai.exe run --skill NAME [--param NAME=VALUE]... [options]
 
 options:
   --read-root DIR       a folder files may be read from (repeat for more)
   --write-root DIR      a folder files may be written to (and read from)
   --allow-print         let commands print (paper and ink)
   --allow-network       let commands use the network (model downloads)
+  --dry-run             with --skill: check its params and commands, run nothing
+  --skills DIR          the skill library (default Documents\\iAi_Ky_nang)
   --control-file FILE   where the open window says how to reach it
                         (default %APPDATA%\\IAI\\control.json)
 ";
@@ -47,6 +55,10 @@ struct Options {
     bridge: bool,
     control: Option<PathBuf>,
     script: Option<PathBuf>,
+    skills: Option<PathBuf>,
+    skill: Option<String>,
+    params: Vec<(String, String)>,
+    dry_run: bool,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -58,6 +70,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
         bridge: false,
         control: None,
         script: None,
+        skills: None,
+        skill: None,
+        params: Vec::new(),
+        dry_run: false,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -70,8 +86,18 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--read-root" => o.read.push(value("--read-root")?),
             "--write-root" => o.write.push(value("--write-root")?),
             "--control-file" => o.control = Some(value("--control-file")?),
+            "--skills" => o.skills = Some(value("--skills")?),
+            "--skill" => o.skill = Some(value("--skill")?.display().to_string()),
+            "--param" => {
+                let pair = value("--param")?.display().to_string();
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| format!("--param takes NAME=VALUE, not {pair}"))?;
+                o.params.push((k.trim().to_string(), v.to_string()));
+            }
             "--allow-print" => o.print = true,
             "--allow-network" => o.network = true,
+            "--dry-run" => o.dry_run = true,
             "--bridge" => o.bridge = true,
             "-h" | "--help" => return Err(String::new()),
             other if !other.starts_with('-') && o.script.is_none() => {
@@ -166,17 +192,31 @@ pub fn run_if_asked() -> Option<i32> {
         let engine = Engine::new(registry_for_agents(), Source::Agent, policy(&options));
         Box::new(LocalHost::new(engine))
     };
-    let code = match mode.as_str() {
-        "mcp" => serve(host.as_mut(), gate),
+    let library = iai_automation::skills::Store::new(
+        options
+            .skills
+            .clone()
+            .unwrap_or_else(iai_automation::skills::default_root),
+    );
+    let code = match (mode.as_str(), &options.skill) {
+        ("mcp", _) => serve(host.as_mut(), gate, library),
+        (_, Some(name)) => run_skill(
+            host.as_mut(),
+            gate,
+            &library,
+            name,
+            &options.params,
+            options.dry_run,
+        ),
         _ => run_script(host.as_mut(), gate, options.script.as_deref()),
     };
     crate::diag::finish();
     Some(code)
 }
 
-fn serve(host: &mut dyn Host, gate: Gate) -> i32 {
+fn serve(host: &mut dyn Host, gate: Gate, library: iai_automation::skills::Store) -> i32 {
     let mut server = match iai_automation::mcp::Server::new(host, gate, &version()) {
-        Ok(s) => s,
+        Ok(s) => s.with_skills(library),
         Err(e) => {
             eprintln!("iai: {}", e.message);
             return 1;
@@ -188,6 +228,86 @@ fn serve(host: &mut dyn Host, gate: Gate) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("iai: {e}");
+            1
+        }
+    }
+}
+
+/// `--param` text as a value: JSON when it reads as JSON (numbers, true,
+/// lists), else the text itself.
+fn param_value(text: &str) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) if !v.is_string() => v,
+        _ => serde_json::Value::String(text.to_string()),
+    }
+}
+
+/// `iai.exe run --skill`: a saved skill from start to end, no agent.
+fn run_skill(
+    host: &mut dyn Host,
+    mut gate: Gate,
+    library: &iai_automation::skills::Store,
+    name: &str,
+    params: &[(String, String)],
+    dry_run: bool,
+) -> i32 {
+    match host.commands() {
+        Ok(list) => gate.learn(&list),
+        Err(e) => {
+            eprintln!("iai: {}", e.message);
+            return 1;
+        }
+    }
+    let given: serde_json::Map<String, serde_json::Value> = params
+        .iter()
+        .map(|(k, v)| (k.clone(), param_value(v)))
+        .collect();
+    let given = serde_json::Value::Object(given);
+    let (mut run, plan) = match iai_automation::skills::Run::start(library, &gate, name, &given) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("{}", serde_json::json!({"failed": {"error": e}}));
+            return 1;
+        }
+    };
+    // Its SKILL.md, written if a recipe came without one.
+    let _ = library.skill_md(name);
+    if dry_run {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"status": "checked", "plan": plan}))
+                .unwrap_or_default()
+        );
+        return 0;
+    }
+    match run.advance(host, &gate, library, None) {
+        Ok(_) => {
+            library.note(
+                name,
+                &format!("chạy · xong · {} lệnh · iai.exe run", run.calls),
+            );
+            let next = plan
+                .get("howToRun")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "done", "skill": name, "calls": run.calls,
+                    "written": run.written, "howToRun": next,
+                }))
+                .unwrap_or_default()
+            );
+            0
+        }
+        Err(f) => {
+            let broken = matches!(
+                f.error.code,
+                iai_engine::ErrorCode::BadParams | iai_engine::ErrorCode::NotFound
+            );
+            let _ = library.record_use(name, false, broken, "", "iai.exe run");
+            println!("{}", serde_json::json!({"failed": f.to_json()}));
             1
         }
     }
@@ -284,6 +404,7 @@ mod tests {
         .collect();
         let o = parse(&args).unwrap();
         assert_eq!(o.read, [PathBuf::from("in"), PathBuf::from("in2")]);
+        assert!(o.skill.is_none() && o.params.is_empty());
         assert_eq!(o.write, [PathBuf::from("out")]);
         assert!(o.print && !o.network && !o.bridge);
         assert_eq!(o.script, Some(PathBuf::from("script.json")));
@@ -291,5 +412,25 @@ mod tests {
         assert!(!policy(&o).grants(&[Effect::Network]));
         assert!(parse(&["--read-root".to_string()]).is_err());
         assert!(parse(&["--bogus".to_string()]).is_err());
+
+        let skill: Vec<String> = [
+            "--skill", "anh-the", "--param", "co=2x3", "--param", "so_ban=4", "--skills", "kho",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let o = parse(&skill).unwrap();
+        assert_eq!(o.skill.as_deref(), Some("anh-the"));
+        assert_eq!(
+            o.params,
+            [
+                ("co".to_string(), "2x3".to_string()),
+                ("so_ban".to_string(), "4".to_string())
+            ]
+        );
+        assert_eq!(o.skills, Some(PathBuf::from("kho")));
+        assert_eq!(param_value("4"), serde_json::json!(4));
+        assert_eq!(param_value("2x3"), serde_json::json!("2x3"));
+        assert!(parse(&["--param".to_string(), "no-equals".to_string()]).is_err());
     }
 }

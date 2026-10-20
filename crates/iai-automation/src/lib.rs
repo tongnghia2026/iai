@@ -12,6 +12,8 @@
 //!   TCP, a 256-bit token) and the client that uses it.
 //! - [`script`]: a script of calls (`iai.exe run`), longer than a batch when
 //!   it is not all or nothing.
+//! - [`skills`]: the skill library — tasks agents did well, kept as recipes
+//!   iAi runs again (found, run, and saved from what an agent did).
 //!
 //! Plan: docs/planning/KIEN_TRUC_AGENT_NATIVE_2026-10-14.md (Phase 4).
 #![forbid(unsafe_code)]
@@ -25,6 +27,7 @@ pub mod jsonrpc;
 pub mod mcp;
 pub mod schema;
 pub mod script;
+pub mod skills;
 
 pub use gate::{Gate, Roots};
 pub use host::{Host, LocalHost};

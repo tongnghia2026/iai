@@ -3,6 +3,11 @@
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
 20/10/2026
+- Trợ lý AI điều khiển iAi nay tự nhớ cách làm: việc nào làm xong tốt được cất thành một «kỹ năng» trong thư mục Tài liệu ▸ iAi_Ky_nang. Lần sau nhờ việc giống vậy (đổi thư mục, đổi số ảnh) thì AI lấy ra làm ngay, nhanh hơn và tốn ít lượt hơn rất nhiều.
+- Cửa sổ Help ▸ «Cho AI điều khiển iAi» có thêm mục «Kỹ năng đã lưu»: xem các kỹ năng, mở thư mục kỹ năng, xóa kỹ năng không cần (xóa xong vẫn lấy lại được).
+- Trợ lý AI xem được trong một thư mục có những ảnh nào, cỡ bao nhiêu, trước khi làm hàng loạt, nên ít làm sót ảnh hơn.
+
+20/10/2026
 - Crop ra khổ in cố định (ví dụ ảnh chụp điện thoại ra khổ A3) nhanh gấp khoảng 5 lần: bấm Enter xong là thấy ảnh, cửa sổ không còn đứng hình.
 - «Làm sạch bản scan» gần như tức thì: mở bảng, kéo thanh chỉnh hay bấm «Áp dụng» đều không còn đứng hình 1–2 giây. Ảnh ra vẫn y như trước.
 - Chọn nhiều layer (cả layer chữ, hình vẽ) rồi Free Transform, kéo, xoay hay lật: các layer không còn nhảy về chỗ cũ hay lệch nhau. Layer chữ và hình vẽ đã xoay / lật giữ đúng hướng ở những lần sửa sau.
