@@ -23,14 +23,7 @@ static NOTICE: Mutex<Option<&'static str>> = Mutex::new(None);
 static WRITER: Mutex<()> = Mutex::new(());
 
 pub fn prefs_path() -> PathBuf {
-    let base = if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata).join("IAI")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share").join("iai")
-    } else {
-        PathBuf::from(".")
-    };
-    base.join("prefs.json")
+    iai_platform::app_data::dir().join("prefs.json")
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -86,7 +79,7 @@ fn read_at(path: &Path) -> Loaded {
                 sound: None,
                 notice: None,
                 unreadable: missing_or_unreadable.is_err(),
-            }
+            };
         }
     };
     if let Some(prefs) = parse(&bytes) {

@@ -965,21 +965,21 @@ pub fn spot_separations(
         // This object now hides what is below — but only where it paints opaquely
         // (a non-overprint paint). Overprints let inks below print through.
         let mut opaque = vec![0f32; n];
-        if let Some(cov) = &fill_cov {
-            if !obj.fill_overprint {
-                for (o, &c) in opaque.iter_mut().zip(cov) {
-                    if c > *o {
-                        *o = c;
-                    }
+        if let Some(cov) = &fill_cov
+            && !obj.fill_overprint
+        {
+            for (o, &c) in opaque.iter_mut().zip(cov) {
+                if c > *o {
+                    *o = c;
                 }
             }
         }
-        if let Some(cov) = &stroke_cov {
-            if !obj.stroke_overprint {
-                for (o, &c) in opaque.iter_mut().zip(cov) {
-                    if c > *o {
-                        *o = c;
-                    }
+        if let Some(cov) = &stroke_cov
+            && !obj.stroke_overprint
+        {
+            for (o, &c) in opaque.iter_mut().zip(cov) {
+                if c > *o {
+                    *o = c;
                 }
             }
         }
@@ -1976,10 +1976,10 @@ fn object_gs(o: &PdfVectorObject) -> Option<GsState> {
 fn gs_states(objects: &[PdfVectorObject]) -> Vec<GsState> {
     let mut states: Vec<GsState> = Vec::new();
     for o in objects {
-        if let Some(s) = object_gs(o) {
-            if !states.contains(&s) {
-                states.push(s);
-            }
+        if let Some(s) = object_gs(o)
+            && !states.contains(&s)
+        {
+            states.push(s);
         }
     }
     states
@@ -2034,10 +2034,10 @@ fn spot_plates(objects: &[PdfVectorObject]) -> Vec<SpotPlate> {
     let mut plates: Vec<SpotPlate> = Vec::new();
     for o in objects {
         for paint in [o.fill, o.stroke].into_iter().flatten() {
-            if let PdfPaintColor::Spot { name, alt, .. } = paint {
-                if !plates.iter().any(|p| p.name == name) {
-                    plates.push(SpotPlate { name, alt });
-                }
+            if let PdfPaintColor::Spot { name, alt, .. } = paint
+                && !plates.iter().any(|p| p.name == name)
+            {
+                plates.push(SpotPlate { name, alt });
             }
         }
     }
@@ -2311,44 +2311,42 @@ pub fn append_vector_content(
                     _ => out.push_str(&color.fill_op()),
                 }
             }
-            if has_stroke {
-                if let Some(color) = o.stroke {
-                    use iai_doc::vector::style::{LineCap, LineJoin};
-                    let cap = match o.stroke_cap {
-                        LineCap::Butt => 0,
-                        LineCap::Round => 1,
-                        LineCap::Square => 2,
-                    };
-                    let join = match o.stroke_join {
-                        LineJoin::Miter => 0,
-                        LineJoin::Round => 1,
-                        LineJoin::Bevel => 2,
-                    };
-                    let dash = o
-                        .stroke_dash
-                        .iter()
-                        .map(|value| format!("{:.3}", value * sx))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    match color {
-                        PdfPaintColor::Spot { name, tint, .. } => {
-                            out.push_str(&format!("/IaiSp{} CS\n{tint:.4} SCN\n", spot_index(name)))
-                        }
-                        PdfPaintColor::Cmyk([c, m, y, k]) if cmyk_cs.is_some() => {
-                            out.push_str(&format!(
-                                "/{} CS\n{c:.4} {m:.4} {y:.4} {k:.4} SCN\n",
-                                cmyk_cs.unwrap()
-                            ))
-                        }
-                        _ => out.push_str(&color.stroke_op()),
+            if has_stroke && let Some(color) = o.stroke {
+                use iai_doc::vector::style::{LineCap, LineJoin};
+                let cap = match o.stroke_cap {
+                    LineCap::Butt => 0,
+                    LineCap::Round => 1,
+                    LineCap::Square => 2,
+                };
+                let join = match o.stroke_join {
+                    LineJoin::Miter => 0,
+                    LineJoin::Round => 1,
+                    LineJoin::Bevel => 2,
+                };
+                let dash = o
+                    .stroke_dash
+                    .iter()
+                    .map(|value| format!("{:.3}", value * sx))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                match color {
+                    PdfPaintColor::Spot { name, tint, .. } => {
+                        out.push_str(&format!("/IaiSp{} CS\n{tint:.4} SCN\n", spot_index(name)))
                     }
-                    out.push_str(&format!(
-                        "{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
-                        o.stroke_width_px * sx,
-                        o.stroke_miter_limit.max(1.0),
-                        o.stroke_dash_offset * sx,
-                    ));
+                    PdfPaintColor::Cmyk([c, m, y, k]) if cmyk_cs.is_some() => {
+                        out.push_str(&format!(
+                            "/{} CS\n{c:.4} {m:.4} {y:.4} {k:.4} SCN\n",
+                            cmyk_cs.unwrap()
+                        ))
+                    }
+                    _ => out.push_str(&color.stroke_op()),
                 }
+                out.push_str(&format!(
+                    "{:.3} w\n{cap} J\n{join} j\n{:.3} M\n[{dash}] {:.3} d\n",
+                    o.stroke_width_px * sx,
+                    o.stroke_miter_limit.max(1.0),
+                    o.stroke_dash_offset * sx,
+                ));
             }
             append_pdf_path(out, &o.path, mx, my);
             let op = match (has_solid_fill, has_stroke) {
@@ -3205,7 +3203,7 @@ mod tests {
     fn pdf_text_curves_follow_the_visible_tile_ink_position() {
         use iai_doc::layer::LayerType;
         use iai_raster::tile::TileMap;
-        use iai_text::text::{rasterize, TextData};
+        use iai_text::text::{TextData, rasterize};
 
         let text = TextData {
             content: "Visible text".to_string(),
@@ -3252,7 +3250,7 @@ mod tests {
     fn large_centered_text_keeps_its_visible_center_in_pdf_curves() {
         use iai_doc::layer::LayerType;
         use iai_raster::tile::TileMap;
-        use iai_text::text::{rasterize, TextData};
+        use iai_text::text::{TextData, rasterize};
 
         let text = TextData {
             content: "IAI DESIGN STUDIO".to_string(),

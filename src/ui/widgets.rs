@@ -310,7 +310,7 @@ fn value_to_pos(value: f32, min: f32, max: f32, power: f32) -> f32 {
 
 #[cfg(test)]
 mod slider_ease_tests {
-    use super::{pos_to_value, value_to_pos, EXPOSURE_POS_POWER};
+    use super::{EXPOSURE_POS_POWER, pos_to_value, value_to_pos};
 
     #[test]
     fn pos_value_roundtrip_and_anchors() {
@@ -555,12 +555,13 @@ fn stacked_slider(
     // drag or click what it landed on, this row's track included. Left to
     // egui the field holds the keyboard until a click, and a drag is not
     // one: the sliders stayed deaf until Enter or Esc.
-    if ui.input(|i| i.pointer.any_pressed()) && !pressed_in_value_box {
-        if let Some(text) = ui.ctx().data_mut(|d| d.remove_temp::<String>(edit_id)) {
-            ui.memory_mut(|m| m.surrender_focus(te_id));
-            if take_typed(&text, min, max, value) {
-                response.mark_changed();
-            }
+    if ui.input(|i| i.pointer.any_pressed())
+        && !pressed_in_value_box
+        && let Some(text) = ui.ctx().data_mut(|d| d.remove_temp::<String>(edit_id))
+    {
+        ui.memory_mut(|m| m.surrender_focus(te_id));
+        if take_typed(&text, min, max, value) {
+            response.mark_changed();
         }
     }
     let editing = ui
@@ -579,14 +580,12 @@ fn stacked_slider(
                 d.insert_temp(edit_id, value_text.clone());
                 d.insert_temp(focus_id, true);
             });
-        } else if !pressed_in_value_box {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
-                let new_value = to_value(t);
-                if (*value - new_value).abs() > f32::EPSILON {
-                    *value = new_value;
-                    response.mark_changed();
-                }
+        } else if !pressed_in_value_box && let Some(pos) = response.interact_pointer_pos() {
+            let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
+            let new_value = to_value(t);
+            if (*value - new_value).abs() > f32::EPSILON {
+                *value = new_value;
+                response.mark_changed();
             }
         }
     }

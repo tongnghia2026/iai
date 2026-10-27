@@ -111,8 +111,15 @@ impl SelectionOutcome {
         else {
             return None;
         };
-        let [add_keys, add_bar, sub_keys, sub_bar, int_keys, int_bar, int_covers] =
-            NOTHING_HAPPENED_NOTES;
+        let [
+            add_keys,
+            add_bar,
+            sub_keys,
+            sub_bar,
+            int_keys,
+            int_bar,
+            int_covers,
+        ] = NOTHING_HAPPENED_NOTES;
         Some(match mode {
             SelectionMode::Add if !changed => {
                 if by_keys {

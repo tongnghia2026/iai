@@ -152,18 +152,10 @@ impl DodgeBurnTool {
 
 impl Tool for DodgeBurnTool {
     fn id(&self) -> &'static str {
-        if self.burn {
-            "burn"
-        } else {
-            "dodge"
-        }
+        if self.burn { "burn" } else { "dodge" }
     }
     fn name(&self) -> &str {
-        if self.burn {
-            "Burn"
-        } else {
-            "Dodge"
-        }
+        if self.burn { "Burn" } else { "Dodge" }
     }
     fn shortcut(&self) -> Option<char> {
         Some('O')

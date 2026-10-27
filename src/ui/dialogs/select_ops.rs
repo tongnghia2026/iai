@@ -116,7 +116,7 @@ pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut 
     });
 
     if do_feather {
-        actions.sel.selection_feather = Some(current_radius);
+        actions.modify_selection("feather", current_radius);
         actions.sel.show_feather_dialog = Some(false);
     }
     if do_cancel || !open {
@@ -176,14 +176,10 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
 
     if apply {
         match kind {
-            SelectionModifyKind::Expand => actions.sel.selection_grow = Some(amount.round() as u32),
-            SelectionModifyKind::Contract => {
-                actions.sel.selection_shrink = Some(amount.round() as u32)
-            }
-            SelectionModifyKind::Smooth => actions.sel.selection_smooth = Some(amount),
-            SelectionModifyKind::Border => {
-                actions.sel.selection_border = Some(amount.round() as u32)
-            }
+            SelectionModifyKind::Expand => actions.modify_selection("grow", amount.round()),
+            SelectionModifyKind::Contract => actions.modify_selection("shrink", amount.round()),
+            SelectionModifyKind::Smooth => actions.modify_selection("smooth", amount),
+            SelectionModifyKind::Border => actions.modify_selection("border", amount.round()),
         }
         actions.sel.close_modify_dialog = true;
     }
@@ -275,7 +271,13 @@ pub(crate) fn color_range_dialog(ctx: &egui::Context, data: &UiData, actions: &m
         });
 
     if do_apply {
-        actions.sel.apply_color_range = true;
+        actions.run(
+            "select.color_range",
+            serde_json::json!({
+                "color": crate::ui::intent::color_hex(data.dialogs.color_range_color),
+                "fuzziness": data.dialogs.color_range_fuzziness,
+            }),
+        );
         actions.sel.show_color_range_dialog = Some(false);
     } else if do_cancel || !open {
         actions.sel.show_color_range_dialog = Some(false);
@@ -346,8 +348,6 @@ fn color_range_preview_ui(ui: &mut egui::Ui, data: &UiData) {
 }
 
 pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    use crate::core::canvas::{StrokeLocation, StrokeParams};
-
     let mut open = true;
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut do_apply = enter_pressed && data.sel.has_selection;
@@ -456,16 +456,19 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
 
     if do_apply {
         let location = match loc_idx {
-            0 => StrokeLocation::Inside,
-            2 => StrokeLocation::Outside,
-            _ => StrokeLocation::Center,
+            0 => "inside",
+            2 => "outside",
+            _ => "center",
         };
-        actions.sel.apply_stroke = Some(StrokeParams {
-            color: [color.r(), color.g(), color.b(), 255],
-            width: width.round().max(1.0) as u32,
-            location,
-            opacity: (opacity / 100.0).clamp(0.0, 1.0),
-        });
+        actions.run(
+            "edit.stroke",
+            serde_json::json!({
+                "color": crate::ui::color_hex([color.r(), color.g(), color.b(), 255]),
+                "widthPx": (width.round().max(1.0) as u32).min(500),
+                "location": location,
+                "opacity": (opacity / 100.0).clamp(0.0, 1.0),
+            }),
+        );
         actions.sel.show_stroke_dialog = Some(false);
     }
     if do_cancel || !open {

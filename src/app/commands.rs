@@ -771,6 +771,23 @@ impl Command {
         }
     }
 
+    /// The engine command the key runs, when it is one, with its params: the
+    /// same command an agent runs. The others pick a tool, open a dialog or
+    /// change the view, or run one with params the app holds (Auto Levels).
+    pub fn engine_command(self) -> Option<(&'static str, serde_json::Value)> {
+        let call = match self {
+            Command::SelectAll => ("select.all", serde_json::json!({})),
+            Command::LayerViaCopy => ("layer.via_copy", serde_json::json!({})),
+            Command::Desaturate => (
+                "image.adjust",
+                serde_json::json!({"adjustment": {"kind": "desaturate"}}),
+            ),
+            Command::Invert => ("layer.invert", serde_json::json!({})),
+            _ => return None,
+        };
+        Some(call)
+    }
+
     /// The command saved under `id`, if this build knows it.
     pub fn from_id(id: &str) -> Option<Command> {
         Command::all().find(|cmd| cmd.id() == id)
@@ -1001,6 +1018,23 @@ impl KeyMap {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A key that is an engine command names one this build has, with
+    /// params it takes.
+    #[test]
+    fn the_keys_that_are_engine_commands_name_real_ones() {
+        let registry = crate::app::engine::command_registry();
+        let ids: Vec<String> = registry.list().into_iter().map(|c| c.id).collect();
+        let mut any = false;
+        for cmd in Command::all() {
+            if let Some((id, args)) = cmd.engine_command() {
+                any = true;
+                assert!(ids.iter().any(|i| i == id), "{cmd:?} → {id}");
+                assert!(args.is_object(), "{cmd:?}");
+            }
+        }
+        assert!(any);
+    }
 
     #[test]
     fn every_command_appears_exactly_once() {

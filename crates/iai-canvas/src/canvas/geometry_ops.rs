@@ -41,7 +41,7 @@ mod crop_regression_tests {
     use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
     use iai_doc::vector::style::VectorStyle;
     use iai_geom::geometry::Point;
-    use iai_text::text::{rasterize_placed, TextData};
+    use iai_text::text::{TextData, rasterize_placed};
     use iai_vector::vector::raster::raster_geometry;
 
     fn square_object(at: (f32, f32)) -> VectorObjectData {
@@ -114,7 +114,9 @@ mod crop_regression_tests {
         for _ in 1..1000 {
             canvas.layer_stack.add_layer(257, 257);
         }
-        assert!(canvas.crop_transformed(128.5, 128.5, 257.0, 257.0, 257, 257, 0.0, 0.0, 0.0, true,));
+        assert!(
+            canvas.crop_transformed(128.5, 128.5, 257.0, 257.0, 257, 257, 0.0, 0.0, 0.0, true,)
+        );
         assert_eq!(canvas.layer_stack.layers.len(), 1000);
         assert_eq!(
             canvas
@@ -234,7 +236,9 @@ mod crop_regression_tests {
         let text_idx = canvas.layer_stack.add_layer(256, 256);
         set_text_layer(&mut canvas.layer_stack.layers[text_idx], (110, 100));
 
-        assert!(canvas.crop_transformed(128.0, 128.0, 128.0, 128.0, 128, 128, 0.0, 0.0, 0.0, true,));
+        assert!(
+            canvas.crop_transformed(128.0, 128.0, 128.0, 128.0, 128, 128, 0.0, 0.0, 0.0, true,)
+        );
         let path = &canvas.layer_stack.layers[0];
         let LayerType::Vector(VectorGeometry::Path(object)) = &path.layer_type else {
             panic!("affine crop rasterized a path");
@@ -305,10 +309,12 @@ mod crop_regression_tests {
             canvas.layer_stack.layers[0].layer_type,
             LayerType::Raster
         ));
-        assert!(canvas.layer_stack.layers[0]
-            .tiles
-            .content_bounds()
-            .is_some());
+        assert!(
+            canvas.layer_stack.layers[0]
+                .tiles
+                .content_bounds()
+                .is_some()
+        );
         assert!(
             canvas.layer_stack.layers[0].tiles.has_any_ink(),
             "projective rasterization must retain CMYK separations"
@@ -603,10 +609,8 @@ impl Canvas {
             }
         }
 
-        if expands_canvas {
-            if let Some(color) = background {
-                self.add_crop_background_if_missing(w, h, color);
-            }
+        if expands_canvas && let Some(color) = background {
+            self.add_crop_background_if_missing(w, h, color);
         }
 
         self.width = w;
@@ -867,10 +871,8 @@ impl Canvas {
             reconcile_affine_layer_model(layer, &source, forward);
         }
 
-        if extends_canvas {
-            if let Some(color) = background {
-                self.add_crop_background_if_missing(out_w, out_h, color);
-            }
+        if extends_canvas && let Some(color) = background {
+            self.add_crop_background_if_missing(out_w, out_h, color);
         }
 
         self.width = out_w;
@@ -1054,8 +1056,8 @@ impl Canvas {
         footprint: f32,
         keep_edge: bool,
     ) -> iai_raster::tile::TileMap {
-        use iai_raster::fast_math::{round_u16, round_u8};
-        use iai_raster::tile::{BilinearCursor, Tile, TileGrid, TilePos, TILE_SIZE};
+        use iai_raster::fast_math::{round_u8, round_u16};
+        use iai_raster::tile::{BilinearCursor, TILE_SIZE, Tile, TileGrid, TilePos};
         use rayon::prelude::*;
         // Per-pixel reads go through a dense index, not the map's hash.
         let grid = TileGrid::new(src);

@@ -680,11 +680,7 @@ mod legacy_toolbox {
     }
 
     fn toolbox_margin(docked: bool) -> i8 {
-        if docked {
-            5
-        } else {
-            8
-        }
+        if docked { 5 } else { 8 }
     }
 }
 

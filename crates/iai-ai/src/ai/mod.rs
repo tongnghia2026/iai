@@ -31,7 +31,7 @@ mod studio;
 #[cfg(feature = "pro")]
 pub use settings::AiProvider;
 #[cfg(feature = "pro")]
-pub use studio::{guarded_edit_prompt, AiPanelState, AiSource};
+pub use studio::{AiPanelState, AiSource, guarded_edit_prompt};
 
 /// Tests that run the ONNX models take turns: started together they starve
 /// one another past their own deadlines. The turn is held until the calling

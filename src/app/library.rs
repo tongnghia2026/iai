@@ -106,10 +106,10 @@ fn thumb_key(path: &Path) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
-    if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) {
-        if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
-            d.as_secs().hash(&mut hasher);
-        }
+    if let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified())
+        && let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH)
+    {
+        d.as_secs().hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
 }
@@ -140,12 +140,11 @@ fn load_source(path: &Path) -> Option<image::DynamicImage> {
 /// Runs on the worker thread — no egui/GPU access here.
 fn produce_thumb(path: &Path) -> Option<egui::ColorImage> {
     let cache = thumb_cache_file(path);
-    if let Some(cache) = &cache {
-        if let Ok(bytes) = std::fs::read(cache) {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                return Some(color_image_from_rgba(&img.to_rgba8()));
-            }
-        }
+    if let Some(cache) = &cache
+        && let Ok(bytes) = std::fs::read(cache)
+        && let Ok(img) = image::load_from_memory(&bytes)
+    {
+        return Some(color_image_from_rgba(&img.to_rgba8()));
     }
     let source = load_source(path)?;
     let thumb = source.thumbnail(THUMB_MAX, THUMB_MAX).to_rgba8();
@@ -185,10 +184,10 @@ impl ThumbCache {
             while let Ok(path) = req_rx.recv() {
                 // A file that fails to decode simply never sends a result; it
                 // stays flagged as requested so it is not retried in a loop.
-                if let Some(img) = produce_thumb(&path) {
-                    if res_tx.send((path, img)).is_err() {
-                        break; // UI dropped the receiver (app closing).
-                    }
+                if let Some(img) = produce_thumb(&path)
+                    && res_tx.send((path, img)).is_err()
+                {
+                    break; // UI dropped the receiver (app closing).
                 }
             }
         });
@@ -413,10 +412,8 @@ impl App {
                 }
             })
             .collect();
-        if enqueued {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if enqueued && let Some(w) = &self.win.window {
+            w.request_redraw();
         }
         view
     }
@@ -481,10 +478,8 @@ impl App {
         }
         // Kick one redraw so the next poll sees the fresh requests and then
         // sustains the loop itself until every thumbnail has landed.
-        if enqueued {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if enqueued && let Some(w) = &self.win.window {
+            w.request_redraw();
         }
 
         if let Some((path, kind)) = actions.library.select_entry.take() {

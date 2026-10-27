@@ -382,10 +382,10 @@ impl App {
         if self.docs.autosave_job.is_some() {
             return;
         }
-        if let Some(dir) = autosave_dir() {
-            if self.start_next_recovery_write(&dir) {
-                return;
-            }
+        if let Some(dir) = autosave_dir()
+            && self.start_next_recovery_write(&dir)
+        {
+            return;
         }
         self.autosave_active_flow_text();
     }

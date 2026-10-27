@@ -16,8 +16,8 @@
 //! ±`EXPOSURE_LIMIT`, the tone/colour controls ±`CONTROL_LIMIT`). Set
 //! `IAI_Q0_OUT` to also write `q0_slider_sweep.csv` for side-by-side inspection.
 
-use iai::core::develop::{DevelopSettings, CONTROL_LIMIT, EXPOSURE_LIMIT};
-use iai::core::develop_scene::{eval_scene_pixel, BaseLook};
+use iai::core::develop::{CONTROL_LIMIT, DevelopSettings, EXPOSURE_LIMIT};
+use iai::core::develop_scene::{BaseLook, eval_scene_pixel};
 use iai::core::perceptual_color::linear_srgb_to_oklab;
 
 /// Encoded-sRGB → linear. Local copy so the probe is self-contained.
@@ -286,6 +286,7 @@ fn develop_slider_sweep_baseline() {
     assert!(
         max_tone_hue_drift < 13.0,
         "tone slider rotated hue {max_tone_hue_drift:.1} deg on {} (via {}) — exceeds the 13 deg baseline",
-        worst_tone_hue.1, worst_tone_hue.0
+        worst_tone_hue.1,
+        worst_tone_hue.0
     );
 }

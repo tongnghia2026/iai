@@ -1,5 +1,5 @@
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
-use iai::core::develop_scene::{apply_scene_to_tilemap, eval_scene_pixel, BaseLook, SceneSource};
+use iai::core::develop_scene::{BaseLook, SceneSource, apply_scene_to_tilemap, eval_scene_pixel};
 
 #[test]
 fn scene_v1_neutral_reference_values_are_stable() {

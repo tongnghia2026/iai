@@ -22,7 +22,7 @@ use crate::model::text::TextFontFamily;
 use crate::page::{Page, PageId};
 use iai_color::color::Color;
 use iai_geom::geometry::Point;
-use iai_geom::units::{to_pixels, Unit};
+use iai_geom::units::{Unit, to_pixels};
 
 /// Canonical DPI for turning the model's physical units (mm / pt) into the
 /// pixel space the canvas and layout engine work in. Callers that render at a

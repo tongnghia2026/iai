@@ -9,7 +9,7 @@
 //! threshold into a local tolerance is the caller's job — that keeps the model
 //! independent of zoom, as the plan requires.
 
-use crate::vector::flatten::{flatten_contour, flatten_path, DEFAULT_TOLERANCE};
+use crate::vector::flatten::{DEFAULT_TOLERANCE, flatten_contour, flatten_path};
 use crate::vector::path::{FillRule, PathData};
 use iai_geom::geometry::Point;
 

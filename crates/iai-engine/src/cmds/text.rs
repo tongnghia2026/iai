@@ -6,7 +6,7 @@ use iai_history::command::LayerStructureCommand;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{parse_color, Bounds};
+use super::common::{Bounds, parse_color};
 use crate::{CmdError, Command, CommandMeta, Effect, EngineEvent, Plan, Session, Validate};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]

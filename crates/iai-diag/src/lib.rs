@@ -171,13 +171,13 @@ impl Drop for UiWork {
         }
         // The main window's frame accounts for itself, in more detail (`frame`).
         let ms = self.since.elapsed().as_millis();
-        if ms >= SLOW_MS && self.phase != Phase::Redraw {
-            if let Some(mut journal) = journal() {
-                if let Some(skipped) = journal.slow_events.pass(ms) {
-                    let text = format!("{} handler ran {ms} ms{skipped}", self.phase.label());
-                    journal.line("slow", &text);
-                }
-            }
+        if ms >= SLOW_MS
+            && self.phase != Phase::Redraw
+            && let Some(mut journal) = journal()
+            && let Some(skipped) = journal.slow_events.pass(ms)
+        {
+            let text = format!("{} handler ran {ms} ms{skipped}", self.phase.label());
+            journal.line("slow", &text);
         }
     }
 }
@@ -261,15 +261,17 @@ impl Journal {
     /// into the run otherwise.
     fn change(&mut self, kind: &'static str, key: &str, value: &str) {
         let now = Instant::now();
-        if let Some(run) = &mut self.run {
-            if run.kind == kind && run.key == key && now.duration_since(run.at) < RUN_GAP {
-                run.last.clear();
-                run.last.push_str(value);
-                run.at = now;
-                run.at_text = time_of(SystemTime::now());
-                run.count += 1;
-                return;
-            }
+        if let Some(run) = &mut self.run
+            && run.kind == kind
+            && run.key == key
+            && now.duration_since(run.at) < RUN_GAP
+        {
+            run.last.clear();
+            run.last.push_str(value);
+            run.at = now;
+            run.at_text = time_of(SystemTime::now());
+            run.count += 1;
+            return;
         }
         self.end_run();
         let at_text = time_of(SystemTime::now());
@@ -285,15 +287,15 @@ impl Journal {
     }
 
     fn end_run(&mut self) {
-        if let Some(run) = self.run.take() {
-            if run.count > 1 {
-                let text = format!(
-                    "{} ({} changes in a row)",
-                    join(&run.key, &format!("\u{2026} {}", run.last)),
-                    run.count
-                );
-                self.write(&run.at_text, run.kind, &text);
-            }
+        if let Some(run) = self.run.take()
+            && run.count > 1
+        {
+            let text = format!(
+                "{} ({} changes in a row)",
+                join(&run.key, &format!("\u{2026} {}", run.last)),
+                run.count
+            );
+            self.write(&run.at_text, run.kind, &text);
         }
     }
 
@@ -772,13 +774,12 @@ pub fn note_change(kind: &'static str, key: &str, value: &str) {
 pub fn frame(took: Duration, describe: impl FnOnce() -> String) {
     SHARED.frames.fetch_add(1, Ordering::Relaxed);
     let ms = took.as_millis();
-    if ms >= SLOW_MS {
-        if let Some(mut journal) = journal() {
-            if let Some(skipped) = journal.slow_frames.pass(ms) {
-                let text = format!("frame {ms} ms ({}){skipped}", describe());
-                journal.line("slow", &text);
-            }
-        }
+    if ms >= SLOW_MS
+        && let Some(mut journal) = journal()
+        && let Some(skipped) = journal.slow_frames.pass(ms)
+    {
+        let text = format!("frame {ms} ms ({}){skipped}", describe());
+        journal.line("slow", &text);
     }
     selftest::step();
 }

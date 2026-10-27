@@ -347,6 +347,70 @@ impl CropTool {
         }
     }
 
+    /// The `image.crop` call that does what [`Self::commit`] does on a page
+    /// of `canvas_w` × `canvas_h`, `background` filling what the crop adds
+    /// (a document with a Background); `None` when the frame is too small to
+    /// crop, which `commit` cancels.
+    pub fn engine_call(
+        &self,
+        canvas_w: u32,
+        canvas_h: u32,
+        background: Option<[u8; 4]>,
+    ) -> Option<serde_json::Value> {
+        use serde_json::json;
+        let x0 = self.crop_x0.min(self.crop_x1);
+        let y0 = self.crop_y0.min(self.crop_y1);
+        let x1 = self.crop_x0.max(self.crop_x1);
+        let y1 = self.crop_y0.max(self.crop_y1);
+        let (box_w, box_h) = (x1 - x0, y1 - y0);
+        if box_w < 1.0 || box_h < 1.0 {
+            return None;
+        }
+        let (out_w, out_h) = if self.mode == CropMode::FixedSize {
+            let (w_px, h_px) = self.fixed_size_pixels(canvas_w, canvas_h);
+            (w_px.round() as u32, h_px.round() as u32)
+        } else {
+            (box_w.round() as u32, box_h.round() as u32)
+        };
+        if out_w == 0 || out_h == 0 {
+            return None;
+        }
+        let no_scale = (out_w as f32 - box_w).abs() < 0.5 && (out_h as f32 - box_h).abs() < 0.5;
+        let identity_image = self.rotation.abs() < 0.001
+            && self.image_tx.abs() < 0.001
+            && self.image_ty.abs() < 0.001;
+        let mut call = if identity_image && no_scale {
+            let (ix0, iy0) = (x0.round() as i32, y0.round() as i32);
+            let (ix1, iy1) = (x1.round() as i32, y1.round() as i32);
+            json!({"rect": {
+                "x": ix0,
+                "y": iy0,
+                "w": (ix1 - ix0).max(1),
+                "h": (iy1 - iy0).max(1),
+            }})
+        } else {
+            json!({"frame": {
+                "x": (x0 + x1) * 0.5,
+                "y": (y0 + y1) * 0.5,
+                "w": box_w,
+                "h": box_h,
+                "angle": (self.rotation as f64).to_degrees(),
+                "dx": self.image_tx,
+                "dy": self.image_ty,
+                "outW": out_w,
+                "outH": out_h,
+            }})
+        };
+        call["deleteCropped"] = json!(self.delete_cropped);
+        if let Some([r, g, b, a]) = background {
+            call["fill"] = json!(format!("#{r:02X}{g:02X}{b:02X}{a:02X}"));
+        }
+        if self.mode == CropMode::FixedSize {
+            call["dpi"] = json!(self.dpi.max(1.0));
+        }
+        Some(call)
+    }
+
     pub fn commit(&mut self, canvas: &mut Canvas, background: Option<[u8; 4]>) {
         let x0 = self.crop_x0.min(self.crop_x1);
         let y0 = self.crop_y0.min(self.crop_y1);

@@ -428,11 +428,7 @@ pub fn oklab_hue_deg(r: f32, g: f32, b: f32) -> f32 {
         return 0.0;
     }
     let deg = bb.atan2(a).to_degrees();
-    if deg < 0.0 {
-        deg + 360.0
-    } else {
-        deg
-    }
+    if deg < 0.0 { deg + 360.0 } else { deg }
 }
 
 /// Smooth partition-of-unity band weights for a perceptual hue (degrees). Exactly
@@ -501,11 +497,7 @@ fn chroma_headroom(dr: f32, dg: f32, db: f32, luma: f32) -> f32 {
             room = room.min(luma / -d - 1.0);
         }
     }
-    if room.is_finite() {
-        room.max(0.0)
-    } else {
-        0.0
-    }
+    if room.is_finite() { room.max(0.0) } else { 0.0 }
 }
 
 /// Scale colourfulness by moving the RGB chroma vector around a *fixed* luminance.

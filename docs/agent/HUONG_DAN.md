@@ -1,5 +1,59 @@
 # Cho trợ lý AI điều khiển iAi
 
+## Nút «Việc nhanh» (không cần AI, không cần mạng)
+
+Việc đã rõ ràng thì iAi tự làm trên cả thư mục ảnh, vài giây tới vài phút, không tốn lượt AI, máy
+không có Antigravity cũng dùng được:
+
+1. Bấm **Việc nhanh** ở cuối hàng menu trên cùng (cạnh «Nhờ AI làm»).
+2. Bấm **Chọn thư mục…** chọn thư mục ảnh của khách (cùng thư mục với «Nhờ AI làm»).
+3. Chọn việc:
+   - **Làm sạch ảnh chụp giấy tờ**: mọi ảnh trong thư mục thành bản trắng, chữ rõ (kiểu Xám hoặc
+     Đen trắng);
+   - **Ảnh thẻ cho nhiều người** (Gói Pro): mỗi ảnh là một người, chọn cỡ, nền, giấy và số tấm
+     mỗi người; tờ in mở thành tab mới, PDF lưu sẵn;
+   - các **kỹ năng đã lưu** làm việc trên một thư mục (AI làm xong việc nào thì iAi tự lưu).
+4. Bấm **Làm**. Trong lúc chờ vẫn làm việc khác được; muốn thôi thì bấm **Dừng**. Kết quả nằm
+   trong thư mục `iAi_ket_qua` cạnh ảnh (bấm **Mở thư mục kết quả**). Ảnh gốc không bị sửa.
+
+Việc cần nhìn rồi phán đoán (ảnh nào mặt trước, mặt sau, của ai; mỗi người số tấm khác nhau)
+thì dùng «Nhờ AI làm».
+
+## Nút «Nhờ AI làm» (không phải gõ lệnh)
+
+Máy có **Antigravity** (ứng dụng AI của Google, dùng Gemini) thì giao việc ngay trong iAi:
+
+1. Bấm **Nhờ AI làm** ở cuối hàng menu trên cùng.
+2. Lần đầu: bấm **Nối với Antigravity** (iAi tự cài, Antigravity tự khởi động lại một lần).
+3. Chọn việc (In căn cước lên A4, Ảnh thẻ cho nhiều người, Làm sạch ảnh chụp giấy tờ, hay
+   Việc khác tự viết), bấm **Chọn thư mục…** chọn thư mục ảnh của khách, dặn thêm nếu cần
+   (ví dụ "chị Lan 8 tấm"), rồi bấm **Gửi cho Gemini**.
+4. Gemini làm ngay trên iAi: bạn thấy ảnh mở ra, được cắt, được xếp; hộp "Nhờ AI làm" ghi
+   đang làm tới bước nào. Muốn thôi thì bấm **Dừng**.
+5. Xong: kết quả mở sẵn trong iAi và nằm trong thư mục `iAi_ket_qua` cạnh ảnh của khách
+   (bấm **Mở thư mục kết quả**). Ảnh gốc không bị sửa.
+
+Mặc định Gemini chỉ dùng công cụ của iAi (AI offline trên máy). Ca khó — thay áo (sơ mi trắng,
+vest, áo dài), xóa chữ hay vật che mặt, nền quá rối — thì tích **Dùng AI online cho ca khó**:
+Gemini nhờ trợ lý vẽ ảnh của Antigravity vẽ lại riêng những ảnh đó rồi làm tiếp như thường. Ảnh
+vẽ lại có thể lệch nét mặt một chút: xem kỹ trước khi in. Căn cước không bao giờ được vẽ lại.
+
+Sửa một ảnh lẻ: mở ảnh trong iAi, chọn **Sửa ảnh đang mở (AI online)**, viết sửa gì (ví dụ "thay
+áo sơ mi trắng, xóa chữ trên áo") rồi gửi. Ảnh Gemini vẽ về thành **lớp mới** ngay trên ảnh đó:
+che mặt nạ (mask) để giữ lại phần nào của ảnh gốc. Một bản ảnh vẽ nằm trong thư mục `iAi_ket_qua`
+cạnh ảnh.
+
+Ảnh thẻ bị hụt vai (khách chụp quá sát) hay cần thay áo: làm ảnh thẻ như thường, rồi bấm **Thay
+áo, lấp vai bằng AI…** ngay dưới các mũi tên chỉnh khung (hoặc chọn việc **Thay áo, lấp vai ảnh
+thẻ đang mở** trong "Nhờ AI làm"). Chọn áo, hoặc để **Giữ nguyên áo** thì Gemini chỉ vẽ tiếp phần
+vai, thân bị thiếu. Ảnh vẽ về được iAi xoay, co giãn cho khuôn mặt khớp đúng ảnh gốc rồi đặt
+thành lớp mới có mặt nạ: **từ cằm trở lên vẫn là ảnh gốc** (mặt, tóc, nền không bị vẽ lại), chỉ
+phần áo và vai là của AI. Chỗ cổ áo, vai chưa ưng thì tô mặt nạ của lớp mới.
+
+Cuộc trò chuyện vẫn lưu trong Antigravity nếu bạn muốn xem lại Gemini đã làm gì.
+
+## Nói việc với trợ lý AI
+
 Trợ lý AI trên máy (Claude Desktop, Claude Code…) điều khiển được iAi: mở ảnh, tách nền,
 làm ảnh thẻ, xếp ảnh in, xuất PDF… Bạn chỉ cần nói việc bằng lời, ví dụ:
 

@@ -77,6 +77,15 @@ impl App {
 
     pub(crate) fn drop_doc_ai_jobs(&mut self, _id: DocumentId) {}
 
+    pub(crate) fn photo_only_holds_tab(&self) -> bool {
+        false
+    }
+
+    /// No ID photo is ever made, away or not.
+    pub(crate) fn id_photo_made_away(&self) -> Vec<DocumentId> {
+        Vec::new()
+    }
+
     pub(crate) fn poll_pro_jobs(&mut self) {}
 
     pub(crate) fn pro_jobs_running(&self) -> bool {

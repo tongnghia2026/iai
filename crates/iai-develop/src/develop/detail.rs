@@ -5,7 +5,7 @@
 
 use super::*;
 use iai_color::color::luminance_f32;
-use iai_raster::tile::{dither16_to_u8, quantize_dither, TileMap, TILE_SIZE};
+use iai_raster::tile::{TILE_SIZE, TileMap, dither16_to_u8, quantize_dither};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;

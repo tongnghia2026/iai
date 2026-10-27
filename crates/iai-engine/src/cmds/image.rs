@@ -5,7 +5,7 @@ use iai_canvas::canvas::MAX_DIMENSION;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{not_enabled, RectPx};
+use super::common::{RectPx, not_enabled};
 use crate::{
     CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session, Validate,
 };
@@ -41,24 +41,78 @@ pub struct CropParams {
     /// What to keep, in document pixels. May reach past the page: the page
     /// grows there (clear). Leave it out to crop to the selection.
     pub rect: Option<RectPx>,
+    /// Instead of `rect`: a frame turned, with the picture moved under it,
+    /// or a result of another size (the Crop tool's straighten and its crop
+    /// to a print size).
+    pub frame: Option<CropFrame>,
     /// Throw away what lies outside (default); false keeps it, hidden, so a
     /// later crop or move can bring it back.
     #[serde(default = "yes")]
     pub delete_cropped: bool,
+    /// What the crop adds past the page is filled with this colour
+    /// ("#RRGGBB"), as on a document with a Background; clear when left out.
+    pub fill: Option<String>,
+    /// Pixels per inch to record on the result (a crop to a print size).
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub dpi: Option<f32>,
+}
+
+/// A crop frame of the Crop tool, in document pixels (fractions allowed).
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CropFrame {
+    /// The frame's centre.
+    pub x: f32,
+    pub y: f32,
+    /// Its width and height, at least one pixel each.
+    pub w: f32,
+    pub h: f32,
+    /// How far the frame is turned, in degrees.
+    #[serde(default)]
+    pub angle: f64,
+    /// How far the picture was moved under the frame.
+    #[serde(default)]
+    pub dx: f32,
+    #[serde(default)]
+    pub dy: f32,
+    /// The result's size in pixels, the picture scaled to it; the frame's own
+    /// size when left out.
+    pub out_w: Option<u32>,
+    pub out_h: Option<u32>,
 }
 
 fn yes() -> bool {
     true
 }
 
-impl Validate for CropParams {}
+impl Validate for CropParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.rect.is_some() && self.frame.is_some() {
+            return Err(CmdError::bad_param("frame", "either `rect` or `frame`"));
+        }
+        if let Some(f) = &self.frame {
+            let finite = [f.x, f.y, f.w, f.h, f.dx, f.dy]
+                .iter()
+                .all(|v| v.is_finite())
+                && f.angle.is_finite();
+            if !finite || f.w < 1.0 || f.h < 1.0 {
+                return Err(CmdError::bad_param(
+                    "frame",
+                    "finite numbers, a width and a height of one pixel or more",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 static CROP: CommandMeta = CommandMeta {
     id: "image.crop",
     label_vi: "Cắt ảnh",
     label_en: "Crop",
-    doc: "Crop the page to a rectangle, or to the selection's bounds when `rect` is left out. \
-          Every layer is cropped; one undo step.",
+    doc: "Crop the page to a rectangle, or to the selection's bounds when `rect` is left out; \
+          or to a `frame` turned by `angle` degrees and scaled to `outW` × `outH` (straightening, \
+          a crop to a print size). Every layer is cropped; one undo step.",
     effects: &[Effect::Edit],
     featured: true,
 };
@@ -73,7 +127,57 @@ impl Command for Crop {
     }
     fn plan(&self, s: &mut Session<'_>, p: CropParams) -> Result<Plan<Sized>, CmdError> {
         let doc = s.doc_id(p.doc)?;
+        let fill = p
+            .fill
+            .as_deref()
+            .map(|c| super::common::parse_color("fill", c))
+            .transpose()?;
         let canvas = s.canvas_mut(Some(doc))?;
+        if let Some(f) = p.frame {
+            let out_w = f.out_w.unwrap_or(f.w.round() as u32);
+            let out_h = f.out_h.unwrap_or(f.h.round() as u32);
+            if out_w == 0 || out_h == 0 || out_w > MAX_DIMENSION || out_h > MAX_DIMENSION {
+                return Err(CmdError::bad_param(
+                    "frame",
+                    &format!("a result of 1 to {MAX_DIMENSION} pixels a side"),
+                ));
+            }
+            let angle = f.angle.to_radians() as f32;
+            let done = match fill {
+                Some(color) => canvas.crop_transformed_with_background(
+                    f.x,
+                    f.y,
+                    f.w,
+                    f.h,
+                    out_w,
+                    out_h,
+                    f.dx,
+                    f.dy,
+                    angle,
+                    p.delete_cropped,
+                    color,
+                ),
+                None => canvas.crop_transformed(
+                    f.x,
+                    f.y,
+                    f.w,
+                    f.h,
+                    out_w,
+                    out_h,
+                    f.dx,
+                    f.dy,
+                    angle,
+                    p.delete_cropped,
+                ),
+            };
+            if !done {
+                return Err(not_enabled("the crop was refused", "Không cắt được"));
+            }
+            if let Some(dpi) = p.dpi {
+                canvas.metadata.resolution_ppi = dpi.max(1.0);
+            }
+            return sized(s, doc).map(Plan::Done);
+        }
         let rect = match p.rect {
             Some(r) => r,
             None => {
@@ -100,8 +204,17 @@ impl Command for Crop {
                 &format!("a size of at most {MAX_DIMENSION} pixels"),
             ));
         }
-        if !canvas.crop(rect.x, rect.y, rect.w, rect.h, p.delete_cropped) {
+        let done = match fill {
+            Some(color) => {
+                canvas.crop_with_background(rect.x, rect.y, rect.w, rect.h, p.delete_cropped, color)
+            }
+            None => canvas.crop(rect.x, rect.y, rect.w, rect.h, p.delete_cropped),
+        };
+        if !done {
             return Err(not_enabled("the crop was refused", "Không cắt được"));
+        }
+        if let Some(dpi) = p.dpi {
+            canvas.metadata.resolution_ppi = dpi.max(1.0);
         }
         if p.rect.is_none() {
             canvas.deselect();
@@ -330,6 +443,66 @@ impl Command for Resize {
         } else if !canvas.resize_image(nw, nh, dpi) {
             return Err(not_enabled("the resize was refused", "Không đổi cỡ được"));
         }
+        s.notice(
+            format!("Image Size: {nw}×{nh} px"),
+            format!("Image Size: {nw}×{nh} px"),
+        );
+        sized(s, doc).map(Plan::Done)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CanvasSizeParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The page's new width and height in pixels.
+    #[schemars(range(min = 1, max = 30000))]
+    pub width_px: u32,
+    #[schemars(range(min = 1, max = 30000))]
+    pub height_px: u32,
+}
+
+impl Validate for CanvasSizeParams {}
+
+static CANVAS_SIZE: CommandMeta = CommandMeta {
+    id: "image.canvas_size",
+    label_vi: "Đổi khung ảnh",
+    label_en: "Canvas Size",
+    doc: "Make the page larger or smaller without resampling, as Image ▸ Canvas Size does: the \
+          picture stays at the top-left corner, what is added is clear, what falls outside is \
+          cut off. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct CanvasSize;
+
+impl Command for CanvasSize {
+    type Params = CanvasSizeParams;
+    type Output = Sized;
+    fn meta(&self) -> &'static CommandMeta {
+        &CANVAS_SIZE
+    }
+    fn plan(&self, s: &mut Session<'_>, p: CanvasSizeParams) -> Result<Plan<Sized>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        if p.width_px > MAX_DIMENSION || p.height_px > MAX_DIMENSION {
+            return Err(CmdError::bad_param(
+                "widthPx",
+                &format!("a size that keeps both sides at most {MAX_DIMENSION} pixels"),
+            ));
+        }
+        if !canvas.resize(p.width_px, p.height_px) {
+            return Err(not_enabled(
+                "the canvas size was refused",
+                "Không đổi được khung ảnh",
+            ));
+        }
+        s.notice(
+            format!("Canvas Size: {}×{} px", p.width_px, p.height_px),
+            format!("Canvas Size: {}×{} px", p.width_px, p.height_px),
+        );
         sized(s, doc).map(Plan::Done)
     }
 }

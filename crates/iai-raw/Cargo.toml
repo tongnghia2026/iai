@@ -1,7 +1,7 @@
 [package]
 name = "iai-raw"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "The library that decodes camera RAW files for iAi, on rawloader and rawler."
 # rawloader and rawler are LGPL-2.1, and this crate, which is them and a thin
 # layer over them, goes under the same terms. A published build of iAi that

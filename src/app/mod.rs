@@ -14,6 +14,7 @@ pub mod document_session;
 pub mod document_webview;
 pub mod editor_interaction;
 pub mod engine;
+pub mod errands;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod ext_bridge;
@@ -40,6 +41,7 @@ pub mod portrait_brush;
 #[rustfmt::skip]
 pub mod portrait_ops;
 pub mod powerclip_ops;
+pub mod quick_tasks;
 pub mod render;
 pub mod scan_cleanup_ops;
 mod selection_feedback;

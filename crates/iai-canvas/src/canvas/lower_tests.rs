@@ -49,14 +49,16 @@ mod command_clip {
                 ChangeKind::LayerStructure,
             )
             .unwrap();
-        assert!(canvas
-            .layer_stack
-            .layers
-            .iter()
-            .find(|layer| layer.id == frame_id)
-            .unwrap()
-            .mask
-            .is_some());
+        assert!(
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .find(|layer| layer.id == frame_id)
+                .unwrap()
+                .mask
+                .is_some()
+        );
         canvas
             .execute(
                 Box::new(ReleaseClippedChild::new(child_id)),
@@ -741,7 +743,7 @@ mod smart_fill {
     }
     fn rms(img: &[u8], truth: &[u8], hole: &[bool]) -> f64 {
         let (mut e, mut n) = (0f64, 0f64);
-        for (i, _) in hole.iter().enumerate().filter(|(_, &h)| h) {
+        for (i, _) in hole.iter().enumerate().filter(|&(_, &h)| h) {
             for c in 0..3 {
                 let d = img[i * 4 + c] as f64 - truth[i * 4 + c] as f64;
                 e += d * d;

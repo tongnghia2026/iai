@@ -4,5 +4,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod arrange;
 pub mod command_vector;
 pub mod vector;

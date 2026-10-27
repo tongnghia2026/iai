@@ -4,7 +4,7 @@ use iai_ai::select_subject::SelectSubjectModel;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ai::{model_missing, segment_work, Segmented};
+use super::ai::{Segmented, model_missing, segment_work};
 use super::common::{Bounds, DocParams, RectPx, SelectMode};
 use crate::{
     CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session, Validate,
@@ -38,7 +38,7 @@ pub(crate) fn selected(s: &mut Session<'_>, doc: u32) -> Result<Selected, CmdErr
 }
 
 macro_rules! simple_select {
-    ($ty:ident, $meta:ident, $id:literal, $vi:literal, $en:literal, $doc:literal, $op:ident, $say:expr) => {
+    ($ty:ident, $meta:ident, $id:literal, $vi:literal, $en:literal, $doc:literal, $op:ident, $say:expr_2021) => {
         static $meta: CommandMeta = CommandMeta {
             id: $id,
             label_vi: $vi,
@@ -149,6 +149,145 @@ impl Command for SelectRect {
             .vi("Vùng chọn nằm ngoài ảnh"));
         };
         canvas.select_rect_mode(x0, y0, x1, y1, p.mode.to_core(), p.feather_px, true);
+        selected(s, doc).map(Plan::Done)
+    }
+}
+
+static ELLIPSE: CommandMeta = CommandMeta {
+    id: "select.ellipse",
+    label_vi: "Chọn vùng elip",
+    label_en: "Select Ellipse",
+    doc: "Select the ellipse (a circle when the box is square) that fills a box of the page, as \
+          the Elliptical Marquee does; it replaces the selection or is added to, taken from or \
+          intersected with it. The part outside the page is left out.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+/// An ellipse as a closed outline of `n` points, for one the page cuts.
+fn ellipse_outline(r: &RectPx, n: usize) -> Vec<(f32, f32)> {
+    let (rx, ry) = (r.w as f32 / 2.0, r.h as f32 / 2.0);
+    let (cx, cy) = (r.x as f32 + rx, r.y as f32 + ry);
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            (cx + rx * t.cos(), cy + ry * t.sin())
+        })
+        .collect()
+}
+
+pub struct SelectEllipse;
+
+impl Command for SelectEllipse {
+    type Params = RectParams;
+    type Output = Selected;
+    fn meta(&self) -> &'static CommandMeta {
+        &ELLIPSE
+    }
+    fn plan(&self, s: &mut Session<'_>, p: RectParams) -> Result<Plan<Selected>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let Some((x0, y0, x1, y1)) = p.rect.clipped(canvas.width, canvas.height) else {
+            return Err(CmdError::new(
+                ErrorCode::BadParams,
+                format!(
+                    "the box lies outside the {}×{} page",
+                    canvas.width, canvas.height
+                ),
+            )
+            .vi("Vùng chọn nằm ngoài ảnh"));
+        };
+        let whole = x1.saturating_sub(x0) == p.rect.w && y1.saturating_sub(y0) == p.rect.h;
+        if whole {
+            canvas.select_ellipse_mode(x0, y0, x1, y1, p.mode.to_core(), p.feather_px, true);
+        } else {
+            // The page cuts it: its outline, drawn where it lies.
+            let outline = ellipse_outline(&p.rect, 512);
+            canvas.select_polygon_mode(&outline, p.mode.to_core(), p.feather_px, true);
+        }
+        selected(s, doc).map(Plan::Done)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PolygonParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The corners `[x, y]` in document pixels, in order round the shape;
+    /// the last joins the first.
+    #[schemars(length(min = 3, max = 10000))]
+    pub points: Vec<[f32; 2]>,
+    #[serde(default)]
+    pub mode: SelectMode,
+    /// Soften the edge by this many pixels.
+    #[serde(default)]
+    #[schemars(range(min = 0.0, max = 500.0))]
+    pub feather_px: f32,
+}
+
+impl Validate for PolygonParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.points.len() < 3 {
+            return Err(CmdError::bad_param("points", "at least three corners"));
+        }
+        if self
+            .points
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite() || v.abs() > 100_000.0)
+        {
+            return Err(CmdError::bad_param(
+                "points",
+                "numbers between -100000 and 100000",
+            ));
+        }
+        Ok(())
+    }
+}
+
+static POLYGON: CommandMeta = CommandMeta {
+    id: "select.polygon",
+    label_vi: "Chọn vùng đa giác",
+    label_en: "Select Polygon",
+    doc: "Select the shape inside a closed outline of points, as the Polygonal Lasso does; it \
+          replaces the selection or is added to, taken from or intersected with it. The part \
+          outside the page is left out.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct SelectPolygon;
+
+impl Command for SelectPolygon {
+    type Params = PolygonParams;
+    type Output = Selected;
+    fn meta(&self) -> &'static CommandMeta {
+        &POLYGON
+    }
+    fn plan(&self, s: &mut Session<'_>, p: PolygonParams) -> Result<Plan<Selected>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (w, h) = (canvas.width as f32, canvas.height as f32);
+        let points: Vec<(f32, f32)> = p.points.iter().map(|[x, y]| (*x, *y)).collect();
+        let (lo_x, hi_x) = points
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (x, _)| {
+                (lo.min(*x), hi.max(*x))
+            });
+        let (lo_y, hi_y) = points
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (_, y)| {
+                (lo.min(*y), hi.max(*y))
+            });
+        if hi_x <= 0.0 || hi_y <= 0.0 || lo_x >= w || lo_y >= h {
+            return Err(CmdError::new(
+                ErrorCode::BadParams,
+                format!("the shape lies outside the {w}×{h} page"),
+            )
+            .vi("Vùng chọn nằm ngoài ảnh"));
+        }
+        canvas.select_polygon_mode(&points, p.mode.to_core(), p.feather_px, true);
         selected(s, doc).map(Plan::Done)
     }
 }

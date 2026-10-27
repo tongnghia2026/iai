@@ -24,9 +24,9 @@ pub use command::{
 };
 pub use error::{CmdError, ErrorCode};
 pub use events::EngineEvent;
-pub use jobs::{catching_panics, JobCtx, JobId, JobState};
+pub use jobs::{JobCtx, JobId, JobState, catching_panics};
 pub use policy::{Policy, Source};
-pub use session::{BatchFailure, BatchReply, CommandCall, Engine, Reply, Session, MAX_BATCH};
+pub use session::{BatchFailure, BatchReply, CommandCall, Engine, MAX_BATCH, Reply, Session};
 pub use workspace::{HeadlessWorkspace, Workspace};
 
 #[cfg(test)]

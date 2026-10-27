@@ -364,10 +364,11 @@ impl App {
                     continue;
                 }
                 // A clip / managed mask hides part of the layer — don't pick there.
-                if let Some(m) = &layer.mask {
-                    if m.enabled && m.sample(lx as u32, ly as u32) < 0.02 {
-                        continue;
-                    }
+                if let Some(m) = &layer.mask
+                    && m.enabled
+                    && m.sample(lx as u32, ly as u32) < 0.02
+                {
+                    continue;
                 }
                 hit = Some(idx);
                 break;
@@ -682,14 +683,12 @@ impl ApplicationHandler for App {
                 },
             ..
         } = &event
-        {
-            if self
+            && self
                 .edit
                 .input
                 .note_key(*physical_key, *state == ElementState::Pressed)
-            {
-                self.sync_cursor(event_loop);
-            }
+        {
+            self.sync_cursor(event_loop);
         }
         if self.journal_mark_key(&event) {
             return;
@@ -768,8 +767,8 @@ impl ApplicationHandler for App {
         // Preferences ▸ Shortcuts is waiting for a key: take it here, before egui
         // (which turns Ctrl+C/X/V into clipboard events) and before any shortcut
         // handling can act on it.
-        if self.shell.ui.shortcut_capture.is_some() {
-            if let WindowEvent::KeyboardInput {
+        if self.shell.ui.shortcut_capture.is_some()
+            && let WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         physical_key,
@@ -778,18 +777,16 @@ impl ApplicationHandler for App {
                     },
                 ..
             } = &event
-            {
-                if self.capture_shortcut_key(*physical_key, *state == ElementState::Pressed) {
-                    return;
-                }
-            }
+            && self.capture_shortcut_key(*physical_key, *state == ElementState::Pressed)
+        {
+            return;
         }
 
         // Numpad Enter commits the text overlay. egui-winit maps both the main
         // and numpad Enter to the same `Key::Enter`, so it must be caught here
         // (before egui sees it) to keep the main Enter as a newline.
-        if self.edit.text_edit.is_some() {
-            if let WindowEvent::KeyboardInput {
+        if self.edit.text_edit.is_some()
+            && let WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::NumpadEnter),
@@ -798,17 +795,14 @@ impl ApplicationHandler for App {
                     },
                 ..
             } = &event
-            {
-                if !(self.shell.ui.show_paint_color_dialog
-                    && self.shell.ui.paint_color_dialog_target == 2)
-                {
-                    self.commit_text_edit();
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
-                    }
-                    return;
-                }
+            && !(self.shell.ui.show_paint_color_dialog
+                && self.shell.ui.paint_color_dialog_target == 2)
+        {
+            self.commit_text_edit();
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
             }
+            return;
         }
 
         // Shift+F3 cycles the case of the selected text (or the whole buffer)
@@ -816,8 +810,8 @@ impl ApplicationHandler for App {
         // so the invisible overlay TextEdit doesn't swallow the function key.
         // (Shift's own key event, processed by the egui block below, has already
         // set `shift_held` by the time F3 arrives.)
-        if self.edit.text_edit.is_some() {
-            if let WindowEvent::KeyboardInput {
+        if self.edit.text_edit.is_some()
+            && let WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::F3),
@@ -827,12 +821,11 @@ impl ApplicationHandler for App {
                     },
                 ..
             } = &event
-            {
-                if !repeat && self.edit.input.shift_held {
-                    self.text_cycle_case();
-                    return;
-                }
-            }
+            && !repeat
+            && self.edit.input.shift_held
+        {
+            self.text_cycle_case();
+            return;
         }
 
         // Ctrl+N is handled by the app shortcut layer below and also advertised
@@ -888,21 +881,20 @@ impl ApplicationHandler for App {
             .get(self.docs.active_doc_idx)
             .is_some_and(|doc| doc.is_flow_text())
             && self.edit.input.alt_held
+            && let WindowEvent::MouseWheel { delta, .. } = &event
         {
-            if let WindowEvent::MouseWheel { delta, .. } = &event {
-                let sy = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => *y as f64,
-                    MouseScrollDelta::PixelDelta(p) => p.y * 0.1,
-                };
-                if sy != 0.0 {
-                    self.edit.view.zoom = flow_text_zoom_from_wheel(self.edit.view.zoom, sy);
-                    self.docs.active_mut().saved_zoom = self.edit.view.zoom;
-                    if let Some(window) = &self.win.window {
-                        window.request_redraw();
-                    }
+            let sy = match delta {
+                MouseScrollDelta::LineDelta(_, y) => *y as f64,
+                MouseScrollDelta::PixelDelta(p) => p.y * 0.1,
+            };
+            if sy != 0.0 {
+                self.edit.view.zoom = flow_text_zoom_from_wheel(self.edit.view.zoom, sy);
+                self.docs.active_mut().saved_zoom = self.edit.view.zoom;
+                if let Some(window) = &self.win.window {
+                    window.request_redraw();
                 }
-                return;
             }
+            return;
         }
 
         // egui-winit reports `repaint = true` for `RedrawRequested` itself, so
@@ -915,172 +907,172 @@ impl ApplicationHandler for App {
         // `repaint_delay` → `egui_repaint_deadline`, scheduled (throttled) by
         // `about_to_wait`, so the RedrawRequested self-nudge is pure waste.
         let is_redraw_event = matches!(event, WindowEvent::RedrawRequested);
-        if let Some(state) = &mut self.win.egui_state {
-            if let Some(window) = &self.win.window {
-                let resp = state.on_window_event(window, &event);
-                if resp.repaint && !is_redraw_event {
-                    window.request_redraw();
-                }
-                self.edit.input.is_over_ui = self.win.egui_ctx.egui_wants_pointer_input()
-                    || self.win.egui_ctx.is_pointer_over_egui()
-                    || self.win.egui_ctx.egui_wants_keyboard_input();
+        if let Some(state) = &mut self.win.egui_state
+            && let Some(window) = &self.win.window
+        {
+            let resp = state.on_window_event(window, &event);
+            if resp.repaint && !is_redraw_event {
+                window.request_redraw();
+            }
+            self.edit.input.is_over_ui = self.win.egui_ctx.egui_wants_pointer_input()
+                || self.win.egui_ctx.is_pointer_over_egui()
+                || self.win.egui_ctx.egui_wants_keyboard_input();
 
-                if self.edit.text_edit.is_some()
-                    && matches!(
-                        event,
-                        WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
-                    )
+            if self.edit.text_edit.is_some()
+                && matches!(
+                    event,
+                    WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
+                )
+            {
+                let mut app_key = false;
+                if let WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            physical_key,
+                            state,
+                            ..
+                        },
+                    ..
+                } = &event
                 {
-                    let mut app_key = false;
-                    if let WindowEvent::KeyboardInput {
+                    // The held modifiers are already followed (`note_key`).
+                    let pressed = *state == ElementState::Pressed;
+                    // View shortcuts (zoom/fit) stay live while editing;
+                    // everything else belongs to the TextEdit.
+                    app_key = (pressed
+                        && self.edit.input.ctrl_held
+                        && matches!(
+                            physical_key,
+                            PhysicalKey::Code(KeyCode::Digit0)
+                                | PhysicalKey::Code(KeyCode::Numpad0)
+                                | PhysicalKey::Code(KeyCode::Digit1)
+                                | PhysicalKey::Code(KeyCode::Numpad1)
+                                | PhysicalKey::Code(KeyCode::Equal)
+                                | PhysicalKey::Code(KeyCode::Minus)
+                                | PhysicalKey::Code(KeyCode::NumpadAdd)
+                                | PhysicalKey::Code(KeyCode::NumpadSubtract)
+                        ))
+                        || is_close_document_shortcut(
+                            physical_key,
+                            pressed,
+                            self.edit.input.ctrl_held,
+                        );
+                }
+                if !app_key {
+                    // Keep the bell quiet for a short window, not just this
+                    // frame: the incidental denial can land a frame or two
+                    // later (caret-blink redraw / IME preedit→commit).
+                    self.win.text_input_quiet_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
+                    return;
+                }
+            }
+
+            if resp.consumed {
+                match &event {
+                    WindowEvent::ModifiersChanged(_) => {}
+                    WindowEvent::CursorMoved { .. } => {}
+                    WindowEvent::MouseInput {
+                        state: ElementState::Released,
+                        ..
+                    } => {}
+                    WindowEvent::KeyboardInput {
                         event:
                             KeyEvent {
-                                physical_key,
-                                state,
+                                physical_key: PhysicalKey::Code(KeyCode::KeyY),
+                                state: ElementState::Pressed,
                                 ..
                             },
                         ..
-                    } = &event
-                    {
-                        // The held modifiers are already followed (`note_key`).
-                        let pressed = *state == ElementState::Pressed;
-                        // View shortcuts (zoom/fit) stay live while editing;
-                        // everything else belongs to the TextEdit.
-                        app_key = (pressed
-                            && self.edit.input.ctrl_held
-                            && matches!(
-                                physical_key,
-                                PhysicalKey::Code(KeyCode::Digit0)
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key: PhysicalKey::Code(KeyCode::KeyC),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key: PhysicalKey::Code(KeyCode::KeyA),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key: PhysicalKey::Code(KeyCode::KeyO),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key: PhysicalKey::Code(KeyCode::KeyW),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key:
+                                    PhysicalKey::Code(KeyCode::KeyB)
+                                    | PhysicalKey::Code(KeyCode::KeyL)
+                                    | PhysicalKey::Code(KeyCode::KeyU)
+                                    | PhysicalKey::Code(KeyCode::KeyM)
+                                    | PhysicalKey::Code(KeyCode::KeyG)
+                                    | PhysicalKey::Code(KeyCode::KeyI),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held => {}
+                    // View shortcuts forwarded past the text-editing gate
+                    // above (egui's TextEdit has focus but ignores them).
+                    WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                physical_key:
+                                    PhysicalKey::Code(KeyCode::Digit0)
                                     | PhysicalKey::Code(KeyCode::Numpad0)
                                     | PhysicalKey::Code(KeyCode::Digit1)
                                     | PhysicalKey::Code(KeyCode::Numpad1)
                                     | PhysicalKey::Code(KeyCode::Equal)
                                     | PhysicalKey::Code(KeyCode::Minus)
                                     | PhysicalKey::Code(KeyCode::NumpadAdd)
-                                    | PhysicalKey::Code(KeyCode::NumpadSubtract)
-                            ))
-                            || is_close_document_shortcut(
-                                physical_key,
-                                pressed,
-                                self.edit.input.ctrl_held,
-                            );
-                    }
-                    if !app_key {
-                        // Keep the bell quiet for a short window, not just this
-                        // frame: the incidental denial can land a frame or two
-                        // later (caret-blink redraw / IME preedit→commit).
-                        self.win.text_input_quiet_until =
-                            Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
-                        return;
-                    }
-                }
-
-                if resp.consumed {
-                    match &event {
-                        WindowEvent::ModifiersChanged(_) => {}
-                        WindowEvent::CursorMoved { .. } => {}
-                        WindowEvent::MouseInput {
-                            state: ElementState::Released,
-                            ..
-                        } => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyY),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyC),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyA),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyV),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyO),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyW),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key:
-                                        PhysicalKey::Code(KeyCode::KeyB)
-                                        | PhysicalKey::Code(KeyCode::KeyL)
-                                        | PhysicalKey::Code(KeyCode::KeyU)
-                                        | PhysicalKey::Code(KeyCode::KeyM)
-                                        | PhysicalKey::Code(KeyCode::KeyG)
-                                        | PhysicalKey::Code(KeyCode::KeyI),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held => {}
-                        // View shortcuts forwarded past the text-editing gate
-                        // above (egui's TextEdit has focus but ignores them).
-                        WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    physical_key:
-                                        PhysicalKey::Code(KeyCode::Digit0)
-                                        | PhysicalKey::Code(KeyCode::Numpad0)
-                                        | PhysicalKey::Code(KeyCode::Digit1)
-                                        | PhysicalKey::Code(KeyCode::Numpad1)
-                                        | PhysicalKey::Code(KeyCode::Equal)
-                                        | PhysicalKey::Code(KeyCode::Minus)
-                                        | PhysicalKey::Code(KeyCode::NumpadAdd)
-                                        | PhysicalKey::Code(KeyCode::NumpadSubtract),
-                                    state: ElementState::Pressed,
-                                    ..
-                                },
-                            ..
-                        } if self.edit.input.ctrl_held && self.edit.text_edit.is_some() => {}
-                        // While editing text the wheel still zooms/pans the
-                        // canvas — egui consumes it only because the pointer
-                        // sits on the invisible overlay TextEdit.
-                        WindowEvent::MouseWheel { .. }
-                            if self.edit.text_edit.is_some()
-                                && !self
-                                    .ui_chrome_hit(self.edit.input.mouse_x, self.edit.input.mouse_y)
-                                    .0 => {}
-                        _ => return,
-                    }
+                                    | PhysicalKey::Code(KeyCode::NumpadSubtract),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } if self.edit.input.ctrl_held && self.edit.text_edit.is_some() => {}
+                    // While editing text the wheel still zooms/pans the
+                    // canvas — egui consumes it only because the pointer
+                    // sits on the invisible overlay TextEdit.
+                    WindowEvent::MouseWheel { .. }
+                        if self.edit.text_edit.is_some()
+                            && !self
+                                .ui_chrome_hit(self.edit.input.mouse_x, self.edit.input.mouse_y)
+                                .0 => {}
+                    _ => return,
                 }
             }
         }
@@ -1186,9 +1178,20 @@ impl ApplicationHandler for App {
 
             WindowEvent::DroppedFile(path) => {
                 // Strict modal lock: opening documents is refused while a
-                // modal operation is in progress.
-                self.yield_portrait();
-                if self.modal_lock_active() {
+                // modal operation is in progress. An ID photo being made
+                // holds only its tab: a photo dropped opens in a tab of its
+                // own and the work goes on.
+                let photo_only = self.photo_only_holds_tab();
+                if !photo_only {
+                    self.yield_portrait();
+                }
+                let onto_pdf_held = photo_only
+                    && self
+                        .docs
+                        .documents
+                        .get(self.docs.active_doc_idx)
+                        .is_some_and(|doc| doc.pdf_document.is_some());
+                if (!photo_only || onto_pdf_held) && self.modal_lock_active() {
                     self.deny_modal_action();
                     return;
                 }
@@ -1309,10 +1312,8 @@ impl ApplicationHandler for App {
         }
 
         let lama_downloading = crate::core::lama::is_downloading();
-        if lama_downloading {
-            if let Some(s) = crate::core::lama::status_text() {
-                self.shell.status_msg = s;
-            }
+        if lama_downloading && let Some(s) = crate::core::lama::status_text() {
+            self.shell.status_msg = s;
         }
 
         let view_change_ready = self.win.pending_view_change
@@ -1359,10 +1360,11 @@ impl ApplicationHandler for App {
         // overrides ControlFlow::Wait). Every legitimate continuation
         // (interaction, marching ants, background-job polling, egui animation)
         // is (re)scheduled by `about_to_wait` at its proper cadence.
-        if needs_redraw && !is_redraw_event {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if needs_redraw
+            && !is_redraw_event
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
         }
     }
 
@@ -1383,20 +1385,21 @@ impl ApplicationHandler for App {
                 w.request_redraw();
             }
         }
-        if self.win.window_visible && !self.win.window_focused {
-            if let Some(until) = self.win.startup_focus_until {
-                let now = std::time::Instant::now();
-                if now < until {
-                    if let Some(window) = &self.win.window {
-                        window.focus_window();
-                    }
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(
-                        now + std::time::Duration::from_millis(50),
-                    ));
-                    return;
+        if self.win.window_visible
+            && !self.win.window_focused
+            && let Some(until) = self.win.startup_focus_until
+        {
+            let now = std::time::Instant::now();
+            if now < until {
+                if let Some(window) = &self.win.window {
+                    window.focus_window();
                 }
-                self.win.startup_focus_until = None;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    now + std::time::Duration::from_millis(50),
+                ));
+                return;
             }
+            self.win.startup_focus_until = None;
         }
         if matches!(
             self.win.startup_phase,

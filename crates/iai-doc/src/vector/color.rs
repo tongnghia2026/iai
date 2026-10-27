@@ -13,7 +13,7 @@
 //! and emitted verbatim (never round-tripped through RGB) so pure-black / rich-black
 //! intent survives to separations.
 
-use iai_color::cms::{naive_cmyk_to_rgb, CmykConverter};
+use iai_color::cms::{CmykConverter, naive_cmyk_to_rgb};
 
 /// Quantise a `[0,1]` float channel to 8-bit with rounding.
 #[inline]
@@ -223,10 +223,10 @@ impl ColorValue {
                 return Err(format!("colour channel {v} out of [0,1]"));
             }
         }
-        if let ColorValue::Spot { name, .. } = self {
-            if name.is_empty() {
-                return Err("spot colour needs a plate name".into());
-            }
+        if let ColorValue::Spot { name, .. } = self
+            && name.is_empty()
+        {
+            return Err("spot colour needs a plate name".into());
         }
         Ok(())
     }
@@ -353,9 +353,11 @@ mod tests {
     #[test]
     fn validate_rejects_bad_channels() {
         assert!(ColorValue::rgb(0.5, 0.5, 0.5).validate().is_ok());
-        assert!(ColorValue::rgba(f32::NAN, 0.0, 0.0, 1.0)
-            .validate()
-            .is_err());
+        assert!(
+            ColorValue::rgba(f32::NAN, 0.0, 0.0, 1.0)
+                .validate()
+                .is_err()
+        );
         assert!(ColorValue::rgba(2.0, 0.0, 0.0, 1.0).validate().is_err());
         assert!(ColorValue::cmyk(0.0, 0.0, 0.0, 1.0).validate().is_ok());
     }
@@ -400,9 +402,11 @@ mod tests {
 
     #[test]
     fn spot_validates_tint_and_requires_a_name() {
-        assert!(ColorValue::spot("Silver", [0, 0, 0, 40], 1.0)
-            .validate()
-            .is_ok());
+        assert!(
+            ColorValue::spot("Silver", [0, 0, 0, 40], 1.0)
+                .validate()
+                .is_ok()
+        );
         // Empty plate name is rejected.
         let nameless = ColorValue::Spot {
             name: SpotName::new(""),

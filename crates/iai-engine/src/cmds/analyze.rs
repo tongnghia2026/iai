@@ -3,9 +3,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{color_text, RectPx};
+use super::common::{RectPx, color_text};
 use crate::{
-    layer_index, CmdError, Command, CommandMeta, Effect, ErrorCode, Plan, Session, Validate,
+    CmdError, Command, CommandMeta, Effect, ErrorCode, Plan, Session, Validate, layer_index,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]

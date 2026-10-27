@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use iai_canvas::canvas::{Canvas, MAX_DIMENSION};
-use iai_canvas::document::{file_modified_at, Document, FlowTextBacking, FlowTextDocumentState};
+use iai_canvas::document::{Document, FlowTextBacking, FlowTextDocumentState, file_modified_at};
 use iai_formats::iai::IaiLoad;
 use iai_formats::pdf::{PdfPages, PdfRenderPlan};
 use iai_formats::{ExportOptions, FormatRegistry};
@@ -55,6 +55,10 @@ pub struct NewParams {
     /// The tab's name.
     #[schemars(length(min = 1, max = 200))]
     pub title: Option<String>,
+    /// Start it in CMYK (the built-in Generic space) instead of RGB, for
+    /// print work.
+    #[serde(default)]
+    pub cmyk: bool,
 }
 
 fn dpi_72() -> f32 {
@@ -63,10 +67,10 @@ fn dpi_72() -> f32 {
 
 impl Validate for NewParams {
     fn validate(&self) -> Result<(), CmdError> {
-        if let Some(b) = &self.background {
-            if !matches!(b.as_str(), "white" | "black" | "transparent") {
-                parse_color("background", b)?;
-            }
+        if let Some(b) = &self.background
+            && !matches!(b.as_str(), "white" | "black" | "transparent")
+        {
+            parse_color("background", b)?;
         }
         Ok(())
     }
@@ -76,7 +80,7 @@ static NEW: CommandMeta = CommandMeta {
     id: "file.new",
     label_vi: "Tạo ảnh mới",
     label_en: "New Document",
-    doc: "Open a new blank document in a tab of its own and show it.",
+    doc: "Open a new blank document in a tab of its own and show it, as File ▸ New does.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -115,6 +119,10 @@ impl Command for NewDocument {
         }
         canvas.flatten_full();
         canvas.metadata.resolution_ppi = p.dpi;
+        if p.cmyk {
+            // Made RGB, then laid on the ink planes (the empty history cleared).
+            let _ = canvas.convert_to_cmyk(iai_canvas::canvas::CmykProfile::Naive);
+        }
         let id = s.new_document_id();
         let mut doc = Document::from_canvas(id, canvas, None);
         if let Some(title) = p.title {
@@ -650,7 +658,7 @@ impl Command for SaveFile {
                 return Err(CmdError::bad_param(
                     "path",
                     "a file name: the document has never been saved",
-                ))
+                ));
             }
         };
         let is_iai = path

@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use iai::core::canvas::Canvas;
-use iai::core::color_reference::{summarize_encoded_rgba16, ImageQualitySummary};
+use iai::core::color_reference::{ImageQualitySummary, summarize_encoded_rgba16};
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
 use iai::core::develop_scene::apply_scene_to_tilemap;
 use iai::core::perceptual_color::linear_srgb_to_oklab;

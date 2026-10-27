@@ -19,8 +19,8 @@
 //! prior behaviour (skip) rather than guessing. Every parser is bounds-checked
 //! and never panics on a short/truncated block.
 
-use super::psd_descriptor::{parse_versioned_descriptor, Cur};
-use iai_doc::layer::{identity_curve, AdjustmentType, LevelsParams};
+use super::psd_descriptor::{Cur, parse_versioned_descriptor};
+use iai_doc::layer::{AdjustmentType, LevelsParams, identity_curve};
 
 fn be_i16(d: &[u8], off: usize) -> Option<i16> {
     d.get(off..off + 2)
@@ -433,7 +433,7 @@ mod tests {
     fn levels_maps_master_and_rgb_records() {
         let mut d = Vec::new();
         push_i16(&mut d, 2); // version
-                             // 29 records; set master (0) + red (1), leave the rest identity.
+        // 29 records; set master (0) + red (1), leave the rest identity.
         for i in 0..29 {
             match i {
                 0 => {
@@ -559,7 +559,7 @@ mod tests {
         d.push(0); // is_map = points
         push_u16(&mut d, 1); // version
         push_u32(&mut d, 0b0101); // bits 0 and 2
-                                  // master: 3 points, lifting the midtone (input 128 → output 160).
+        // master: 3 points, lifting the midtone (input 128 → output 160).
         push_u16(&mut d, 3);
         push_u16(&mut d, 0); // out
         push_u16(&mut d, 0); // in
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(channels[0].len(), 3);
         assert!((channels[0][1].0 - 128.0 / 255.0).abs() < 1e-4); // input x
         assert!((channels[0][1].1 - 160.0 / 255.0).abs() < 1e-4); // output y
-                                                                  // Red (channel 1) was not in the bitmask → identity.
+        // Red (channel 1) was not in the bitmask → identity.
         assert_eq!(channels[1], identity_curve());
         // Green (channel 2) present but identity endpoints.
         assert_eq!(channels[2].len(), 2);
@@ -703,7 +703,7 @@ mod tests {
         let mut d = Vec::new();
         push_u16(&mut d, 2); // version
         push_u16(&mut d, 0); // colour space = RGB
-                             // 16-bit components: 236, 138, 0 (Warming filter), 4th unused.
+        // 16-bit components: 236, 138, 0 (Warming filter), 4th unused.
         push_u16(&mut d, 236 * 257);
         push_u16(&mut d, 138 * 257);
         push_u16(&mut d, 0);

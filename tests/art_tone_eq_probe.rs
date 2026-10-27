@@ -21,8 +21,8 @@ use std::process::Command;
 
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
 use iai::core::develop_scene::apply_scene_to_tilemap;
-use iai::formats::raw::RawImporter;
 use iai::formats::Importer;
+use iai::formats::raw::RawImporter;
 
 const WIDTH: u32 = 900;
 const BINS: usize = 24;
@@ -181,7 +181,7 @@ fn run_art(art: &(PathBuf, PathBuf), raw: &Path, tmp: &Path) {
     .unwrap();
     let art_neutral_png = tmp.join("art_neutral.png");
     assert!(
-        art_render(art, &raw, &[&base], &art_neutral_png),
+        art_render(art, raw, &[&base], &art_neutral_png),
         "ART neutral render failed"
     );
     let (art_neutral_raw, aw, ah) = decode(&art_neutral_png).expect("decode ART neutral");
@@ -197,7 +197,7 @@ fn run_art(art: &(PathBuf, PathBuf), raw: &Path, tmp: &Path) {
         )
         .unwrap();
         let png = tmp.join(format!("art_band{band}.png"));
-        if !art_render(art, &raw, &[&base, &arp], &png) {
+        if !art_render(art, raw, &[&base, &arp], &png) {
             println!("  {name:<11} ART render failed");
             continue;
         }

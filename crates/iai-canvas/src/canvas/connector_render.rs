@@ -9,7 +9,7 @@
 
 use super::Canvas;
 use iai_doc::layer::LayerType;
-use iai_doc::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+use iai_doc::vector::from_shape::{ConnectorRoute, elbow_connector_path};
 use iai_doc::vector::object::{VectorGeometry, VectorObjectData};
 use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
 use iai_geom::vector::affine::AffineTransform;

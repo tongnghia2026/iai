@@ -225,10 +225,11 @@ impl App {
             let filter = self.shell.ui.filter_dialog;
             let proxy_changed = self.update_filter_proxy_preview(filter);
             let canvas_changed = self.update_filter_canvas_preview(filter);
-            if (proxy_changed || canvas_changed) && self.win.window.is_some() {
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+            if (proxy_changed || canvas_changed)
+                && self.win.window.is_some()
+                && let Some(w) = &self.win.window
+            {
+                w.request_redraw();
             }
             return true;
         }
@@ -377,22 +378,23 @@ impl App {
 
         let mut pending = None;
         let mut applied = false;
-        if let Some(preview) = &mut self.shell.filter_preview {
-            if result.job_id == preview.job_id && self.docs.active().id == preview.doc_id {
-                let layer_id = preview.layer_id;
-                let restored = self
-                    .docs
-                    .active_mut()
-                    .canvas
-                    .preview_layer_tiles(layer_id, result.tiles);
-                if restored {
-                    preview.last_preview_filter = Some(result.filter);
-                    preview.cpu_preview_active = true;
-                    preview.gpu_preview_active = false;
-                    applied = true;
-                }
-                pending = preview.pending_filter.take();
+        if let Some(preview) = &mut self.shell.filter_preview
+            && result.job_id == preview.job_id
+            && self.docs.active().id == preview.doc_id
+        {
+            let layer_id = preview.layer_id;
+            let restored = self
+                .docs
+                .active_mut()
+                .canvas
+                .preview_layer_tiles(layer_id, result.tiles);
+            if restored {
+                preview.last_preview_filter = Some(result.filter);
+                preview.cpu_preview_active = true;
+                preview.gpu_preview_active = false;
+                applied = true;
             }
+            pending = preview.pending_filter.take();
         }
 
         if applied {

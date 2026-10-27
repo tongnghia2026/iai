@@ -13,7 +13,7 @@ pub struct StepParams {
     pub doc: Option<u32>,
     /// How many steps.
     #[serde(default = "one")]
-    #[schemars(range(min = 1, max = 100))]
+    #[schemars(range(min = 1, max = 1000))]
     pub steps: u32,
 }
 

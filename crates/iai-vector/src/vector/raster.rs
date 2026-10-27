@@ -253,15 +253,16 @@ fn rasterize_impl(
         // A variable-width ribbon along the open centerline, coloured by `fill`.
         // The width comes from the arc-length profile; round joins/caps fall out
         // of unioning per-segment round cones.
-        if brush.is_visible() && object.style.fill.is_visible() {
-            if let Some(center) = local.first() {
-                let cov = ribbon_coverage(center, brush, object.transform_scale(), w, h);
-                paint_rows(
-                    &mut rgba,
-                    &cov,
-                    &PreparedPaint::new(object.style.fill, object),
-                );
-            }
+        if brush.is_visible()
+            && object.style.fill.is_visible()
+            && let Some(center) = local.first()
+        {
+            let cov = ribbon_coverage(center, brush, object.transform_scale(), w, h);
+            paint_rows(
+                &mut rgba,
+                &cov,
+                &PreparedPaint::new(object.style.fill, object),
+            );
         }
     } else {
         // ── Fill ─────────────────────────────────────────────────────────────

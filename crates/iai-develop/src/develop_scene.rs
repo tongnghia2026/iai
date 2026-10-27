@@ -29,13 +29,13 @@
 
 use crate::cat16;
 use crate::develop::{
-    apply_color, apply_color_linear_classified_in_space, apply_color_linear_in_space,
+    DevelopSettings, EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS, apply_color,
+    apply_color_linear_classified_in_space, apply_color_linear_in_space,
     apply_color_linear_with_mixer_controls_in_space, apply_detail_to_working_buffer_in_space,
     apply_effects_linear_in_space, apply_luma_target, apply_luma_target_in_space,
     apply_point_curve_outer, bell, contrast_curve, control_to_unit, curve_is_identity,
     curve_shadows_mask, darks_mask, eased_control, guided_lowpass_plane, linear_to_srgb, luma_lin,
-    lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep, srgb_to_linear, DevelopSettings,
-    EXPOSURE_LIMIT, TONE_DOWNSAMPLE, TONE_REGION_RADIUS,
+    lut_lerp, rgb_curve_luts, sample_plane_bilinear, smootherstep, srgb_to_linear,
 };
 #[cfg(test)]
 use crate::develop::{apply_color_linear, apply_color_linear_classified};
@@ -413,7 +413,7 @@ impl SceneSource {
         }
         // Tile-span walk (one hash resolve per 256-px run, not per pixel — a
         // 24MP layer linearizes in tens of ms instead of seconds).
-        use iai_raster::tile::{bayer8, TilePos, TILE_SIZE};
+        use iai_raster::tile::{TILE_SIZE, TilePos, bayer8};
         let scale = FINE as f32 / 255.0;
         half.par_chunks_mut(w as usize * 4)
             .zip(alpha.par_chunks_mut(w as usize))
@@ -2485,20 +2485,20 @@ fn render_scene_display_inner(
                 sample_plane_bilinear(plane, *pw, *ph, (x as f32 + 0.5) / s - 0.5, fy)
             });
             let [mut r, mut g, mut b] = tone.scene_to_working(rgb, e);
-            if guided_mixer.is_none() {
-                if let Some((settings, curves)) = develop {
-                    let classification = tone.working_to_display([r, g, b]);
-                    apply_color_linear_classified_in_space(
-                        settings,
-                        curves,
-                        Some(classification),
-                        true,
-                        tone.working_space,
-                        &mut r,
-                        &mut g,
-                        &mut b,
-                    );
-                }
+            if guided_mixer.is_none()
+                && let Some((settings, curves)) = develop
+            {
+                let classification = tone.working_to_display([r, g, b]);
+                apply_color_linear_classified_in_space(
+                    settings,
+                    curves,
+                    Some(classification),
+                    true,
+                    tone.working_space,
+                    &mut r,
+                    &mut g,
+                    &mut b,
+                );
             }
             *slot = [r, g, b];
         }
@@ -3300,7 +3300,7 @@ mod tests {
 
     #[test]
     fn develop3_highlight_compression_preserves_jzczhz_lightness_and_hue() {
-        use iai_color::perceptual_color::jzazbz::{from_working_rgb, JzCzHz};
+        use iai_color::perceptual_color::jzazbz::{JzCzHz, from_working_rgb};
         let color = [0.80, 0.32, 0.12];
         let before = JzCzHz::from(from_working_rgb(color, WorkingColorSpace::LinearSrgb));
         let out = compress_highlight_chroma(

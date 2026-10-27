@@ -1167,7 +1167,7 @@ impl QuickSelectStroke {
             0
         };
         let mut changed: Option<(usize, usize, usize, usize)> = None;
-        for (q, _) in keep.iter().enumerate().filter(|(_, &k)| k) {
+        for (q, _) in keep.iter().enumerate().filter(|&(_, &k)| k) {
             let (x, y) = (x0 + q % rw, y0 + q / rw);
             let i = y * w + x;
             if self.is_target(mask[i]) {
@@ -1218,11 +1218,7 @@ pub fn auto_enhance(
     let binary: Vec<f32> = (0..n)
         .map(|q| {
             let i = (y0 + q / rw) * w + x0 + q % rw;
-            if mask[i] >= 128 {
-                1.0
-            } else {
-                0.0
-            }
+            if mask[i] >= 128 { 1.0 } else { 0.0 }
         })
         .collect();
     let kernel: Vec<f32> = {
@@ -1457,11 +1453,7 @@ mod tests {
         let cache = picture(w, h, |x, y| {
             let left = (10..50).contains(&x) && (10..50).contains(&y);
             let right = (58..98).contains(&x) && (10..50).contains(&y);
-            if left || right {
-                RED
-            } else {
-                BLUE
-            }
+            if left || right { RED } else { BLUE }
         });
         let mut mask = vec![0u8; (w * h) as usize];
         stroke(
@@ -1502,11 +1494,7 @@ mod tests {
             w,
             h,
             |x, _| {
-                if x < 30 {
-                    [180, 50, 50]
-                } else {
-                    [50, 115, 50]
-                }
+                if x < 30 { [180, 50, 50] } else { [50, 115, 50] }
             },
         );
         let mut mask = vec![0u8; (w * h) as usize];

@@ -15,7 +15,7 @@
 //! The path math (cubic Bézier flatten) lives in `core::geometry`.
 
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
-use crate::core::geometry::{cubic_bezier, Point};
+use crate::core::geometry::{Point, cubic_bezier};
 use crate::core::selection::SelectionMode;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::flatten;

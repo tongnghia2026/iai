@@ -18,6 +18,7 @@
 //! winit, wgpu or the format registry.
 
 pub mod agent;
+pub mod antigravity;
 pub mod app;
 pub mod author_mail;
 pub mod author_news;
@@ -31,13 +32,12 @@ pub mod file_io;
 pub use iai_formats as formats;
 pub mod gpu;
 #[cfg(feature = "pro")]
-#[rustfmt::skip]
-pub mod pro;
+pub use iai_pro::pro;
 pub mod tools;
 pub mod ui;
 pub mod update;
 #[cfg(windows)]
-pub mod windows_integration;
+pub use iai_platform::windows_integration;
 
 // `crate::log_crash` is called from deep subsystems (GPU device-lost recovery);
 // keep the short root path working now that the implementation lives in `crash`.

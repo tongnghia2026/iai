@@ -1,10 +1,10 @@
 //! `.iai` document-palette payload.
 
 use iai_doc::palette::{
-    validate_palette, DocumentSwatch, MAX_DOCUMENT_SWATCHES, MAX_SWATCH_NAME_BYTES,
+    DocumentSwatch, MAX_DOCUMENT_SWATCHES, MAX_SWATCH_NAME_BYTES, validate_palette,
 };
 use iai_doc::vector::color::ColorValue;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn palette_to_json(swatches: &[DocumentSwatch]) -> Value {
     Value::Array(

@@ -13,7 +13,7 @@
 use super::render::CanvasEvent;
 use super::state::{App, WarpState};
 use crate::core::tile::TileMap;
-use crate::core::warp::{WarpMesh, WarpMode, DEFAULT_CELL};
+use crate::core::warp::{DEFAULT_CELL, WarpMesh, WarpMode};
 
 /// How many warp strokes Ctrl+Z can step back inside the modal. Each snapshot is
 /// the full displacement mesh (a few MB on a large layer), so the depth is
@@ -148,13 +148,13 @@ impl App {
             state.dragging = false;
             // Commit the stroke's pre-image to the undo stack, but only if the
             // stroke actually warped something — a bare click leaves no step.
-            if let Some(snapshot) = state.stroke_snapshot.take() {
-                if state.stroke_dirty {
-                    if state.undo_stack.len() >= WARP_UNDO_DEPTH {
-                        state.undo_stack.pop_front();
-                    }
-                    state.undo_stack.push_back(snapshot);
+            if let Some(snapshot) = state.stroke_snapshot.take()
+                && state.stroke_dirty
+            {
+                if state.undo_stack.len() >= WARP_UNDO_DEPTH {
+                    state.undo_stack.pop_front();
                 }
+                state.undo_stack.push_back(snapshot);
             }
             state.stroke_dirty = false;
         }

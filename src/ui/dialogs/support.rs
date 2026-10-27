@@ -40,8 +40,7 @@ const NOTE_NAME_MAX: usize = 30;
 /// The dialog's name, on the title bar's button too.
 pub(crate) const SUPPORT_TITLE: &str = "Ủng hộ tác giả";
 /// The ask itself, also said where a check finds no newer build.
-pub(crate) const SUPPORT_ASK: &str =
-    "Phần chính của iAi miễn phí. Nếu app giúp được bạn, hãy ủng hộ tác giả để có kinh phí nâng cấp app.";
+pub(crate) const SUPPORT_ASK: &str = "Phần chính của iAi miễn phí. Nếu app giúp được bạn, hãy ủng hộ tác giả để có kinh phí nâng cấp app.";
 const NAME_HINT: &str = "Để trống là ẩn danh";
 const SHARE_LABEL: &str = "Giới thiệu cho bạn bè";
 const THANKS: &str = "Cảm ơn bạn đã ủng hộ tác giả!";

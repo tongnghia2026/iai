@@ -476,11 +476,7 @@ impl App {
 
             let radius = if use_gpu_ring {
                 let r = ring_screen_radius;
-                if r < 0.5 {
-                    0.0
-                } else {
-                    r
-                }
+                if r < 0.5 { 0.0 } else { r }
             } else {
                 0.0
             };
@@ -610,8 +606,8 @@ impl App {
 #[cfg(test)]
 mod display_profile_tests {
     use super::{
-        canvas_preview_bounds, masked_preview_bounds, system_profile_auto_refresh_enabled,
-        MovedImage,
+        MovedImage, canvas_preview_bounds, masked_preview_bounds,
+        system_profile_auto_refresh_enabled,
     };
 
     #[test]

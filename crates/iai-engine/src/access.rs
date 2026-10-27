@@ -5,7 +5,7 @@ use iai_canvas::canvas::Canvas;
 use iai_canvas::document::{Document, DocumentId};
 
 use crate::events::EngineEvent;
-use crate::session::{no_document, no_such_document, Session};
+use crate::session::{Session, no_document, no_such_document};
 use crate::{CmdError, ErrorCode};
 
 impl Session<'_> {

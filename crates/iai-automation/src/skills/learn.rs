@@ -16,9 +16,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::recipe::{signature, Over, Param, ParamKind, Step};
+use super::recipe::{Over, Param, ParamKind, Step, signature};
 
 /// One call as the agent made it (after the gate made its paths absolute),
 /// and what it answered.
@@ -128,10 +128,10 @@ fn refs_in(value: &Value, out: &mut BTreeSet<String>) {
 fn rename_refs(value: &mut Value, map: &BTreeMap<String, String>) {
     match value {
         Value::Object(o) => {
-            if let Some(Value::String(r)) = o.get_mut("$ref") {
-                if let Some(to) = map.get(r.as_str()) {
-                    *r = to.clone();
-                }
+            if let Some(Value::String(r)) = o.get_mut("$ref")
+                && let Some(to) = map.get(r.as_str())
+            {
+                *r = to.clone();
             }
             o.values_mut().for_each(|x| rename_refs(x, map));
         }
@@ -317,10 +317,8 @@ fn explain(texts: &[&str], names: &[(String, Vec<String>)]) -> Option<String> {
                     }
                 }
             }
-            if fits {
-                if let Some((pre, suf)) = around {
-                    return Some(format!("{pre}${{{template}}}{suf}"));
-                }
+            if fits && let Some((pre, suf)) = around {
+                return Some(format!("{pre}${{{template}}}{suf}"));
             }
         }
     }
@@ -934,10 +932,10 @@ pub fn generalize(calls: &[Recorded], named: &BTreeMap<String, Value>) -> Option
     // 1. Ids an earlier call answered.
     for i in 0..g.len() {
         let (before, rest) = g.split_at_mut(i);
-        if let Some(cur) = rest.first_mut() {
-            if cur.skill.is_none() {
-                link_ids(&mut cur.args, before);
-            }
+        if let Some(cur) = rest.first_mut()
+            && cur.skill.is_none()
+        {
+            link_ids(&mut cur.args, before);
         }
     }
     let mut used = BTreeSet::new();
@@ -982,10 +980,10 @@ pub fn generalize(calls: &[Recorded], named: &BTreeMap<String, Value>) -> Option
                 .iter()
                 .find(|(d, _)| slashes(d).eq_ignore_ascii_case(&slashes(&dir)))
             {
-                if x.writes {
-                    if let Some(param) = params.get_mut(name) {
-                        param.write = true;
-                    }
+                if x.writes
+                    && let Some(param) = params.get_mut(name)
+                {
+                    param.write = true;
                 }
                 continue;
             }

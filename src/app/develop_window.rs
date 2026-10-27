@@ -68,7 +68,7 @@ fn native_work_area(
     winit::dpi::PhysicalSize<u32>,
 )> {
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -226,12 +226,11 @@ impl App {
         {
             use winit::platform::windows::WindowAttributesExtWindows;
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Some(main) = &self.win.window {
-                if let Ok(handle) = main.window_handle() {
-                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
-                        attrs = attrs.with_owner_window(h.hwnd.get());
-                    }
-                }
+            if let Some(main) = &self.win.window
+                && let Ok(handle) = main.window_handle()
+                && let RawWindowHandle::Win32(h) = handle.as_raw()
+            {
+                attrs = attrs.with_owner_window(h.hwnd.get());
             }
         }
 
@@ -268,11 +267,11 @@ impl App {
                 .map(|g| g.max_texture_dimension as usize),
         );
 
-        if let Some(gpu) = &mut self.win.gpu {
-            if let Err(e) = gpu.open_develop_surface(Arc::clone(&window)) {
-                self.shell.status_msg = e;
-                return;
-            }
+        if let Some(gpu) = &mut self.win.gpu
+            && let Err(e) = gpu.open_develop_surface(Arc::clone(&window))
+        {
+            self.shell.status_msg = e;
+            return;
         }
 
         window.request_redraw();
@@ -349,23 +348,23 @@ impl App {
         // Never tear down a live GPU approximation directly into CPU-committed
         // tiles. Arm (or wait for) the exact settled bake first; the render loop
         // resumes this commit automatically as soon as those tiles land.
-        if let Some(preview) = &mut self.dev.develop_preview {
-            if develop_commit_needs_settled_frame(
+        if let Some(preview) = &mut self.dev.develop_preview
+            && develop_commit_needs_settled_frame(
                 preview.gpu_preview_active,
                 preview.processing,
                 preview.rx.is_some(),
-            ) {
-                self.dev.develop_commit_after_refine = true;
-                if preview.gpu_preview_active && !preview.processing {
-                    preview.detail_refine_settings = Some(self.shell.ui.develop_settings.clone());
-                    preview.detail_refine_at = Some(std::time::Instant::now());
-                }
-                self.shell.status_msg = "Finalizing full-quality RAW preview…".to_string();
-                if let Some(w) = &self.win.develop_window {
-                    w.request_redraw();
-                }
-                return;
+            )
+        {
+            self.dev.develop_commit_after_refine = true;
+            if preview.gpu_preview_active && !preview.processing {
+                preview.detail_refine_settings = Some(self.shell.ui.develop_settings.clone());
+                preview.detail_refine_at = Some(std::time::Instant::now());
             }
+            self.shell.status_msg = "Finalizing full-quality RAW preview…".to_string();
+            if let Some(w) = &self.win.develop_window {
+                w.request_redraw();
+            }
+            return;
         }
         self.dev.develop_commit_after_refine = false;
         self.develop_session_save_active_settings();
@@ -518,10 +517,9 @@ impl App {
         // asks (hover highlights, focus, animations).
         if let (Some(state), Some(window)) =
             (&mut self.win.develop_egui_state, &self.win.develop_window)
+            && state.on_window_event(window, &event).repaint
         {
-            if state.on_window_event(window, &event).repaint {
-                window.request_redraw();
-            }
+            window.request_redraw();
         }
 
         match event {
@@ -532,11 +530,11 @@ impl App {
             }
             WindowEvent::Resized(sz) => {
                 if sz.width > 0 && sz.height > 0 {
-                    if let Some(gpu) = &mut self.win.gpu {
-                        if let Some(ws) = &mut gpu.develop {
-                            let device = &gpu.device;
-                            ws.resize(device, sz.width, sz.height);
-                        }
+                    if let Some(gpu) = &mut self.win.gpu
+                        && let Some(ws) = &mut gpu.develop
+                    {
+                        let device = &gpu.device;
+                        ws.resize(device, sz.width, sz.height);
                     }
                     // Re-fit the canvas to the new viewport size.
                     self.dev.develop_view_fit = true;
@@ -1348,15 +1346,14 @@ impl App {
         let mut title = format!("Develop — {}", doc.title);
         // Filmstrip position "(i of N)" for a multi-image session.
         let n = self.dev.develop_session.len();
-        if n > 1 {
-            if let Some(i) = self
+        if n > 1
+            && let Some(i) = self
                 .dev
                 .develop_session
                 .iter()
                 .position(|e| e.doc == doc.id)
-            {
-                title.push_str(&format!(" ({} of {})", i + 1, n));
-            }
+        {
+            title.push_str(&format!(" ({} of {})", i + 1, n));
         }
         if doc.canvas.develop_source.is_some() {
             let cam = doc.canvas.metadata.source_profile.trim();

@@ -588,34 +588,33 @@ impl Canvas {
 
         // Finalize an alpha-plane stroke (Channels panel): crop before/after
         // to the stroke bbox and push the undo command.
-        if let Some(pending) = self.pending_alpha_stroke.take() {
-            if let (Some((x0, y0, x1, y1)), Some(idx)) =
+        if let Some(pending) = self.pending_alpha_stroke.take()
+            && let (Some((x0, y0, x1, y1)), Some(idx)) =
                 (pending.bbox, self.channels.alpha_index_of(pending.alpha_id))
-            {
-                let ch = &self.channels.alpha[idx];
-                if x1 > x0 && y1 > y0 && pending.before.len() == ch.mask.len() {
-                    let crop = |data: &[u8]| {
-                        let mut out = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
-                        for y in y0..y1 {
-                            let row = (y as usize) * (ch.width as usize);
-                            out.extend_from_slice(&data[row + x0 as usize..row + x1 as usize]);
-                        }
-                        out
-                    };
-                    let before = crop(&pending.before);
-                    let after = crop(&ch.mask);
-                    if before != after {
-                        self.record_as(
-                            Box::new(iai_history::command::AlphaPlanePaintCommand::new(
-                                "Channel Paint",
-                                pending.alpha_id,
-                                (x0, y0, x1, y1),
-                                before,
-                                after,
-                            )),
-                            ChangeKind::LayerPixels,
-                        );
+        {
+            let ch = &self.channels.alpha[idx];
+            if x1 > x0 && y1 > y0 && pending.before.len() == ch.mask.len() {
+                let crop = |data: &[u8]| {
+                    let mut out = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
+                    for y in y0..y1 {
+                        let row = (y as usize) * (ch.width as usize);
+                        out.extend_from_slice(&data[row + x0 as usize..row + x1 as usize]);
                     }
+                    out
+                };
+                let before = crop(&pending.before);
+                let after = crop(&ch.mask);
+                if before != after {
+                    self.record_as(
+                        Box::new(iai_history::command::AlphaPlanePaintCommand::new(
+                            "Channel Paint",
+                            pending.alpha_id,
+                            (x0, y0, x1, y1),
+                            before,
+                            after,
+                        )),
+                        ChangeKind::LayerPixels,
+                    );
                 }
             }
         }
@@ -1640,7 +1639,7 @@ mod hdr_adjust_tests {
         use iai_geom::geometry::Point;
         use iai_geom::vector::affine::AffineTransform;
         use iai_history::gateway::ChangeKind;
-        use iai_vector::command_vector::{apply_object_to_layer, CreatePathLayer};
+        use iai_vector::command_vector::{CreatePathLayer, apply_object_to_layer};
 
         fn square_obj(side: f32, at: (f32, f32)) -> VectorObjectData {
             let path = iai_doc::vector::path::PathData::new(

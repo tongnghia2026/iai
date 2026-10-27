@@ -284,13 +284,13 @@ impl PdfPages {
         }
         let page_count = self.dims.len();
         let wanted: std::collections::BTreeSet<usize> = pages.iter().copied().collect();
-        if let Some(&max_idx) = wanted.iter().next_back() {
-            if max_idx >= page_count {
-                return Err(format!(
-                    "PDF page {} is out of range (document has {page_count})",
-                    max_idx + 1
-                ));
-            }
+        if let Some(&max_idx) = wanted.iter().next_back()
+            && max_idx >= page_count
+        {
+            return Err(format!(
+                "PDF page {} is out of range (document has {page_count})",
+                max_idx + 1
+            ));
         }
 
         let mut dimension_scale = f32::INFINITY;
@@ -1993,9 +1993,11 @@ mod tests {
 
         // Auto 300 DPI, well within budget: ceil(10*300/72) = 42.
         assert_eq!(imported.len(), 65);
-        assert!(imported
-            .iter()
-            .all(|canvas| (canvas.width, canvas.height) == (42, 42)));
+        assert!(
+            imported
+                .iter()
+                .all(|canvas| (canvas.width, canvas.height) == (42, 42))
+        );
     }
 
     #[test]
@@ -2232,9 +2234,11 @@ mod tests {
                 &top_left[..4]
             );
             let center = ((canvas.height / 2 * canvas.width + canvas.width / 2) * 4) as usize;
-            assert!(pixels[center..center + 3]
-                .iter()
-                .all(|&channel| channel > 220));
+            assert!(
+                pixels[center..center + 3]
+                    .iter()
+                    .all(|&channel| channel > 220)
+            );
         }
 
         let _ = std::fs::remove_file(source_path);
@@ -2592,9 +2596,11 @@ mod tests {
 
         let rendered = PdfImporter::render_selected(&output_path, &[1], Some(72.0)).unwrap();
         let pixels = rendered[0].export_flat();
-        assert!(pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel[2] > 180 && pixel[0] < 60 && pixel[1] < 80));
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[2] > 180 && pixel[0] < 60 && pixel[1] < 80)
+        );
 
         let _ = std::fs::remove_file(source_path);
         let _ = std::fs::remove_file(output_path);

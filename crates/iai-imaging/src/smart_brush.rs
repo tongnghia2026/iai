@@ -154,11 +154,7 @@ fn smart_grade(
             .copied()
             .filter(|&c| nearest(other, c) > AMBIGUOUS)
             .collect();
-        if kept.is_empty() {
-            own
-        } else {
-            kept
-        }
+        if kept.is_empty() { own } else { kept }
     };
     let (fg, bg) = (thin(fg), thin(bg.into_iter().map(|(_, c)| c).collect()));
     let fg = keep(fg, &bg);

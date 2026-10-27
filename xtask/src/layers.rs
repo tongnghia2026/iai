@@ -31,6 +31,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("iai-gpu", 6),
     ("iai-formats", 6),
     ("iai-diag", 6),
+    ("iai-print", 6),
     ("iai-engine", 7),
     ("iai-tools", 7),
     ("iai-automation", 8),

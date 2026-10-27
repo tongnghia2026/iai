@@ -8,7 +8,7 @@
 
 use super::*;
 use iai_color::color::luminance_f32;
-use iai_raster::tile::{dither16_to_u8, quantize_dither, TileMap, TILE_PIXELS, TILE_SIZE};
+use iai_raster::tile::{TILE_PIXELS, TILE_SIZE, TileMap, dither16_to_u8, quantize_dither};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -949,15 +949,15 @@ impl<'a> DevelopPlan<'a> {
             .map(|v| (-*v / CONTROL_LIMIT).clamp(0.0, 1.0))
             .fold(0.0f32, f32::max);
         let mut mixer_affinity = 1.0;
-        if self.mixer_gated {
-            if let Some(curves) = &self.mixer_curves {
-                mixer_affinity = if mixer_desat > 0.0 {
-                    mixer_desat_affinity(curves, region)
-                } else {
-                    mixer_edit_affinity(curves, region)
-                };
-                gate *= mixer_affinity;
-            }
+        if self.mixer_gated
+            && let Some(curves) = &self.mixer_curves
+        {
+            mixer_affinity = if mixer_desat > 0.0 {
+                mixer_desat_affinity(curves, region)
+            } else {
+                mixer_edit_affinity(curves, region)
+            };
+            gate *= mixer_affinity;
         }
         // Attenuating chroma detail de-blocks JPEG chroma noise (a SMALL
         // deviation from the region). A BIG chroma deviation is a real colour

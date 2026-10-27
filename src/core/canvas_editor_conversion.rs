@@ -5,13 +5,13 @@
 //! caller can surface a compatibility warning without silently losing data.
 
 use base64::Engine;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::document::CanvasEditorDocument;
 use super::text::TextFontFamily;
 use super::text_document::{
-    CharStyle, ImageBlock, ImageWrap, ListKind, Paragraph, ParagraphAlign, ParagraphStyle,
-    TextDocument, DEFAULT_DPI,
+    CharStyle, DEFAULT_DPI, ImageBlock, ImageWrap, ListKind, Paragraph, ParagraphAlign,
+    ParagraphStyle, TextDocument,
 };
 
 const MM_PER_INCH: f32 = 25.4;
@@ -415,10 +415,12 @@ mod tests {
         assert_eq!(element["type"], "image");
         assert_eq!(element["imgDisplay"], "surround");
         assert_eq!(element["imgFloatPosition"]["pageNo"], 2);
-        assert!(element["value"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"));
+        assert!(
+            element["value"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
         assert!(converted.warnings.is_empty());
     }
 }

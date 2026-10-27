@@ -8,8 +8,8 @@ use super::render::CanvasEvent;
 use super::state::{App, ScanPreviewSession};
 use crate::core::canvas::Canvas;
 use crate::core::scan_cleanup::{
-    apply_with_background, clean_scan_rgba, resolve_pages, ScanBackground, ScanCleanScope,
-    ScanCleanupParams, ScanCleanupRequest,
+    ScanBackground, ScanCleanScope, ScanCleanupParams, ScanCleanupRequest, apply_with_background,
+    clean_scan_rgba, resolve_pages,
 };
 use crate::core::tile::TileMap;
 

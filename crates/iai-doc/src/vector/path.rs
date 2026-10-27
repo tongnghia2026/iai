@@ -11,7 +11,7 @@
 //! straight line when both of its handles are absent. Handles are stored as
 //! *absolute* control points so an affine transform maps every point uniformly.
 
-use iai_geom::geometry::{cubic_bezier, Point, Rect};
+use iai_geom::geometry::{Point, Rect, cubic_bezier};
 use iai_geom::vector::affine::AffineTransform;
 
 /// Parser-safety limits (Mục 5.4). Enforced by [`PathData::validate`]; the .iai
@@ -318,8 +318,10 @@ mod tests {
             FillRule::NonZero,
         );
         assert!(bad.validate().is_err());
-        assert!(PathData::new(vec![sq()], FillRule::NonZero)
-            .validate()
-            .is_ok());
+        assert!(
+            PathData::new(vec![sq()], FillRule::NonZero)
+                .validate()
+                .is_ok()
+        );
     }
 }

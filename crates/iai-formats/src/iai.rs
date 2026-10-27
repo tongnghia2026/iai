@@ -2478,16 +2478,20 @@ mod tests {
 
     #[test]
     fn canvas_editor_v12_rejects_invalid_or_oversized_payloads() {
-        assert!(iai_canvas::document::CanvasEditorDocument::try_new(
-            serde_json::json!({ "main": "not-an-array" })
-        )
-        .is_err());
+        assert!(
+            iai_canvas::document::CanvasEditorDocument::try_new(
+                serde_json::json!({ "main": "not-an-array" })
+            )
+            .is_err()
+        );
 
         let oversized = "x".repeat(iai_canvas::document::MAX_CANVAS_EDITOR_DOCUMENT_BYTES);
-        assert!(iai_canvas::document::CanvasEditorDocument::try_new(
-            serde_json::json!({ "main": [{ "value": oversized }] })
-        )
-        .is_err());
+        assert!(
+            iai_canvas::document::CanvasEditorDocument::try_new(
+                serde_json::json!({ "main": [{ "value": oversized }] })
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2634,7 +2638,7 @@ mod tests {
         use iai_develop::develop::{
             DevelopSettings, LocalAdjustment, LocalMaskShape, LocalSettings,
         };
-        use iai_develop::develop_scene::{apply_scene_to_tilemap, SceneSource};
+        use iai_develop::develop_scene::{SceneSource, apply_scene_to_tilemap};
 
         let dir = tmp_dir("develop2-end-to-end");
         let project_path = dir.join("developed.iai");
@@ -3156,7 +3160,7 @@ mod tests {
     #[test]
     fn connector_binding_round_trips() {
         use iai_doc::connector::{ConnectorAnchor, ConnectorBinding};
-        use iai_doc::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+        use iai_doc::vector::from_shape::{ConnectorRoute, elbow_connector_path};
         use iai_doc::vector::object::VectorObjectData;
         use iai_doc::vector::style::VectorStyle;
         use iai_geom::vector::affine::AffineTransform;
@@ -4031,11 +4035,12 @@ mod tests {
                 assert!(!p2.base_pristine);
                 assert_eq!(p2.view, (2.0, -5.0, 7.0));
                 assert_eq!((p2.canvas.width, p2.canvas.height), (6, 5));
-                assert!(p2
-                    .canvas
-                    .export_flat()
-                    .chunks_exact(4)
-                    .all(|px| px[2] > 180 && px[0] < 60));
+                assert!(
+                    p2.canvas
+                        .export_flat()
+                        .chunks_exact(4)
+                        .all(|px| px[2] > 180 && px[0] < 60)
+                );
             }
             _ => panic!("expected a PDF project"),
         }

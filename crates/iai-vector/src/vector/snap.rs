@@ -55,12 +55,12 @@ pub fn snap_to_paths(query: Point, paths: &[PathData], threshold: f32) -> Option
     // 1) Corners / endpoints win. Take the globally nearest anchor in range.
     let mut best_node: Option<(f32, Point)> = None;
     for path in paths {
-        if let Some(hit) = nearest_node(path, query) {
-            if hit.distance <= threshold {
-                let anchor = path.contours[hit.contour].nodes[hit.node].anchor;
-                if best_node.is_none_or(|(d, _)| hit.distance < d) {
-                    best_node = Some((hit.distance, anchor));
-                }
+        if let Some(hit) = nearest_node(path, query)
+            && hit.distance <= threshold
+        {
+            let anchor = path.contours[hit.contour].nodes[hit.node].anchor;
+            if best_node.is_none_or(|(d, _)| hit.distance < d) {
+                best_node = Some((hit.distance, anchor));
             }
         }
     }
@@ -77,10 +77,11 @@ pub fn snap_to_paths(query: Point, paths: &[PathData], threshold: f32) -> Option
     let flat_tol = (edge_threshold * 0.25).max(0.05);
     let mut best_edge: Option<(f32, Point)> = None;
     for path in paths {
-        if let Some(hit) = nearest_point_on_path(path, query, flat_tol) {
-            if hit.distance <= edge_threshold && best_edge.is_none_or(|(d, _)| hit.distance < d) {
-                best_edge = Some((hit.distance, hit.point));
-            }
+        if let Some(hit) = nearest_point_on_path(path, query, flat_tol)
+            && hit.distance <= edge_threshold
+            && best_edge.is_none_or(|(d, _)| hit.distance < d)
+        {
+            best_edge = Some((hit.distance, hit.point));
         }
     }
     best_edge.map(|(_, point)| SnapHit {

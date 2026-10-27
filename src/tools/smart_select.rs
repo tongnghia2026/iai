@@ -218,10 +218,10 @@ impl Tool for SmartSelectTool {
         self.dragging = false;
         self.stroke = None;
         self.intersect = None;
-        if let Some(bounds) = self.stroke_bounds.take() {
-            if self.auto_enhance {
-                canvas.quick_select_auto_enhance(bounds);
-            }
+        if let Some(bounds) = self.stroke_bounds.take()
+            && self.auto_enhance
+        {
+            canvas.quick_select_auto_enhance(bounds);
         }
         // Photoshop's Quick Selection moves on to Add once the first stroke
         // has made a selection, so the next stroke extends it.
@@ -230,11 +230,11 @@ impl Tool for SmartSelectTool {
         }
         self.started_new = false;
 
-        if let Some(mut cmd) = self.undo_cmd.take() {
-            if canvas.selection.mask != self.snapshot_before {
-                cmd.capture_after(&canvas.selection);
-                canvas.record(Box::new(cmd));
-            }
+        if let Some(mut cmd) = self.undo_cmd.take()
+            && canvas.selection.mask != self.snapshot_before
+        {
+            cmd.capture_after(&canvas.selection);
+            canvas.record(Box::new(cmd));
         }
         self.snapshot_before.clear();
         ToolResponse::repaint()

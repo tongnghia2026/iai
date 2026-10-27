@@ -298,7 +298,7 @@ impl App {
                 cw,
                 ch,
             );
-            use crate::core::canvas::selection_output::{output_selection, SelectionOutput};
+            use crate::core::canvas::selection_output::{SelectionOutput, output_selection};
             let output = match mode {
                 RefineOutputMode::LayerMask => Some(SelectionOutput::LayerMask),
                 RefineOutputMode::NewLayer => Some(SelectionOutput::NewLayer),
@@ -515,9 +515,11 @@ mod tests {
         let doc = app.docs.active_doc_idx;
         app.docs.documents[doc].canvas.undo();
         let c = canvas(&app);
-        assert!(c.layer_stack.layers[c.layer_stack.active_idx]
-            .mask
-            .is_none());
+        assert!(
+            c.layer_stack.layers[c.layer_stack.active_idx]
+                .mask
+                .is_none()
+        );
         assert_eq!(c.selection.mask, before_sel);
     }
 
@@ -531,9 +533,11 @@ mod tests {
         let c = canvas(&app);
         assert_eq!(c.layer_stack.layers.len(), layers_before + 1);
         assert!(!c.layer_stack.layers[c.layer_stack.active_idx - 1].visible);
-        assert!(c.layer_stack.layers[c.layer_stack.active_idx]
-            .mask
-            .is_some());
+        assert!(
+            c.layer_stack.layers[c.layer_stack.active_idx]
+                .mask
+                .is_some()
+        );
         let doc = app.docs.active_doc_idx;
         app.docs.documents[doc].canvas.undo();
         let c = canvas(&app);

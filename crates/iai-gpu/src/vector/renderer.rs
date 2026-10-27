@@ -21,7 +21,7 @@ use wgpu::util::DeviceExt;
 
 use super::mesh::{VectorMesh, VectorVertex};
 use iai_doc::vector::color::ColorValue;
-use iai_doc::vector::style::{GradientKind, Paint, MAX_GRADIENT_STOPS};
+use iai_doc::vector::style::{GradientKind, MAX_GRADIENT_STOPS, Paint};
 use iai_geom::vector::affine::AffineTransform;
 
 /// The colour target format the hybrid canvas draws into. Matches

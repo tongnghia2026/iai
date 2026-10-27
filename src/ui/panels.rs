@@ -795,22 +795,22 @@ fn gradient_ramp(ui: &mut egui::Ui, style: &crate::ui::PathStyleData, actions: &
         if resp.clicked() {
             new_selected = i;
         }
-        if resp.dragged() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                let raw = ((p.x - bar_rect.left()) / bar_rect.width().max(1.0)).clamp(0.0, 1.0);
-                let lo = if i == 0 {
-                    0.0
-                } else {
-                    style.gradient_stop_offsets[i - 1]
-                };
-                let hi = if i + 1 == count {
-                    1.0
-                } else {
-                    style.gradient_stop_offsets[i + 1]
-                };
-                actions.tool.set_path_gradient_stop_offset = Some((i as u8, raw.clamp(lo, hi)));
-                new_selected = i;
-            }
+        if resp.dragged()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let raw = ((p.x - bar_rect.left()) / bar_rect.width().max(1.0)).clamp(0.0, 1.0);
+            let lo = if i == 0 {
+                0.0
+            } else {
+                style.gradient_stop_offsets[i - 1]
+            };
+            let hi = if i + 1 == count {
+                1.0
+            } else {
+                style.gradient_stop_offsets[i + 1]
+            };
+            actions.tool.set_path_gradient_stop_offset = Some((i as u8, raw.clamp(lo, hi)));
+            new_selected = i;
         }
         if resp.drag_stopped() {
             actions.tool.commit_path_style = true;
@@ -2067,7 +2067,7 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                         )
                                         .clicked()
                                         {
-                                            actions.layers.add_layer = true;
+                                            actions.run("layer.new", serde_json::json!({}));
                                             egui::Popup::close_id(ui.ctx(), menu_popup_id);
                                         }
                                         if ps_flat_popup_button(
@@ -2078,8 +2078,12 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                         )
                                         .clicked()
                                         {
-                                            actions.layers.duplicate_layer =
-                                                Some(data.layers.active_layer_idx);
+                                            actions.run_on_layer(
+                                                &data.layers.layer_ids,
+                                                data.layers.active_layer_idx,
+                                                "layer.duplicate",
+                                                serde_json::json!({"picked": true}),
+                                            );
                                             egui::Popup::close_id(ui.ctx(), menu_popup_id);
                                         }
                                         if ps_flat_popup_button(
@@ -2105,8 +2109,7 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                         )
                                         .clicked()
                                         {
-                                            actions.layers.merge_down =
-                                                Some(data.layers.active_layer_idx);
+                                            actions.run("layer.merge_down", serde_json::json!({}));
                                             egui::Popup::close_id(ui.ctx(), menu_popup_id);
                                         }
                                         if ps_flat_popup_button(
@@ -2117,7 +2120,7 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                         )
                                         .clicked()
                                         {
-                                            actions.layers.merge_all = true;
+                                            actions.run("layer.flatten", serde_json::json!({}));
                                             egui::Popup::close_id(ui.ctx(), menu_popup_id);
                                         }
                                     });
@@ -2199,7 +2202,12 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                         .selectable_label(current_mode == *mode, mode.name())
                                         .clicked()
                                     {
-                                        actions.layers.set_blend_mode = Some((idx, *mode));
+                                        actions.run_on_layer(
+                                            &data.layers.layer_ids,
+                                            idx,
+                                            "layer.set",
+                                            serde_json::json!({"blend": blend_name(*mode)}),
+                                        );
                                     }
                                 }
                             });
@@ -2230,13 +2238,23 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                             .on_hover_text("Lock transparent pixels")
                             .clicked()
                         {
-                            actions.layers.toggle_lock_alpha = Some(idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                idx,
+                                "layer.set",
+                                serde_json::json!({"lockAlpha": !lock_alpha}),
+                            );
                         }
                         if ps_lock_all_button(ui, locked, pal.warning)
                             .on_hover_text(if locked { "Unlock all" } else { "Lock all" })
                             .clicked()
                         {
-                            actions.layers.toggle_lock = Some(idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                idx,
+                                "layer.set",
+                                serde_json::json!({"locked": !locked}),
+                            );
                         }
                     });
                 }
@@ -2296,9 +2314,19 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                     if mask_resp.clicked() {
                         let alt = ui.input(|i| i.modifiers.alt);
                         if alt {
-                            actions.layers.add_mask_black = Some(data.layers.active_layer_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                data.layers.active_layer_idx,
+                                "layer.mask",
+                                serde_json::json!({"op": "hide_all"}),
+                            );
                         } else {
-                            actions.layers.add_mask_white = Some(data.layers.active_layer_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                data.layers.active_layer_idx,
+                                "layer.mask",
+                                serde_json::json!({"op": "reveal_all"}),
+                            );
                         }
                     }
 
@@ -2398,9 +2426,14 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                         .on_hover_text("Group selected (Ctrl+G) · Alt-click: Ungroup");
                     if group_resp.clicked() {
                         if ui.input(|i| i.modifiers.alt) {
-                            actions.layers.ungroup = Some(data.layers.active_layer_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                data.layers.active_layer_idx,
+                                "layer.ungroup",
+                                serde_json::json!({}),
+                            );
                         } else {
-                            actions.layers.group_selected = true;
+                            actions.run("layer.group", serde_json::json!({}));
                         }
                     }
 
@@ -2408,7 +2441,7 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                         .on_hover_text("New layer")
                         .clicked()
                     {
-                        actions.layers.add_layer = true;
+                        actions.run("layer.new", serde_json::json!({}));
                     }
 
                     let active = data.layers.active_layer_idx;
@@ -2430,9 +2463,19 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                         .clicked()
                     {
                         if delete_mask_mode {
-                            actions.layers.delete_mask = Some(active);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                active,
+                                "layer.mask",
+                                serde_json::json!({"op": "delete"}),
+                            );
                         } else {
-                            actions.layers.remove_layer = Some(active);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                active,
+                                "layer.delete",
+                                serde_json::json!({"picked": true}),
+                            );
                         }
                     }
                 });
@@ -2972,12 +3015,34 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         if on_triangle {
             actions.layers.toggle_group_expanded = Some(idx);
         } else if on_eye {
-            actions.layers.toggle_visible = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.set",
+                serde_json::json!({"visible": !visible}),
+            );
         } else if on_link {
-            actions.layers.toggle_mask_link = Some(idx);
+            let linked = data
+                .layers
+                .layer_mask_linked
+                .get(idx)
+                .copied()
+                .unwrap_or(true);
+            let op = if linked { "unlink" } else { "link" };
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.mask",
+                serde_json::json!({"op": op}),
+            );
         } else if on_pixel && ctrl {
             // Photoshop: Ctrl+click a thumbnail loads its transparency.
-            actions.layers.load_layer_selection = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "select.from_layer",
+                serde_json::json!({}),
+            );
         } else if on_pixel && shift {
             actions.layers.select_layer = Some((idx, false, true));
         } else if on_pixel {
@@ -2985,7 +3050,19 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             actions.layers.set_paint_target = Some((idx, PaintTarget::Pixels));
         } else if on_mask && shift {
             // Photoshop: Shift+click a mask thumbnail turns the mask off/on.
-            actions.layers.toggle_mask_enabled = Some(idx);
+            let on = data
+                .layers
+                .layer_mask_enabled
+                .get(idx)
+                .copied()
+                .unwrap_or(true);
+            let op = if on { "disable" } else { "enable" };
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.mask",
+                serde_json::json!({"op": op}),
+            );
         } else if on_mask {
             actions.layers.select_layer = Some((idx, false, false));
             actions.layers.set_paint_target = Some((idx, PaintTarget::Mask));
@@ -3002,7 +3079,12 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 || mask_thumb_rect.is_some_and(|r| r.contains(pos))
                 || link_rect.is_some_and(|r| r.contains(pos));
             if !on_icon {
-                actions.layers.unlock_background_layer = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.from_background",
+                    serde_json::json!({}),
+                );
             }
         } else if layer_type == "Adjustment" {
             if !on_eye {
@@ -3036,10 +3118,11 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         ui.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("dragging_layer"), idx));
     }
     if row_resp.hovered() && ui.input(|i| i.pointer.any_released()) {
-        if let Some((src, dst, _zone)) = layer_drop_target(ui, data, frame_resp.rect, idx) {
-            if src != dst && src != idx {
-                actions.layers.move_layer_to = Some((src, dst));
-            }
+        if let Some((src, dst, _zone)) = layer_drop_target(ui, data, frame_resp.rect, idx)
+            && src != dst
+            && src != idx
+        {
+            actions.layers.move_layer_to = Some((src, dst));
         }
         ui.memory_mut(|mem| mem.data.remove::<usize>(egui::Id::new("dragging_layer")));
     }
@@ -3055,11 +3138,16 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
     }
     row_resp.context_menu(|ui| {
         if ui.button("Duplicate").clicked() {
-            actions.layers.duplicate_layer = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.duplicate",
+                serde_json::json!({"picked": true}),
+            );
             ui.close();
         }
         if ui.button("Layer via Copy (Ctrl+J)").clicked() {
-            actions.layers.layer_via_copy = true;
+            actions.run("layer.via_copy", serde_json::json!({}));
             ui.close();
         }
         if ui.button("Rename...").clicked() {
@@ -3086,11 +3174,21 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         }
         ui.separator();
         if ui.button("Move Up").clicked() {
-            actions.layers.move_layer_up = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.move",
+                serde_json::json!({"to": "up"}),
+            );
             ui.close();
         }
         if ui.button("Move Down").clicked() {
-            actions.layers.move_layer_down = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.move",
+                serde_json::json!({"to": "down"}),
+            );
             ui.close();
         }
         ui.separator();
@@ -3100,17 +3198,32 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             "Lock Transparent Pixels"
         };
         if ui.button(la_label).clicked() {
-            actions.layers.toggle_lock_alpha = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.set",
+                serde_json::json!({"lockAlpha": !lock_alpha}),
+            );
             ui.close();
         }
         ui.separator();
         if !has_mask {
             if ui.button("Add Mask (Reveal All)").clicked() {
-                actions.layers.add_mask_white = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.mask",
+                    serde_json::json!({"op": "reveal_all"}),
+                );
                 ui.close();
             }
             if ui.button("Add Mask (Hide All)").clicked() {
-                actions.layers.add_mask_black = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.mask",
+                    serde_json::json!({"op": "hide_all"}),
+                );
                 ui.close();
             }
         }
@@ -3127,44 +3240,84 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
                 "Link Mask"
             };
             if ui.button(link_label).clicked() {
-                actions.layers.toggle_mask_link = Some(idx);
+                let op = if link_label == "Unlink Mask" {
+                    "unlink"
+                } else {
+                    "link"
+                };
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.mask",
+                    serde_json::json!({"op": op}),
+                );
                 ui.close();
             }
             if ui.button("Invert  (Ctrl+I)").clicked() {
-                actions.layers.invert_active = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.invert",
+                    serde_json::json!({}),
+                );
                 ui.close();
             }
             if ui.button("Apply Mask").clicked() {
-                actions.layers.apply_mask = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.mask",
+                    serde_json::json!({"op": "apply"}),
+                );
                 ui.close();
             }
             if ui.button("Delete Mask").clicked() {
-                actions.layers.delete_mask = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.mask",
+                    serde_json::json!({"op": "delete"}),
+                );
                 ui.close();
             }
         }
         ui.separator();
         if ui.button("Group Layers  (Ctrl+G)").clicked() {
-            actions.layers.group_selected = true;
+            actions.run("layer.group", serde_json::json!({}));
             ui.close();
         }
         if is_group {
             if ui.button("Ungroup  (Ctrl+Shift+G)").clicked() {
-                actions.layers.ungroup = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.ungroup",
+                    serde_json::json!({}),
+                );
                 ui.close();
             }
             if ui.button("Merge Group").clicked() {
-                actions.layers.merge_group = Some(idx);
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "layer.merge",
+                    serde_json::json!({"what": "group"}),
+                );
                 ui.close();
             }
         }
         ui.separator();
         if ui.button("Merge Down").clicked() {
-            actions.layers.merge_down = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.merge_down",
+                serde_json::json!({}),
+            );
             ui.close();
         }
         if ui.button("Stamp Visible  (Ctrl+Shift+E)").clicked() {
-            actions.layers.merge_visible = true;
+            actions.run("layer.merge", serde_json::json!({"what": "visible"}));
             ui.close();
         }
         if ui
@@ -3175,7 +3328,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             .on_hover_text("Gộp tất cả layer thành một (bỏ layer đang ẩn)")
             .clicked()
         {
-            actions.layers.merge_all = true;
+            actions.run("layer.flatten", serde_json::json!({}));
             ui.close();
         }
         ui.separator();
@@ -3185,10 +3338,20 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             ))
             .clicked()
         {
-            actions.layers.remove_layer = Some(idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                idx,
+                "layer.delete",
+                serde_json::json!({"picked": true}),
+            );
             ui.close();
         }
     });
+}
+
+/// A blend mode as `layer.set` names it.
+fn blend_name(mode: BlendMode) -> serde_json::Value {
+    serde_json::to_value(iai_engine::cmds::common::Blend::from_core(mode)).unwrap_or_default()
 }
 
 /// Channels panel: composite + R/G/B rows and saved alpha channels. Clicking
@@ -3309,7 +3472,10 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                     && (ui.input(|inp| inp.key_pressed(egui::Key::Enter)) || resp.lost_focus());
                 if commit || cancel {
                     if commit && !text.trim().is_empty() && text.trim() != name {
-                        actions.channels.rename_alpha_channel = Some((i, text.trim().to_string()));
+                        actions.run(
+                            "channel.edit",
+                            serde_json::json!({"op": "rename", "channel": i, "name": text.trim()}),
+                        );
                     }
                     ui.ctx().data_mut(|d| {
                         d.remove::<u32>(rename_id);
@@ -3371,11 +3537,17 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                     ui.close();
                 }
                 if ui.button("Duplicate").clicked() {
-                    actions.channels.duplicate_alpha_channel = Some(i);
+                    actions.run(
+                        "channel.edit",
+                        serde_json::json!({"op": "duplicate", "channel": i}),
+                    );
                     ui.close();
                 }
                 if ui.button("Delete").clicked() {
-                    actions.channels.delete_alpha_channel = Some(i);
+                    actions.run(
+                        "channel.edit",
+                        serde_json::json!({"op": "delete", "channel": i}),
+                    );
                     ui.close();
                 }
             });
@@ -3395,32 +3567,33 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
                 "Load channel as selection\nCtrl = Add · Alt = Subtract · Ctrl+Alt = Intersect",
             )
             .clicked()
+            && let Some(idx) = alpha_target
         {
-            if let Some(idx) = alpha_target {
-                use crate::core::selection::MaskCombine;
-                let (ctrl, alt) = ui.input(|inp| (inp.modifiers.ctrl, inp.modifiers.alt));
-                let mode = match (ctrl, alt) {
-                    (true, true) => MaskCombine::Intersect,
-                    (true, false) => MaskCombine::Add,
-                    (false, true) => MaskCombine::Subtract,
-                    (false, false) => MaskCombine::Replace,
-                };
-                actions.channels.load_channel_as_selection = Some((idx, mode));
-            }
+            let (ctrl, alt) = ui.input(|inp| (inp.modifiers.ctrl, inp.modifiers.alt));
+            let mode = match (ctrl, alt) {
+                (true, true) => "intersect",
+                (true, false) => "add",
+                (false, true) => "subtract",
+                (false, false) => "replace",
+            };
+            actions.run(
+                "select.from_channel",
+                serde_json::json!({"channel": idx, "mode": mode}),
+            );
         }
         if ui
             .button(egui::RichText::new(ph::SELECTION_PLUS).size(13.0))
             .on_hover_text("Save selection as channel")
             .clicked()
         {
-            actions.channels.save_selection_as_channel = true;
+            actions.run("channel.edit", serde_json::json!({"op": "save_selection"}));
         }
         if ui
             .button(egui::RichText::new(ph::PLUS).size(13.0))
             .on_hover_text("New channel")
             .clicked()
         {
-            actions.channels.new_alpha_channel = true;
+            actions.run("channel.edit", serde_json::json!({"op": "new"}));
         }
         if ui
             .add_enabled(
@@ -3429,10 +3602,12 @@ fn channels_panel_contents(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAct
             )
             .on_hover_text("Delete channel")
             .clicked()
+            && let Some(idx) = alpha_target
         {
-            if let Some(idx) = alpha_target {
-                actions.channels.delete_alpha_channel = Some(idx);
-            }
+            actions.run(
+                "channel.edit",
+                serde_json::json!({"op": "delete", "channel": idx}),
+            );
         }
     });
 }

@@ -1482,10 +1482,10 @@ pub fn disambiguated_tab_titles(docs: &[Document]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pdf_global_overlay_stack, disambiguated_tab_titles, CanvasEditorDocument, Document,
-        DocumentId, DocumentKind, FlowTextDocumentState, PdfDocumentState, PdfGlobalClear,
-        PdfGlobalEdit, PdfGlobalStamp, PdfGlobalStampKind, PdfPageRef,
-        MAX_CANVAS_EDITOR_JSON_DEPTH,
+        CanvasEditorDocument, Document, DocumentId, DocumentKind, FlowTextDocumentState,
+        MAX_CANVAS_EDITOR_JSON_DEPTH, PdfDocumentState, PdfGlobalClear, PdfGlobalEdit,
+        PdfGlobalStamp, PdfGlobalStampKind, PdfPageRef, build_pdf_global_overlay_stack,
+        disambiguated_tab_titles,
     };
     use crate::canvas::Canvas;
     use std::path::PathBuf;
@@ -1762,9 +1762,11 @@ mod tests {
             .tiles
             .write_region(1, 1, 1, 1, &[255, 0, 0, 255]);
         let overlay = document.pdf_safe_overlay_rgba().expect("safe overlay");
-        assert!(overlay
-            .chunks_exact(4)
-            .any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(
+            overlay
+                .chunks_exact(4)
+                .any(|pixel| pixel == [255, 0, 0, 255])
+        );
 
         document.canvas.layer_stack.layers[0]
             .tiles

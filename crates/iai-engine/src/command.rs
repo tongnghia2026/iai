@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::jobs::JobCtx;
 use crate::session::Session;
-use crate::{schema_check, CmdError};
+use crate::{CmdError, schema_check};
 
 /// What a command may touch. A session is granted a set of them (an agent's
 /// leaves out printing and the network); a command needing one it was not

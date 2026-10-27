@@ -195,9 +195,11 @@ mod loaded {
             let (loaded, linked) = (decode_file(&path), iai_raw::decode_file(&path));
             let _ = std::fs::remove_file(&path);
             let (loaded, linked) = (loaded.err(), linked.err());
-            assert!(loaded
-                .as_deref()
-                .is_some_and(|why| why.starts_with("rawloader: ")));
+            assert!(
+                loaded
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("rawloader: "))
+            );
             assert_eq!(loaded, linked);
 
             assert_eq!(orientation(b"not a camera file"), Orientation::Unknown);

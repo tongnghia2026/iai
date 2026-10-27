@@ -55,10 +55,10 @@
 //!            into pale/muted colour and leaves already-vivid colour (chroma ≳
 //!            0.35) alone. Neutrals untouched.
 
-use iai::core::develop::{DevelopSettings, CONTROL_LIMIT, EXPOSURE_LIMIT};
+use iai::core::develop::{CONTROL_LIMIT, DevelopSettings, EXPOSURE_LIMIT};
 use iai::core::develop_scene::{
-    eval_scene_pixel, eval_scene_pixel_for_scene, exposure_multiplier, tone_eq_offset_ev, BaseLook,
-    SceneSource, SCENE_EV_MAX, SCENE_EV_MIN, SCENE_MID_GRAY,
+    BaseLook, SCENE_EV_MAX, SCENE_EV_MIN, SCENE_MID_GRAY, SceneSource, eval_scene_pixel,
+    eval_scene_pixel_for_scene, exposure_multiplier, tone_eq_offset_ev,
 };
 use iai::core::perceptual_color::linear_srgb_to_oklab;
 
@@ -474,7 +474,10 @@ fn saturation_near_hull_chroma_foldback_is_bounded() {
         };
         println!(
             "saturation sweep {label:<8} chroma[0..100%] = {:?}  peak {peak:.3} final {final_c:.3} drop {drop_pct:.1}%  hue-swing {hue_swing:.1}°",
-            sweep.iter().map(|c| (c * 1000.0).round() / 1000.0).collect::<Vec<_>>()
+            sweep
+                .iter()
+                .map(|c| (c * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>()
         );
         if drop_pct > worst_drop_pct {
             worst_drop_pct = drop_pct;

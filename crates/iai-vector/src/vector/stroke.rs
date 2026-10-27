@@ -279,11 +279,11 @@ fn add_join(
             push_ring(out, ring);
         }
         LineJoin::Miter => {
-            if let Some(m) = intersect(p0, d0, p1, d1) {
-                if dist(v, m) <= miter_limit * half {
-                    push_ring(out, vec![v, p0, m, p1]);
-                    return;
-                }
+            if let Some(m) = intersect(p0, d0, p1, d1)
+                && dist(v, m) <= miter_limit * half
+            {
+                push_ring(out, vec![v, p0, m, p1]);
+                return;
             }
             push_ring(out, vec![v, p0, p1]); // beyond the miter limit → bevel
         }

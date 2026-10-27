@@ -121,6 +121,14 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         let dirty = data.doc.doc_modified.get(i).copied().unwrap_or(false);
         let is_active = i == data.doc.active_doc_idx;
         let ai_busy = data.doc.doc_ai_busy.get(i).and_then(Option::as_ref);
+        // Work that ended while the tab was not in front (an ID photo made):
+        // the tab blinks until it is shown.
+        let attention = !is_active && data.doc.doc_attention.get(i).copied().unwrap_or(false);
+        let lit = attention && ui.ctx().input(|input| (input.time * 2.0).fract() < 0.5);
+        if attention {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
 
         let display = if dirty {
             format!("{}*", title)
@@ -128,11 +136,25 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             title.to_string()
         };
         let label_text = truncate_title(&display, 18);
-        let tab_fill = if is_active { pal.panel_bg } else { pal.app_bg };
-        let text_color = if is_active { pal.text } else { pal.text_dim };
+        let tab_fill = if is_active {
+            pal.panel_bg
+        } else if lit {
+            pal.accent_primary.gamma_multiply(0.45)
+        } else {
+            pal.app_bg
+        };
+        let text_color = if is_active || attention {
+            pal.text
+        } else {
+            pal.text_dim
+        };
         let font_id = egui::FontId::proportional(11.5);
         let text_w = 7.0_f32 * label_text.len() as f32;
-        let busy_w = if ai_busy.is_some() { 14.0 } else { 0.0 };
+        let busy_w = if ai_busy.is_some() || attention {
+            14.0
+        } else {
+            0.0
+        };
         let tab_w = (text_w + CLOSE_W + busy_w + 20.0).clamp(TAB_MIN_W, TAB_MAX_W);
 
         let (tab_rect, tab_response) =
@@ -181,6 +203,26 @@ fn build_tabs(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             font_id,
             text_color,
         );
+
+        if attention && ai_busy.is_none() {
+            let badge_rect = egui::Rect::from_min_size(
+                egui::pos2(tab_rect.right() - CLOSE_W - busy_w, tab_rect.top()),
+                egui::vec2(busy_w, TAB_H),
+            );
+            painter.text(
+                badge_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                ph::CHECK_CIRCLE,
+                egui::FontId::proportional(12.0),
+                pal.accent_primary,
+            );
+            ui.interact(
+                badge_rect,
+                egui::Id::new(("tab_done", i)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text("Ảnh thẻ đã xong — bấm vào tab để mở và in");
+        }
 
         if let Some(busy) = ai_busy {
             let badge_rect = egui::Rect::from_min_size(

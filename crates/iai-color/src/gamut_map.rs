@@ -5,8 +5,8 @@
 //! a shared profile-specific cusp LUT finds the largest reproducible chroma.
 //! A binary search remains test-only as the quality reference.
 
-use super::perceptual_color::{linear_srgb_to_oklab, oklab_to_linear_srgb, PerceptualColor};
-use super::working_color::{apply_matrix, OutputColorSpace, WorkingColorSpace};
+use super::perceptual_color::{PerceptualColor, linear_srgb_to_oklab, oklab_to_linear_srgb};
+use super::working_color::{OutputColorSpace, WorkingColorSpace, apply_matrix};
 use std::sync::OnceLock;
 
 /// Shared CPU/GPU cusp-table schema. The shader receives these dimensions and
@@ -382,9 +382,11 @@ mod tests {
     fn cusp_lut_schema_has_the_declared_profile_grid() {
         assert_eq!(cusp_lut(OutputColorSpace::Srgb).len(), CUSP_LUT_LEN);
         assert_eq!(CUSP_LUT_LEN, CUSP_HUE_SAMPLES * CUSP_LIGHTNESS_SAMPLES);
-        assert!(cusp_lut(OutputColorSpace::Srgb)
-            .iter()
-            .all(|value| value.is_finite() && *value >= 0.0));
+        assert!(
+            cusp_lut(OutputColorSpace::Srgb)
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+        );
     }
 
     /// Engineering comparison requested by Phase 6. The binary mapper remains

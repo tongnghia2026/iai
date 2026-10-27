@@ -111,7 +111,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         .on_hover_text("Thêm trang")
                         .clicked()
                     {
-                        actions.doc.add_artboard = true;
+                        actions.run("page.add", serde_json::json!({}));
                     }
                     // Master (shared background) is a multi-page workflow, so the
                     // control only appears once there are ≥2 pages (or one exists).
@@ -240,7 +240,7 @@ fn master_controls(
             .on_hover_text("Kết thúc chỉnh trang nền, quay lại trang")
             .clicked()
         {
-            actions.doc.toggle_master_edit = true;
+            actions.run("page.master", serde_json::json!({"op": "done"}));
         }
         ui.label(
             egui::RichText::new("◆ đang chỉnh TRANG NỀN")
@@ -253,21 +253,21 @@ fn master_controls(
             .on_hover_text("Chỉnh trang nền dùng chung (hiện dưới mọi trang)")
             .clicked()
         {
-            actions.doc.toggle_master_edit = true;
+            actions.run("page.master", serde_json::json!({"op": "edit"}));
         }
         if ui
             .add(egui::Button::new("🗑").small())
             .on_hover_text("Xoá trang nền")
             .clicked()
         {
-            actions.doc.delete_master = true;
+            actions.run("page.master", serde_json::json!({"op": "delete"}));
         }
     } else if ui
         .add(egui::Button::new("＋ Nền").small())
         .on_hover_text("Tạo trang nền dùng chung cho mọi trang (logo, khung, header/footer…)")
         .clicked()
     {
-        actions.doc.toggle_master_edit = true;
+        actions.run("page.master", serde_json::json!({"op": "edit"}));
     }
 }
 
@@ -300,13 +300,13 @@ fn page_tab(
         }
         ui.add_enabled_ui(i > 0, |ui| {
             if ui.button("◀ Chuyển sang trái").clicked() {
-                actions.doc.move_page = Some((i, i - 1));
+                actions.run("page.move", serde_json::json!({"from": i, "to": i - 1}));
                 ui.close();
             }
         });
         ui.add_enabled_ui(i + 1 < count, |ui| {
             if ui.button("Chuyển sang phải ▶").clicked() {
-                actions.doc.move_page = Some((i, i + 1));
+                actions.run("page.move", serde_json::json!({"from": i, "to": i + 1}));
                 ui.close();
             }
         });
@@ -319,14 +319,15 @@ fn page_tab(
                 .on_hover_text("Trang này có hiện nền dùng chung bên dưới không")
                 .clicked()
             {
-                actions.doc.set_page_use_master = Some((i, u));
+                let op = if u { "show" } else { "hide" };
+                actions.run("page.master", serde_json::json!({"op": op, "page": i}));
                 ui.close();
             }
         }
         ui.separator();
         ui.add_enabled_ui(count > 1, |ui| {
             if ui.button("Xoá trang").clicked() {
-                actions.doc.delete_page = Some(i);
+                actions.run("page.delete", serde_json::json!({"page": i}));
                 ui.close();
             }
         });

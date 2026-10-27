@@ -1467,15 +1467,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ed25519-compact"
-version = "2.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
-dependencies = [
- "getrandom 0.4.3",
-]
-
-[[package]]
 name = "egui"
 version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2095,11 +2086,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2711,14 +2700,12 @@ name = "iai"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
- "arboard",
  "base64",
  "bytemuck",
  "calamine",
  "chrono",
  "cosmic-text",
  "csv",
- "ed25519-compact",
  "egui",
  "egui-phosphor",
  "egui-wgpu",
@@ -2743,6 +2730,7 @@ dependencies = [
  "iai-imaging",
  "iai-layout",
  "iai-platform",
+ "iai-print",
  "iai-raster",
  "iai-raw",
  "iai-raw-api",
@@ -3006,7 +2994,15 @@ dependencies = [
 name = "iai-platform"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "iai-print"
+version = "0.1.0"
+dependencies = [
+ "iai-canvas",
 ]
 
 [[package]]

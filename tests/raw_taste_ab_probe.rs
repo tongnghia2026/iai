@@ -18,6 +18,9 @@
 //! $env:IAI_Q0_OUT='C:\Users\Admin\Documents\IAI\target\q0'
 //! cargo test --release --test raw_taste_ab_probe -- --ignored --nocapture
 //! ```
+// Setting the process environment is unsafe from edition 2024 on (another
+// thread may read it meanwhile); these runs set it before they render.
+#![allow(unsafe_code)]
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -141,15 +144,18 @@ fn raw_taste_ab_montage() {
             .collect();
 
         // Current default: make sure no recipe override lingers.
-        std::env::remove_var("IAI_RAW_RENDER_RECIPE");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("IAI_RAW_RENDER_RECIPE") };
         let Some((on, w, h)) = render_resampled(path) else {
             println!("  DECODE-ERR {name}");
             continue;
         };
         // Technical-neutral v2 disables all decode-time taste as one recipe.
-        std::env::set_var("IAI_RAW_RENDER_RECIPE", "technical");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("IAI_RAW_RENDER_RECIPE", "technical") };
         let off = render_resampled(path);
-        std::env::remove_var("IAI_RAW_RENDER_RECIPE");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("IAI_RAW_RENDER_RECIPE") };
         let Some((off, ow, oh)) = off else {
             println!("  DECODE-ERR(off) {name}");
             continue;

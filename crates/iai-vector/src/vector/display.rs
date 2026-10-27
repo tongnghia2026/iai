@@ -383,9 +383,11 @@ mod tests {
         let rgba = vec![17; w * h * 4];
         let tiles = split_display_tiles(&rgba, w as u32, h as u32);
         assert_eq!(tiles.len(), 9);
-        assert!(tiles
-            .iter()
-            .all(|t| t.width <= DISPLAY_TILE_EDGE && t.height <= DISPLAY_TILE_EDGE));
+        assert!(
+            tiles
+                .iter()
+                .all(|t| t.width <= DISPLAY_TILE_EDGE && t.height <= DISPLAY_TILE_EDGE)
+        );
         let covered: u64 = tiles.iter().map(|t| t.width as u64 * t.height as u64).sum();
         assert_eq!(covered, w as u64 * h as u64);
         let bottom_right = tiles.last().unwrap();

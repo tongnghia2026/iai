@@ -66,14 +66,31 @@ impl App {
     /// app's exit nor, once stopped, another print.
     pub(in crate::app) fn poll_print_job(&mut self) {
         let Some(mut job) = self.jobs.pending_print.take() else {
+            // The next sheet in turn, unless a refused one is on its way
+            // round through the PDF route first.
+            if self.jobs.print_gdi_failed.is_none()
+                && let Some(task) = self.jobs.print_queue.pop_front()
+            {
+                self.start_print_task(task);
+            }
             return;
         };
         match job.rx.try_recv() {
             Ok(Ok(())) => {
-                self.shell.status_msg = "Sent to printer".to_string();
-                self.shell.ui.show_print_dialog = false;
+                let waiting = self.jobs.print_queue.len();
+                self.shell.status_msg = if waiting == 0 {
+                    "Đã gửi lệnh in".to_string()
+                } else {
+                    format!("Đã gửi lệnh in — còn {waiting} lệnh đang chờ gửi")
+                };
+                if let Some(task) = self.jobs.print_queue.pop_front() {
+                    self.start_print_task(task);
+                }
             }
-            Ok(Err(e)) => self.jobs.print_gdi_failed = Some(e),
+            Ok(Err(e)) => {
+                self.jobs.print_gdi_failed = Some(e);
+                self.jobs.print_failed_doc = Some(job.page_of);
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 job.watch();
                 let tell = job.is_stuck() && !job.told_stuck;
@@ -95,10 +112,8 @@ impl App {
                     );
                 }
                 self.jobs.pending_print = Some(job);
-                if tell {
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
-                    }
+                if tell && let Some(w) = &self.win.window {
+                    w.request_redraw();
                 }
                 return;
             }
@@ -131,8 +146,187 @@ impl App {
                 job.progress.stage().label()
             ),
         );
-        self.shell.status_msg = format!("Đã dừng gửi lệnh in tới «{}»", job.printer);
+        // What waited behind it would wait on the same printer.
+        let dropped = self.jobs.print_queue.len();
+        self.jobs.print_queue.clear();
+        self.shell.status_msg = if dropped == 0 {
+            format!("Đã dừng gửi lệnh in tới «{}»", job.printer)
+        } else {
+            format!(
+                "Đã dừng gửi lệnh in tới «{}» và bỏ {dropped} lệnh đang chờ",
+                job.printer
+            )
+        };
         self.win.ants_redraw_pending = false;
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// One print task a page of the tab in front, in order: the page as
+    /// export writes it (over its master page, when it shows one).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(in crate::app) fn print_tasks(
+        &self,
+        pages: &crate::ui::PrintPages,
+        layout: crate::core::print::PrintLayout,
+        profile: Option<Vec<u8>>,
+    ) -> Vec<crate::app::background_jobs::PrintTask> {
+        let doc = self.docs.active();
+        let indices = match pages {
+            crate::ui::PrintPages::Current => vec![doc.active_artboard],
+            crate::ui::PrintPages::Pages(list) => list.clone(),
+        };
+        let several = indices.len() > 1;
+        indices
+            .into_iter()
+            .filter_map(|page| {
+                let canvas = doc.page_render_canvas(page).or_else(|| {
+                    doc.all_page_canvases()
+                        .get(page)
+                        .map(|c| c.export_snapshot())
+                })?;
+                Some(crate::app::background_jobs::PrintTask {
+                    doc_id: doc.id,
+                    page,
+                    doc_name: if several {
+                        format!("{} — trang {}", doc.title, page + 1)
+                    } else {
+                        doc.title.clone()
+                    },
+                    width: canvas.width,
+                    height: canvas.height,
+                    dpi: canvas.metadata.resolution_ppi,
+                    stack: canvas.layer_stack,
+                    layout,
+                    profile: profile.clone(),
+                    printer: self.shell.print_selected_printer.clone(),
+                    settings: self.shell.print_driver_settings.clone(),
+                    copies: self.shell.print_copies,
+                })
+            })
+            .collect()
+    }
+
+    /// Send `task` now, or after the sheet already on its way.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(in crate::app) fn queue_print_task(
+        &mut self,
+        task: crate::app::background_jobs::PrintTask,
+    ) {
+        if self.jobs.pending_print.is_some() || self.jobs.print_gdi_failed.is_some() {
+            self.jobs.print_queue.push_back(task);
+            self.shell.status_msg = format!(
+                "Đã xếp lệnh in — {} lệnh đang chờ gửi",
+                self.jobs.print_queue.len()
+            );
+        } else {
+            self.start_print_task(task);
+        }
+    }
+
+    /// Hand `task` to a print worker: it composites the page, converts it to
+    /// the printer's profile when there is one, and sends it through GDI.
+    /// `poll_print_job` hears how it went.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(in crate::app) fn start_print_task(
+        &mut self,
+        task: crate::app::background_jobs::PrintTask,
+    ) {
+        let crate::app::background_jobs::PrintTask {
+            doc_id,
+            page,
+            doc_name,
+            mut stack,
+            width: cw,
+            height: ch,
+            dpi,
+            layout,
+            profile,
+            printer,
+            settings,
+            copies,
+        } = task;
+        let intent = layout.intent.to_lcms();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Each stage goes to the journal as the worker enters it: the last one
+        // written is where a printer that never answered left it.
+        let journal_printer = printer.clone();
+        let progress = std::sync::Arc::new(crate::core::print_gdi::PrintProgress::reporting_to(
+            move |stage| {
+                crate::diag::note("print", &format!("{journal_printer}: {}", stage.label()));
+            },
+        ));
+        let printer_state = std::sync::Arc::new(std::sync::OnceLock::new());
+        self.jobs.pending_print = Some(crate::app::background_jobs::PrintJob::new(
+            printer.clone(),
+            (doc_id, page),
+            rx,
+            std::sync::Arc::clone(&progress),
+            std::sync::Arc::clone(&printer_state),
+        ));
+        let waiting = self.jobs.print_queue.len();
+        self.shell.status_msg = if waiting == 0 {
+            "Đang gửi lệnh in…".to_string()
+        } else {
+            format!("Đang gửi lệnh in… (còn {waiting} lệnh chờ)")
+        };
+        std::thread::spawn(move || {
+            let _ = progress.enter(crate::core::print_gdi::PrintStage::ReadingState);
+            if let Some(state) = crate::core::print_gdi::printer_state(&printer) {
+                crate::diag::note(
+                    "print",
+                    &format!(
+                        "{printer} on {}: {} job(s) queued, troubles {:?}",
+                        state.port, state.queued_jobs, state.troubles
+                    ),
+                );
+                let _ = printer_state.set(state);
+            }
+            // The page composited here, off the window's thread: small pages
+            // whole (as the window's own flat buffer is made), large ones a
+            // band at a time.
+            let mut flat = crate::core::canvas::Canvas::fits_flat_buffer(cw, ch)
+                .then(|| stack.flatten(cw, ch));
+            if let (Some(rgba), Some(pp)) = (flat.as_mut(), &profile) {
+                crate::core::cms::convert_srgb_to_rgb_profile(rgba, pp, intent);
+            }
+            let result = crate::core::print_gdi::print_bands(
+                &printer,
+                settings.as_ref(),
+                &doc_name,
+                cw,
+                ch,
+                dpi,
+                &layout,
+                copies,
+                &progress,
+                move |y, rows| match &flat {
+                    Some(flat) => {
+                        let start = (y as usize) * (cw as usize) * 4;
+                        let len = (rows as usize) * (cw as usize) * 4;
+                        flat.get(start..start + len)
+                            .map(<[u8]>::to_vec)
+                            .ok_or_else(|| "the page is smaller than its bands".to_string())
+                    }
+                    None => {
+                        let mut band = stack.flatten_band(cw, ch, y, rows);
+                        if let Some(pp) = &profile {
+                            crate::core::cms::convert_srgb_to_rgb_profile(&mut band, pp, intent);
+                        }
+                        Ok(band)
+                    }
+                },
+            );
+            crate::diag::note(
+                "print",
+                &match &result {
+                    Ok(()) => format!("{printer}: the job is with the spooler"),
+                    Err(e) => format!("{printer}: {e}"),
+                },
+            );
+            let _ = tx.send(result);
+        });
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -192,15 +386,13 @@ impl App {
         #[cfg(target_os = "windows")]
         if let Some(settings) = self.shell.print_driver_settings.as_ref() {
             let name = &self.shell.print_selected_printer;
-            if settings.matches_printer(name) {
-                if let Ok(updated) =
+            if settings.matches_printer(name)
+                && let Ok(updated) =
                     crate::core::printers::query_printer_with_settings(name, Some(settings))
-                {
-                    if let Some(slot) = printers.iter_mut().find(|p| p.name == *name) {
-                        slot.paper_points = updated.paper_points;
-                        slot.printable_rect_points = updated.printable_rect_points;
-                    }
-                }
+                && let Some(slot) = printers.iter_mut().find(|p| p.name == *name)
+            {
+                slot.paper_points = updated.paper_points;
+                slot.printable_rect_points = updated.printable_rect_points;
             }
         }
         self.shell.print_printers = printers;
@@ -230,10 +422,10 @@ impl App {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 self.jobs.pending_printer_refresh = Some(rx);
-                if self.shell.ui.show_print_dialog {
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
-                    }
+                if self.shell.ui.show_print_dialog
+                    && let Some(w) = &self.win.window
+                {
+                    w.request_redraw();
                 }
                 return;
             }
@@ -336,6 +528,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let job = crate::app::background_jobs::PrintJob::new(
             printer.to_string(),
+            (crate::core::document::DocumentId(1), 0),
             rx,
             Default::default(),
             Default::default(),
@@ -344,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn a_print_that_went_out_closes_the_dialog_and_one_refused_is_kept_for_the_pdf_route() {
+    fn a_print_that_went_out_says_so_and_one_refused_is_kept_for_the_pdf_route_of_its_tab() {
         let mut app = App::new();
         app.shell.ui.show_print_dialog = true;
         let (tx, job) = job_for("Printer");
@@ -356,11 +549,12 @@ mod tests {
         assert!(app.shell.ui.show_print_dialog);
         assert_eq!(app.exit_blocking_operation(), Some("the print being sent"));
 
+        // Gone out: it says so, and leaves a dialog opened since alone.
         tx.send(Ok(())).unwrap();
         app.poll_print_job();
         assert!(app.jobs.pending_print.is_none());
-        assert!(!app.shell.ui.show_print_dialog);
-        assert_eq!(app.shell.status_msg, "Sent to printer");
+        assert!(app.shell.ui.show_print_dialog);
+        assert_eq!(app.shell.status_msg, "Đã gửi lệnh in");
 
         let (tx, job) = job_for("Printer");
         app.jobs.pending_print = Some(job);
@@ -368,6 +562,11 @@ mod tests {
         app.poll_print_job();
         assert!(app.jobs.pending_print.is_none());
         assert_eq!(app.jobs.print_gdi_failed.as_deref(), Some("out of paper"));
+        // The PDF route is for that sheet's tab.
+        assert_eq!(
+            app.jobs.print_failed_doc,
+            Some((crate::core::document::DocumentId(1), 0))
+        );
     }
 
     /// 11/10/2026: a print sent to a printer in trouble never came back. Print
@@ -403,11 +602,12 @@ mod tests {
         job.stand_still_for(PrintJob::STOP_OFFERED_AFTER);
         progress.enter(PrintStage::SendingPage).unwrap();
         app.poll_print_job();
-        assert!(app
-            .collect_ui_data()
-            .print
-            .print_waiting_note
-            .starts_with("Đang gửi tới «Canon LBP2900»"));
+        assert!(
+            app.collect_ui_data()
+                .print
+                .print_waiting_note
+                .starts_with("Đang gửi tới «Canon LBP2900»")
+        );
         assert_eq!(app.exit_blocking_operation(), Some("the print being sent"));
 
         // The worker stands still inside the driver: the user is told, once.
@@ -426,11 +626,12 @@ mod tests {
             "{}",
             app.shell.status_msg
         );
-        assert!(app
-            .collect_ui_data()
-            .print
-            .print_waiting_note
-            .starts_with("«Canon LBP2900» chưa trả lời"));
+        assert!(
+            app.collect_ui_data()
+                .print
+                .print_waiting_note
+                .starts_with("«Canon LBP2900» chưa trả lời")
+        );
         app.shell.status_msg.clear();
         app.poll_print_job();
         assert_eq!(app.shell.status_msg, "", "said once, not every frame");
@@ -485,14 +686,19 @@ mod tests {
         app.shell.print_selected_printer = "iAi test: no such printer".to_string();
         app.shell.ui.show_print_dialog = true;
         let mut actions = crate::ui::UiActions::default();
-        actions.print.print_send = true;
+        actions.print.print_send = Some(crate::ui::PrintPages::Current);
         app.handle_color_print_actions(&mut actions);
         assert!(app.jobs.pending_print.is_some(), "the job went to a worker");
-        assert_eq!(app.shell.status_msg, "Sending to printer…");
+        assert_eq!(app.shell.status_msg, "Đang gửi lệnh in…");
+        assert!(
+            !app.shell.ui.show_print_dialog,
+            "the dialog closes at Print, the work goes on"
+        );
 
-        // A second click while it is on its way starts nothing new.
+        // A second Print while it is on its way waits its turn.
         app.handle_color_print_actions(&mut actions);
-        assert_eq!(app.shell.status_msg, "Still sending the previous print…");
+        assert_eq!(app.jobs.print_queue.len(), 1);
+        assert_eq!(app.shell.status_msg, "Đã xếp lệnh in — 1 lệnh đang chờ gửi");
 
         let began = std::time::Instant::now();
         while app.jobs.pending_print.is_some() {
@@ -501,10 +707,47 @@ mod tests {
             app.poll_print_job();
         }
         assert!(app.jobs.print_gdi_failed.is_some());
-        assert!(
-            app.shell.ui.show_print_dialog,
-            "a refused print keeps the dialog"
+        // The sheet behind waits for the refused one's PDF route.
+        app.poll_print_job();
+        assert_eq!(app.jobs.print_queue.len(), 1);
+        assert!(app.jobs.pending_print.is_none());
+    }
+
+    /// Each page asked for is a print of its own, in order, made of that
+    /// page; the page in front when the range is the current page.
+    #[test]
+    fn each_page_asked_for_is_a_print_of_its_own() {
+        use crate::ui::PrintPages;
+        use serde_json::json;
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.run_with("file.new", json!({"widthPx": 40, "heightPx": 30}))
+            .unwrap();
+        app.run_with("page.add", json!({})).unwrap();
+        app.run_with("layer.new", json!({"kind": "fill", "fill": "#00FF00"}))
+            .unwrap();
+        app.run_with("page.add", json!({})).unwrap();
+        app.run_with("page.select", json!({"page": 0})).unwrap();
+        let layout = app.shell.print_layout;
+
+        let tasks = app.print_tasks(&PrintPages::Pages(vec![0, 1, 2]), layout, None);
+        assert_eq!(
+            tasks.iter().map(|t| t.page).collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
+        let doc = app.docs.active().id;
+        assert!(tasks.iter().all(|t| t.doc_id == doc));
+        assert!(tasks[1].doc_name.ends_with("trang 2"));
+        let green = &tasks[1];
+        let flat = green.stack.flatten(green.width, green.height);
+        assert_eq!(&flat[0..3], &[0, 255, 0]);
+        let first = &tasks[0];
+        let flat = first.stack.flatten(first.width, first.height);
+        assert_ne!(&flat[0..3], &[0, 255, 0]);
+
+        let tasks = app.print_tasks(&PrintPages::Current, layout, None);
+        assert_eq!(tasks.iter().map(|t| t.page).collect::<Vec<_>>(), vec![0]);
+        assert!(!tasks[0].doc_name.contains("trang"));
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! `pump`, `linger`, `panic`, `abort`, `quit`). Without the variable — always,
 //! outside such a run — every entry point here returns at its first line.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const FIRST_STEP_AFTER: Duration = Duration::from_secs(3);
@@ -74,7 +74,7 @@ fn spin(d: Duration) {
 #[cfg(windows)]
 fn pump(d: Duration) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     };
     let since = Instant::now();
     while since.elapsed() < d {

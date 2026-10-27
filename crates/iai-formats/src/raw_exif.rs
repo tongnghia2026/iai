@@ -51,34 +51,34 @@ impl RawExif {
         if let Some(lens) = joined_make_model(self.lens_make.as_deref(), self.lens_model.as_deref())
         {
             equipment.push(lens);
-        } else if let Some(spec) = self.lens_specification {
-            if let Some(lens) = format_lens_specification(spec) {
-                equipment.push(lens);
-            }
+        } else if let Some(spec) = self.lens_specification
+            && let Some(lens) = format_lens_specification(spec)
+        {
+            equipment.push(lens);
         }
         if let Some(iso) = self.iso {
             exposure.push(format!("ISO {iso}"));
         }
-        if let Some(f) = self.f_number {
-            if f > 0.0 {
-                let s = format!("{f:.1}");
-                exposure.push(format!("f/{}", s.trim_end_matches(".0")));
+        if let Some(f) = self.f_number
+            && f > 0.0
+        {
+            let s = format!("{f:.1}");
+            exposure.push(format!("f/{}", s.trim_end_matches(".0")));
+        }
+        if let Some(t) = self.shutter_s
+            && t > 0.0
+        {
+            if t < 0.5 {
+                exposure.push(format!("1/{}s", (1.0 / t).round() as u32));
+            } else {
+                let s = format!("{t:.1}");
+                exposure.push(format!("{}s", s.trim_end_matches(".0")));
             }
         }
-        if let Some(t) = self.shutter_s {
-            if t > 0.0 {
-                if t < 0.5 {
-                    exposure.push(format!("1/{}s", (1.0 / t).round() as u32));
-                } else {
-                    let s = format!("{t:.1}");
-                    exposure.push(format!("{}s", s.trim_end_matches(".0")));
-                }
-            }
-        }
-        if let Some(mm) = self.focal_mm {
-            if mm > 0.0 {
-                exposure.push(format!("{}mm", mm.round() as u32));
-            }
+        if let Some(mm) = self.focal_mm
+            && mm > 0.0
+        {
+            exposure.push(format!("{}mm", mm.round() as u32));
         }
         [equipment.join(" · "), exposure.join(" · ")]
             .into_iter()

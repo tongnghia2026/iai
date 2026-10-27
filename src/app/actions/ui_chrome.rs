@@ -7,13 +7,13 @@ use crate::ui::UiActions;
 
 impl App {
     pub(super) fn handle_chrome_actions(&mut self, actions: &mut UiActions) {
-        if let Some(mode) = actions.chrome.set_theme_mode.take() {
-            if self.shell.ui.theme_mode != mode {
-                self.shell.ui.theme_mode = mode;
-                crate::ui::theme::save_theme_mode(mode);
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+        if let Some(mode) = actions.chrome.set_theme_mode.take()
+            && self.shell.ui.theme_mode != mode
+        {
+            self.shell.ui.theme_mode = mode;
+            crate::ui::theme::save_theme_mode(mode);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
             }
         }
     }
@@ -92,23 +92,23 @@ impl App {
             }
         }
         // Ruler drag released → commit the guide if it landed on the canvas.
-        if actions.chrome.ruler_guide_commit {
-            if let Some(GuideOp::Create { orientation, pos }) = self.edit.guide_op {
-                let canvas = &self.docs.active().canvas;
-                let dim = match orientation {
-                    GuideOrientation::Horizontal => canvas.height as f32,
-                    GuideOrientation::Vertical => canvas.width as f32,
-                };
-                if pos >= 0.0 && pos <= dim {
-                    self.docs
-                        .active_mut()
-                        .guides
-                        .push(Guide { orientation, pos });
-                }
-                self.edit.guide_op = None;
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+        if actions.chrome.ruler_guide_commit
+            && let Some(GuideOp::Create { orientation, pos }) = self.edit.guide_op
+        {
+            let canvas = &self.docs.active().canvas;
+            let dim = match orientation {
+                GuideOrientation::Horizontal => canvas.height as f32,
+                GuideOrientation::Vertical => canvas.width as f32,
+            };
+            if pos >= 0.0 && pos <= dim {
+                self.docs
+                    .active_mut()
+                    .guides
+                    .push(Guide { orientation, pos });
+            }
+            self.edit.guide_op = None;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
             }
         }
     }

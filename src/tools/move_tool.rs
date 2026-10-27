@@ -1,6 +1,6 @@
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::document::GuideOrientation;
-use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
+use crate::core::snapping::{SNAP_THRESHOLD_PX, SnapKind, SnapLine, best_snap};
 use crate::core::vector::object::VectorGeometry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -721,14 +721,12 @@ impl Tool for MoveTool {
                     .into_iter()
                     .map(|i| canvas.layer_stack.layers[i].id)
                     .collect();
-                if layer_ids.is_empty() {
-                    if let Some(layer) =
+                if layer_ids.is_empty()
+                    && let Some(layer) =
                         canvas.layer_stack.layers.get(canvas.layer_stack.active_idx)
-                    {
-                        if Self::can_move_layer(layer) {
-                            layer_ids.push(layer.id);
-                        }
-                    }
+                    && Self::can_move_layer(layer)
+                {
+                    layer_ids.push(layer.id);
                 }
                 // A Path layer carries its position in the vector MODEL (the raster
                 // is a cache), so fold the drag into the model transform via

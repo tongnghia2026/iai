@@ -5,8 +5,8 @@ use crate::core::shape::ShapeData;
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::tools::ToolId;
 
-use super::state::{PathDisplayCacheEntry, PathDisplayCacheKey, PathDisplayObjectKey};
 use super::App;
+use super::state::{PathDisplayCacheEntry, PathDisplayCacheKey, PathDisplayObjectKey};
 
 impl App {
     /// Drop every screen-resolution derivative before committing a new vector
@@ -522,15 +522,17 @@ mod tests {
         assert!(app.jobs.display_bake.is_none());
         assert!(app.jobs.display_bake_next.is_none());
         assert!(app.shell.ui_data_cache.path_displays.is_empty());
-        assert!(app
-            .shell
-            .ui_data_cache
-            .path_display_suppressed_layers
-            .is_none());
-        assert!(app
-            .win
-            .egui_repaint_deadline
-            .is_some_and(|due| due <= std::time::Instant::now()));
+        assert!(
+            app.shell
+                .ui_data_cache
+                .path_display_suppressed_layers
+                .is_none()
+        );
+        assert!(
+            app.win
+                .egui_repaint_deadline
+                .is_some_and(|due| due <= std::time::Instant::now())
+        );
     }
 
     #[test]
@@ -604,8 +606,10 @@ mod tests {
             .iter()
             .map(|node| object.transform.apply_point(node.anchor))
             .collect::<Vec<_>>();
-        assert!(anchors
-            .iter()
-            .all(|p| { p.x >= 99.0 && p.y >= 79.0 && p.x <= 181.0 && p.y <= 161.0 }));
+        assert!(
+            anchors
+                .iter()
+                .all(|p| { p.x >= 99.0 && p.y >= 79.0 && p.x <= 181.0 && p.y <= 161.0 })
+        );
     }
 }

@@ -6,15 +6,17 @@ use iai_history::gateway::ChangeKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{not_enabled, parse_color, Blend, RectPx};
-use super::doc::{layer_infos, LayerInfo};
+use super::common::{Blend, RectPx, not_enabled, parse_color};
+use super::doc::{LayerInfo, layer_infos};
+use iai_canvas::canvas::MAX_DIMENSION;
+
 use crate::{
-    layer_index, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session,
-    Validate,
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session,
+    Validate, layer_index,
 };
 
 /// Run `edit` on `canvas`'s layer stack as one undo step named `label`.
-fn structural<T>(
+pub(super) fn structural<T>(
     canvas: &mut Canvas,
     label: &str,
     edit: impl FnOnce(&mut Canvas) -> Result<T, CmdError>,
@@ -40,7 +42,11 @@ pub struct LayerChanged {
     pub layers: Vec<LayerInfo>,
 }
 
-fn answer(s: &mut Session<'_>, doc: u32, layer: Option<u32>) -> Result<LayerChanged, CmdError> {
+pub(super) fn answer(
+    s: &mut Session<'_>,
+    doc: u32,
+    layer: Option<u32>,
+) -> Result<LayerChanged, CmdError> {
     let layers = layer_infos(s.canvas(Some(doc))?);
     s.emit(EngineEvent::Structure { doc });
     Ok(LayerChanged { doc, layer, layers })
@@ -57,6 +63,9 @@ pub enum NewKind {
     Fill,
     /// A folder; the layers moved into it go with it.
     Group,
+    /// An adjustment layer: `adjustment` applied to what is below it, the
+    /// pixels left as they are.
+    Adjustment,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -72,10 +81,27 @@ pub struct NewParams {
     pub fill: Option<String>,
     /// Put it right above this layer; above the active layer when omitted.
     pub above: Option<u32>,
+    /// What an `adjustment` layer does (as `image.adjust` takes it).
+    pub adjustment: Option<super::adjust::Adjustment>,
 }
 
 impl Validate for NewParams {
     fn validate(&self) -> Result<(), CmdError> {
+        match (&self.kind, &self.adjustment) {
+            (NewKind::Adjustment, None) => {
+                return Err(CmdError::bad_param(
+                    "adjustment",
+                    "what the adjustment layer does, for kind = adjustment",
+                ));
+            }
+            (NewKind::Adjustment, Some(_)) | (_, None) => {}
+            (_, Some(_)) => {
+                return Err(CmdError::bad_param(
+                    "adjustment",
+                    "only with kind = adjustment",
+                ));
+            }
+        }
         match (&self.kind, &self.fill) {
             (NewKind::Fill, None) => Err(CmdError::bad_param("fill", "a colour for kind = fill")),
             (NewKind::Fill, Some(c)) => parse_color("fill", c).map(|_| ()),
@@ -89,8 +115,9 @@ static NEW: CommandMeta = CommandMeta {
     id: "layer.new",
     label_vi: "Layer mới",
     label_en: "New Layer",
-    doc: "Add a layer (empty, filled with a colour, or a group folder) above the active layer \
-          or above `above`. It becomes the active layer.",
+    doc: "Add a layer (empty, filled with a colour, a group folder, or an adjustment layer) \
+          above the active layer or above `above`. It becomes the active layer, the only one \
+          picked.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -114,6 +141,34 @@ impl Command for NewLayer {
             .as_deref()
             .map(|c| parse_color("fill", c))
             .transpose()?;
+        if let (NewKind::Adjustment, Some(adjustment)) = (p.kind, &p.adjustment) {
+            // Adjustment layers composite in RGB on the mirrors: in CMYK the
+            // inks would no longer be what prints.
+            if canvas.is_cmyk() {
+                return Err(not_enabled(
+                    "no adjustment layer in a CMYK document",
+                    "Adjustment layer chưa hỗ trợ ở chế độ CMYK",
+                ));
+            }
+            let adjustment = adjustment.core()?;
+            let id = structural(canvas, "Add Adjustment Layer", |canvas| {
+                let (w, h) = (canvas.width, canvas.height);
+                let stack = &mut canvas.layer_stack;
+                let idx = stack.add_adjustment_layer(adjustment, w, h);
+                for (i, l) in stack.layers.iter_mut().enumerate() {
+                    l.selected = i == idx;
+                }
+                let layer = stack
+                    .layers
+                    .get_mut(idx)
+                    .ok_or_else(|| CmdError::internal("new layer"))?;
+                if let Some(name) = &p.name {
+                    layer.name = name.clone();
+                }
+                Ok(layer.id)
+            })?;
+            return answer(s, doc, Some(id)).map(Plan::Done);
+        }
         let id = structural(canvas, "New Layer", |canvas| {
             let (w, h) = (canvas.width, canvas.height);
             let stack = &mut canvas.layer_stack;
@@ -128,6 +183,8 @@ impl Command for NewLayer {
                     let [r, g, b, a] = fill.unwrap_or([255, 255, 255, 255]);
                     layer.tiles = iai_raster::tile::TileMap::new_solid(w, h, r, g, b, a);
                 }
+                // Made above.
+                NewKind::Adjustment => {}
                 NewKind::Group => {
                     let parent = layer.parent_id;
                     let mut group = iai_doc::layer::Layer::new_group(layer.id, &layer.name, w, h);
@@ -138,7 +195,12 @@ impl Command for NewLayer {
             if let Some(name) = &p.name {
                 layer.name = name.clone();
             }
-            Ok(layer.id)
+            let id = layer.id;
+            // Only the new layer is picked, so what is done next acts on it.
+            for (i, l) in stack.layers.iter_mut().enumerate() {
+                l.selected = i == idx;
+            }
+            Ok(id)
         })?;
         answer(s, doc, Some(id)).map(Plan::Done)
     }
@@ -146,19 +208,24 @@ impl Command for NewLayer {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct LayerParams {
+pub struct DeleteParams {
     /// Document id (see `doc.list`); the document shown when omitted.
     pub doc: Option<u32>,
     /// Layer id (see `doc.inspect`).
     pub layer: u32,
+    /// When the layer is one of those picked in the Layers panel, delete
+    /// every picked one, as the panel's Delete does.
+    #[serde(default)]
+    pub picked: bool,
 }
-impl Validate for LayerParams {}
+impl Validate for DeleteParams {}
 
 static DELETE: CommandMeta = CommandMeta {
     id: "layer.delete",
     label_vi: "Xóa layer",
     label_en: "Delete Layer",
-    doc: "Delete a layer; a group goes with the layers in it. The last layer cannot be deleted.",
+    doc: "Delete a layer; a group goes with the layers in it. The last layer cannot be deleted. \
+          With `picked`, the other layers picked in the Layers panel go too.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -166,30 +233,40 @@ static DELETE: CommandMeta = CommandMeta {
 pub struct DeleteLayer;
 
 impl Command for DeleteLayer {
-    type Params = LayerParams;
+    type Params = DeleteParams;
     type Output = LayerChanged;
     fn meta(&self) -> &'static CommandMeta {
         &DELETE
     }
-    fn plan(&self, s: &mut Session<'_>, p: LayerParams) -> Result<Plan<LayerChanged>, CmdError> {
+    fn plan(&self, s: &mut Session<'_>, p: DeleteParams) -> Result<Plan<LayerChanged>, CmdError> {
         let doc = s.doc_id(p.doc)?;
         let canvas = s.canvas_mut(Some(doc))?;
         let idx = layer_index(canvas, Some(p.layer))?;
-        let mut doomed = canvas.layer_stack.with_group_contents(&[idx]);
-        if doomed.len() >= canvas.layer_stack.layers.len() {
-            return Err(not_enabled(
-                "a page keeps at least one layer",
-                "Trang phải còn ít nhất một layer",
-            ));
-        }
-        doomed.sort_unstable_by(|a, b| b.cmp(a));
-        structural(canvas, "Delete Layer", |canvas| {
-            for i in doomed {
-                canvas.layer_stack.remove_layer(i);
+        if p.picked {
+            // The panel's own way: the picked layers with it, when it is one.
+            if !canvas.delete_layer_at(idx) {
+                return Err(not_enabled(
+                    "a page keeps at least one layer",
+                    "Trang phải còn ít nhất một layer",
+                ));
             }
-            canvas.layer_stack.normalize_active_idx();
-            Ok(())
-        })?;
+        } else {
+            let mut doomed = canvas.layer_stack.with_group_contents(&[idx]);
+            if doomed.len() >= canvas.layer_stack.layers.len() {
+                return Err(not_enabled(
+                    "a page keeps at least one layer",
+                    "Trang phải còn ít nhất một layer",
+                ));
+            }
+            doomed.sort_unstable_by(|a, b| b.cmp(a));
+            structural(canvas, "Delete Layer", |canvas| {
+                for i in doomed {
+                    canvas.layer_stack.remove_layer(i);
+                }
+                canvas.layer_stack.normalize_active_idx();
+                Ok(())
+            })?;
+        }
         let active = {
             let c = s.canvas(Some(doc))?;
             c.layer_stack
@@ -303,6 +380,8 @@ pub struct SetParams {
     pub name: Option<String>,
     pub visible: Option<bool>,
     pub locked: Option<bool>,
+    /// Lock the transparent pixels: painting keeps to what is there.
+    pub lock_alpha: Option<bool>,
     /// 0 (clear) to 1 (opaque).
     #[schemars(range(min = 0.0, max = 1.0))]
     pub opacity: Option<f32>,
@@ -317,11 +396,32 @@ pub struct SetParams {
     pub activate: bool,
 }
 
+impl SetParams {
+    /// The undo step's name: the panel's for one change, else one for all.
+    fn step(&self) -> &'static str {
+        let changes = [
+            (self.name.is_some(), "Rename Layer"),
+            (self.visible.is_some(), "Toggle Visibility"),
+            (self.locked.is_some(), "Toggle Lock"),
+            (self.lock_alpha.is_some(), "Toggle Lock Alpha"),
+            (self.opacity.is_some(), "Set Opacity"),
+            (self.blend.is_some(), "Set Blend Mode"),
+            (self.x.is_some() || self.y.is_some(), "Move Layer"),
+        ];
+        let mut given = changes.iter().filter(|(on, _)| *on);
+        match (given.next(), given.next()) {
+            (Some((_, one)), None) => one,
+            _ => "Layer Properties",
+        }
+    }
+}
+
 impl Validate for SetParams {
     fn validate(&self) -> Result<(), CmdError> {
         let nothing = self.name.is_none()
             && self.visible.is_none()
             && self.locked.is_none()
+            && self.lock_alpha.is_none()
             && self.opacity.is_none()
             && self.blend.is_none()
             && self.x.is_none()
@@ -330,7 +430,7 @@ impl Validate for SetParams {
         if nothing {
             return Err(CmdError::bad_param(
                 "(params)",
-                "at least one of name, visible, locked, opacity, blend, x, y, activate",
+                "at least one of name, visible, locked, lockAlpha, opacity, blend, x, y, activate",
             ));
         }
         Ok(())
@@ -341,8 +441,9 @@ static SET: CommandMeta = CommandMeta {
     id: "layer.set",
     label_vi: "Đổi thuộc tính layer",
     label_en: "Set Layer Properties",
-    doc: "Change a layer's name, visibility, lock, opacity, blend mode or position, or make it \
-          the active layer. Only the fields given change; one undo step.",
+    doc: "Change a layer's name, visibility, lock (all, or of its transparent pixels), opacity, \
+          blend mode or position, or make it the active layer. Only the fields given change; one \
+          undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -374,7 +475,7 @@ impl Command for SetLayer {
                 .vi("Layer nền không di chuyển được"));
             }
         }
-        let id = structural(canvas, "Layer Properties", |canvas| {
+        let id = structural(canvas, p.step(), |canvas| {
             let stack = &mut canvas.layer_stack;
             if p.activate {
                 stack.active_idx = idx;
@@ -394,6 +495,9 @@ impl Command for SetLayer {
             }
             if let Some(v) = p.locked {
                 layer.locked = v;
+            }
+            if let Some(v) = p.lock_alpha {
+                layer.lock_alpha = v;
             }
             if let Some(v) = p.opacity {
                 layer.opacity = v.clamp(0.0, 1.0);
@@ -636,8 +740,10 @@ static VIA_COPY: CommandMeta = CommandMeta {
     id: "layer.via_copy",
     label_vi: "Layer từ vùng chọn",
     label_en: "Layer via Copy",
-    doc: "Copy what is selected on a layer to a new layer right above it (Ctrl+J); the whole \
-          layer when nothing is selected. The new layer becomes the active one. One undo step.",
+    doc: "Copy what is selected on a layer to a new layer right above it, as Ctrl+J does: the \
+          whole layer when nothing is selected, a folder with what is in it, and the \
+          selection is dropped after. Without `layer`, the layers picked in the Layers panel \
+          are copied. The copy becomes the active layer. One undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -653,15 +759,285 @@ impl Command for LayerViaCopy {
     fn plan(&self, s: &mut Session<'_>, p: ViaCopyParams) -> Result<Plan<LayerChanged>, CmdError> {
         let doc = s.doc_id(p.doc)?;
         let canvas = s.canvas_mut(Some(doc))?;
-        canvas.layer_stack.active_idx = layer_index(canvas, p.layer)?;
-        let idx = if canvas.selection.active {
-            canvas.layer_via_copy()
+        if p.layer.is_some() {
+            let idx = layer_index(canvas, p.layer)?;
+            canvas.layer_stack.select_only(idx);
         } else {
-            canvas.duplicate_active_layer()
-        };
-        canvas.layer_stack.active_idx = idx;
-        let id = canvas.layer_stack.layers.get(idx).map(|l| l.id);
+            layer_index(canvas, None)?;
+        }
+        let had_selection = canvas.selection.active;
+        // A folder picked alone is copied with what is in it.
+        if !canvas.duplicate_active_group() {
+            canvas.begin_undo_group("Layer via Copy");
+            canvas.layer_via_copy();
+            if had_selection {
+                canvas.deselect();
+            }
+            canvas.end_undo_group();
+        }
+        let stack = &canvas.layer_stack;
+        let id = stack.layers.get(stack.active_idx).map(|l| l.id);
+        if had_selection {
+            s.emit(EngineEvent::Selection { doc });
+        }
         answer(s, doc, id).map(Plan::Done)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TransformParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Layer id (see `doc.inspect`); the active layer when omitted.
+    pub layer: Option<u32>,
+    /// Its size both ways, 1 being as it is (0.5 half, 2 twice).
+    #[schemars(range(min = 0.01, max = 50.0))]
+    pub scale: Option<f32>,
+    /// Or its width and its height on their own.
+    #[schemars(range(min = 0.01, max = 50.0))]
+    pub scale_x: Option<f32>,
+    #[schemars(range(min = 0.01, max = 50.0))]
+    pub scale_y: Option<f32>,
+    /// Turn it clockwise by this many degrees, round its middle.
+    #[serde(default)]
+    #[schemars(range(min = -360.0, max = 360.0))]
+    pub angle: f32,
+    /// Then move it right (and down) by this many pixels.
+    #[serde(default)]
+    #[schemars(range(min = -100000, max = 100000))]
+    pub dx: i32,
+    #[serde(default)]
+    #[schemars(range(min = -100000, max = 100000))]
+    pub dy: i32,
+}
+
+impl TransformParams {
+    fn scales(&self) -> (f32, f32) {
+        match self.scale {
+            Some(s) => (s, s),
+            None => (self.scale_x.unwrap_or(1.0), self.scale_y.unwrap_or(1.0)),
+        }
+    }
+}
+
+impl Validate for TransformParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.scale.is_some() && (self.scale_x.is_some() || self.scale_y.is_some()) {
+            return Err(CmdError::bad_param(
+                "scale",
+                "either `scale`, or `scaleX` / `scaleY`",
+            ));
+        }
+        let (sx, sy) = self.scales();
+        if sx == 1.0 && sy == 1.0 && self.angle % 360.0 == 0.0 && self.dx == 0 && self.dy == 0 {
+            return Err(CmdError::bad_param(
+                "(params)",
+                "a scale, an angle or a move that changes something",
+            ));
+        }
+        Ok(())
+    }
+}
+
+static TRANSFORM: CommandMeta = CommandMeta {
+    id: "layer.transform",
+    label_vi: "Biến đổi layer",
+    label_en: "Transform Layer",
+    doc: "Scale a picture layer, turn it by any angle round its middle and move it, as Free \
+          Transform does (the pixels are resampled, bilinear). The layer grows to hold what it \
+          becomes. Not for the Background, a locked layer, type, shapes or a layer with a mask. \
+          One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct TransformLayer;
+
+/// Where a point of the layer goes: scaled and turned round `centre`, then
+/// moved; and back.
+struct Affine {
+    centre: (f32, f32),
+    scale: (f32, f32),
+    sin: f32,
+    cos: f32,
+    shift: (f32, f32),
+}
+
+impl Affine {
+    fn forward(&self, x: f32, y: f32) -> (f32, f32) {
+        let (u, v) = (
+            (x - self.centre.0) * self.scale.0,
+            (y - self.centre.1) * self.scale.1,
+        );
+        (
+            self.centre.0 + self.shift.0 + u * self.cos - v * self.sin,
+            self.centre.1 + self.shift.1 + u * self.sin + v * self.cos,
+        )
+    }
+
+    fn back(&self, x: f32, y: f32) -> (f32, f32) {
+        let (u, v) = (
+            x - self.centre.0 - self.shift.0,
+            y - self.centre.1 - self.shift.1,
+        );
+        let (u, v) = (u * self.cos + v * self.sin, -u * self.sin + v * self.cos);
+        (
+            self.centre.0 + u / self.scale.0,
+            self.centre.1 + v / self.scale.1,
+        )
+    }
+}
+
+impl Command for TransformLayer {
+    type Params = TransformParams;
+    type Output = LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &TRANSFORM
+    }
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: TransformParams,
+    ) -> Result<Plan<LayerChanged>, CmdError> {
+        use iai_raster::tile::TileMap;
+        use rayon::prelude::*;
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let idx = layer_index(canvas, p.layer)?;
+        let layer = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .ok_or_else(|| CmdError::internal("layer index"))?;
+        if layer.is_background {
+            return Err(not_enabled(
+                "the Background does not transform: duplicate it (layer.duplicate) first",
+                "Layer nền không biến đổi được: nhân đôi layer trước",
+            ));
+        }
+        if layer.locked || !layer.is_raster() || layer.mask.is_some() {
+            return Err(not_enabled(
+                "only an unlocked picture layer without a mask transforms",
+                "Chỉ biến đổi được layer ảnh không khóa, không có mặt nạ",
+            ));
+        }
+        let id = layer.id;
+        let (sx, sy) = p.scales();
+        if sx == 1.0 && sy == 1.0 && p.angle % 360.0 == 0.0 {
+            // A move alone: by its offset, nothing resampled.
+            structural(canvas, "Move Layer", |canvas| {
+                let l = canvas
+                    .layer_stack
+                    .layers
+                    .get_mut(idx)
+                    .ok_or_else(|| CmdError::internal("layer index"))?;
+                l.offset = (
+                    l.offset.0.saturating_add(p.dx),
+                    l.offset.1.saturating_add(p.dy),
+                );
+                Ok(())
+            })?;
+            s.emit(EngineEvent::Pixels { doc });
+            return answer(s, doc, Some(id)).map(Plan::Done);
+        }
+        let Some((bx0, by0, bx1, by1)) = layer.tiles.content_bounds() else {
+            return Err(not_enabled(
+                "the layer is empty",
+                "Layer trống, không có gì để biến đổi",
+            ));
+        };
+        let (ox, oy) = (layer.offset.0 as f32, layer.offset.1 as f32);
+        let (x0, y0, x1, y1) = (
+            ox + bx0 as f32,
+            oy + by0 as f32,
+            ox + bx1 as f32,
+            oy + by1 as f32,
+        );
+        let radians = p.angle.to_radians();
+        let affine = Affine {
+            centre: ((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+            scale: (sx, sy),
+            sin: radians.sin(),
+            cos: radians.cos(),
+            shift: (p.dx as f32, p.dy as f32),
+        };
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| affine.forward(x, y));
+        let lo_x = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min).floor();
+        let lo_y = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min).floor();
+        let hi_x = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max).ceil();
+        let hi_y = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max).ceil();
+        let (new_w, new_h) = (hi_x - lo_x, hi_y - lo_y);
+        let fits = |v: f32| v >= 1.0 && v <= MAX_DIMENSION as f32;
+        if !fits(new_w) || !fits(new_h) || !lo_x.is_finite() || !lo_y.is_finite() {
+            return Err(CmdError::new(
+                ErrorCode::TooLarge,
+                format!(
+                    "the layer would be {new_w}×{new_h} pixels: at most {MAX_DIMENSION} a side"
+                ),
+            )
+            .vi("Layer sau biến đổi quá lớn"));
+        }
+        let (new_w, new_h) = (new_w as u32, new_h as u32);
+        let Some(len) = Canvas::checked_rgba_len(new_w, new_h) else {
+            return Err(
+                CmdError::new(ErrorCode::TooLarge, "the layer would be too large")
+                    .vi("Layer sau biến đổi quá lớn"),
+            );
+        };
+        let origin = (lo_x as i32, lo_y as i32);
+        let before = layer.tiles.clone();
+        const STEP: &str = "Free Transform";
+        Ok(Plan::Job(Job {
+            doc: Some(doc),
+            label_vi: "Biến đổi layer".into(),
+            work: Box::new(move |cx| {
+                cx.progress(0.1, "Đang biến đổi layer…");
+                let row = (new_w as usize).saturating_mul(4);
+                let mut out = vec![0u8; len];
+                out.par_chunks_mut(row).enumerate().for_each(|(y, line)| {
+                    let at_y = origin.1 as f32 + y as f32 + 0.5;
+                    for (x, px) in line.chunks_exact_mut(4).enumerate() {
+                        let at_x = origin.0 as f32 + x as f32 + 0.5;
+                        let (qx, qy) = affine.back(at_x, at_y);
+                        let (r, g, b, a) = before.sample_bilinear(qx - ox - 0.5, qy - oy - 0.5);
+                        px.copy_from_slice(&[r, g, b, a]);
+                    }
+                });
+                cx.check_cancelled()?;
+                let after = TileMap::from_rgba(&out, new_w, new_h);
+                Ok(Box::new(move |s: &mut Session<'_>| {
+                    let canvas = s.canvas_mut(Some(doc))?;
+                    let idx = layer_index(canvas, Some(id))?;
+                    let same = canvas
+                        .layer_stack
+                        .layers
+                        .get(idx)
+                        .is_some_and(|l| l.tiles.same_tiles(&before));
+                    if !same {
+                        return Err(CmdError::new(
+                            ErrorCode::StaleRevision,
+                            "the layer changed while it was being worked on; run it again",
+                        )
+                        .vi("Layer đã đổi trong lúc xử lý — hãy chạy lại"));
+                    }
+                    structural(canvas, STEP, |canvas| {
+                        let l = canvas
+                            .layer_stack
+                            .layers
+                            .get_mut(idx)
+                            .ok_or_else(|| CmdError::internal("layer index"))?;
+                        l.tiles = after;
+                        l.width = new_w;
+                        l.height = new_h;
+                        l.offset = origin;
+                        Ok(())
+                    })?;
+                    s.emit(EngineEvent::Pixels { doc });
+                    answer(s, doc, Some(id))
+                }) as Apply<LayerChanged>)
+            }),
+        }))
     }
 }
 
@@ -677,6 +1053,14 @@ pub enum MaskOp {
     Apply,
     /// Drop the mask; the layer shows whole again.
     Delete,
+    /// Turn the mask on, or off (it is kept, the layer shows whole).
+    Enable,
+    Disable,
+    /// Link the mask to the layer's pixels (they move together), or not.
+    Link,
+    Unlink,
+    /// Swap what the mask shows and hides.
+    Invert,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -695,7 +1079,8 @@ static MASK: CommandMeta = CommandMeta {
     label_vi: "Mặt nạ layer",
     label_en: "Layer Mask",
     doc: "Add a layer mask that reveals or hides all of the layer, apply the mask to its \
-          pixels, or delete it (Layer ▸ Layer Mask). One undo step.",
+          pixels, delete it, turn it on or off, link or unlink it, or invert it (Layer ▸ Layer \
+          Mask, the Layers panel). One undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -731,17 +1116,32 @@ impl Command for LayerMask {
                     "Layer đã có mặt nạ",
                 ));
             }
-            MaskOp::Apply | MaskOp::Delete if !has => {
+            MaskOp::RevealAll | MaskOp::HideAll => {}
+            _ if !has => {
                 return Err(not_enabled("the layer has no mask", "Layer chưa có mặt nạ"));
             }
             _ => {}
         }
         let label = match p.op {
-            MaskOp::RevealAll | MaskOp::HideAll => "Add Layer Mask",
+            MaskOp::RevealAll => "Add Layer Mask",
+            MaskOp::HideAll => "Add Hide-All Layer Mask",
             MaskOp::Apply => "Apply Layer Mask",
             MaskOp::Delete => "Delete Layer Mask",
+            MaskOp::Enable | MaskOp::Disable => "Toggle Layer Mask",
+            MaskOp::Link | MaskOp::Unlink => "Toggle Mask Link",
+            MaskOp::Invert => "Invert Mask",
         };
         let id = structural(canvas, label, |canvas| {
+            if p.op == MaskOp::Apply {
+                // The panel's way: a folder's mask bakes into what it holds.
+                if !canvas.layer_stack.apply_layer_mask(idx) {
+                    return Err(not_enabled(
+                        "the mask cannot be applied: the group holds type, vectors or an \
+                         adjustment",
+                        "Không áp dụng được mask: nhóm có chữ, vector hoặc adjustment",
+                    ));
+                }
+            }
             let layer = canvas
                 .layer_stack
                 .layers
@@ -750,8 +1150,19 @@ impl Command for LayerMask {
             match p.op {
                 MaskOp::RevealAll => layer.add_mask(true),
                 MaskOp::HideAll => layer.add_mask(false),
-                MaskOp::Apply => layer.apply_mask(),
+                MaskOp::Apply => {}
                 MaskOp::Delete => layer.delete_mask(),
+                MaskOp::Enable | MaskOp::Disable => {
+                    if let Some(mask) = layer.mask.as_mut() {
+                        mask.enabled = p.op == MaskOp::Enable;
+                    }
+                }
+                MaskOp::Link | MaskOp::Unlink => layer.mask_linked = p.op == MaskOp::Link,
+                MaskOp::Invert => {
+                    if let Some(mask) = layer.mask.as_mut() {
+                        mask.invert_tiles();
+                    }
+                }
             }
             Ok(layer.id)
         })?;

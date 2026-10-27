@@ -6,8 +6,8 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::jobs::JobId;
 use crate::CmdError;
+use crate::jobs::JobId;
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]

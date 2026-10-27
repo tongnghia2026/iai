@@ -145,10 +145,10 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        if self.shell.ui.mail_merge_pattern.trim().is_empty() {
-            if let Some(first) = table.headers.first() {
-                self.shell.ui.mail_merge_pattern = format!("{{{{{first}}}}}");
-            }
+        if self.shell.ui.mail_merge_pattern.trim().is_empty()
+            && let Some(first) = table.headers.first()
+        {
+            self.shell.ui.mail_merge_pattern = format!("{{{{{first}}}}}");
         }
         let rows = table.row_count();
         self.shell.ui.mail_merge = Some(MailMergeSession {

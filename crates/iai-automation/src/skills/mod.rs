@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use iai_engine::{CmdError, ErrorCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub use learn::{Draft, Recorded};
 pub use recipe::{Meta, Param, Recipe, Status, Step};

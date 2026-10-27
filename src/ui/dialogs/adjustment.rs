@@ -386,47 +386,47 @@ pub(crate) fn gradient_map_ui(
     };
 
     // ---- Interaction (before drawing so the markers reflect new state) ---
-    if resp.drag_started() || resp.clicked() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if let Some(i) = nearest(p.x, stops) {
-                sel = i;
-            } else {
-                let t = to_t(p.x);
-                let c = crate::core::color::sample_gradient_stops(stops, t);
-                let idx = stops.partition_point(|(pp, _)| *pp < t);
-                stops.insert(idx, (t, c));
-                sel = idx;
-                changed = true;
-            }
+    if (resp.drag_started() || resp.clicked())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        if let Some(i) = nearest(p.x, stops) {
+            sel = i;
+        } else {
+            let t = to_t(p.x);
+            let c = crate::core::color::sample_gradient_stops(stops, t);
+            let idx = stops.partition_point(|(pp, _)| *pp < t);
+            stops.insert(idx, (t, c));
+            sel = idx;
+            changed = true;
         }
     }
-    if resp.dragged() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            let lo = if sel == 0 {
-                0.0
-            } else {
-                stops[sel - 1].0 + 0.001
-            };
-            let hi = if sel + 1 >= stops.len() {
-                1.0
-            } else {
-                stops[sel + 1].0 - 0.001
-            };
-            let new_t = to_t(p.x).clamp(lo.min(hi), hi.max(lo));
-            if (new_t - stops[sel].0).abs() > f32::EPSILON {
-                stops[sel].0 = new_t;
-                changed = true;
-            }
+    if resp.dragged()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let lo = if sel == 0 {
+            0.0
+        } else {
+            stops[sel - 1].0 + 0.001
+        };
+        let hi = if sel + 1 >= stops.len() {
+            1.0
+        } else {
+            stops[sel + 1].0 - 0.001
+        };
+        let new_t = to_t(p.x).clamp(lo.min(hi), hi.max(lo));
+        if (new_t - stops[sel].0).abs() > f32::EPSILON {
+            stops[sel].0 = new_t;
+            changed = true;
         }
     }
-    if resp.secondary_clicked() && stops.len() > 2 {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if let Some(i) = nearest(p.x, stops) {
-                stops.remove(i);
-                sel = sel.min(stops.len() - 1);
-                changed = true;
-            }
-        }
+    if resp.secondary_clicked()
+        && stops.len() > 2
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(i) = nearest(p.x, stops)
+    {
+        stops.remove(i);
+        sel = sel.min(stops.len() - 1);
+        changed = true;
     }
 
     // ---- Gradient bar as one GPU-interpolated mesh (fast + smooth) -------
@@ -765,47 +765,47 @@ pub(crate) fn gradient_editor(
         best
     };
 
-    if resp.drag_started() || resp.clicked() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if let Some(i) = nearest(p.x, stops) {
-                sel = i;
-            } else {
-                let t = to_t(p.x);
-                let c = sample_rgba(stops, t);
-                let idx = stops.partition_point(|(pp, _)| *pp < t);
-                stops.insert(idx, (t, c));
-                sel = idx;
-                changed = true;
-            }
+    if (resp.drag_started() || resp.clicked())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        if let Some(i) = nearest(p.x, stops) {
+            sel = i;
+        } else {
+            let t = to_t(p.x);
+            let c = sample_rgba(stops, t);
+            let idx = stops.partition_point(|(pp, _)| *pp < t);
+            stops.insert(idx, (t, c));
+            sel = idx;
+            changed = true;
         }
     }
-    if resp.dragged() {
-        if let Some(p) = resp.interact_pointer_pos() {
-            let lo = if sel == 0 {
-                0.0
-            } else {
-                stops[sel - 1].0 + 0.001
-            };
-            let hi = if sel + 1 >= stops.len() {
-                1.0
-            } else {
-                stops[sel + 1].0 - 0.001
-            };
-            let new_t = to_t(p.x).clamp(lo.min(hi), hi.max(lo));
-            if (new_t - stops[sel].0).abs() > f32::EPSILON {
-                stops[sel].0 = new_t;
-                changed = true;
-            }
+    if resp.dragged()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let lo = if sel == 0 {
+            0.0
+        } else {
+            stops[sel - 1].0 + 0.001
+        };
+        let hi = if sel + 1 >= stops.len() {
+            1.0
+        } else {
+            stops[sel + 1].0 - 0.001
+        };
+        let new_t = to_t(p.x).clamp(lo.min(hi), hi.max(lo));
+        if (new_t - stops[sel].0).abs() > f32::EPSILON {
+            stops[sel].0 = new_t;
+            changed = true;
         }
     }
-    if resp.secondary_clicked() && stops.len() > 2 {
-        if let Some(p) = resp.interact_pointer_pos() {
-            if let Some(i) = nearest(p.x, stops) {
-                stops.remove(i);
-                sel = sel.min(stops.len() - 1);
-                changed = true;
-            }
-        }
+    if resp.secondary_clicked()
+        && stops.len() > 2
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(i) = nearest(p.x, stops)
+    {
+        stops.remove(i);
+        sel = sel.min(stops.len() - 1);
+        changed = true;
     }
 
     paint_gradient_bar(&ui.painter_at(bar_rect), bar_rect, stops, show_opacity);
@@ -1189,11 +1189,11 @@ pub(crate) fn curve_from_levels_params(params: &LevelsParams) -> Vec<(f32, f32)>
 pub(crate) fn push_curve_point(points: &mut Vec<(f32, f32)>, x: f32, y: f32) {
     let x = x.clamp(0.0, 1.0);
     let y = y.clamp(0.0, 1.0);
-    if let Some(last) = points.last_mut() {
-        if (last.0 - x).abs() < 1e-6 {
-            last.1 = y;
-            return;
-        }
+    if let Some(last) = points.last_mut()
+        && (last.0 - x).abs() < 1e-6
+    {
+        last.1 = y;
+        return;
     }
     points.push((x, y));
 }
@@ -1273,17 +1273,17 @@ pub(crate) fn curve_graph_ui(
         changed = true;
     }
     points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    if let Some(first) = points.first_mut() {
-        if first.0 != 0.0 {
-            first.0 = 0.0;
-            changed = true;
-        }
+    if let Some(first) = points.first_mut()
+        && first.0 != 0.0
+    {
+        first.0 = 0.0;
+        changed = true;
     }
-    if let Some(last) = points.last_mut() {
-        if last.0 != 1.0 {
-            last.0 = 1.0;
-            changed = true;
-        }
+    if let Some(last) = points.last_mut()
+        && last.0 != 1.0
+    {
+        last.0 = 1.0;
+        changed = true;
     }
 
     let size = 256.0;
@@ -1362,59 +1362,58 @@ pub(crate) fn curve_graph_ui(
         .memory(|m| m.data.get_temp::<Option<usize>>(active_id))
         .flatten();
 
-    if response.clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            active = nearest(pos, points);
-            ui.memory_mut(|m| m.data.insert_temp(active_id, active));
-        }
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        active = nearest(pos, points);
+        ui.memory_mut(|m| m.data.insert_temp(active_id, active));
     }
 
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            active = nearest(pos, points);
-            if active.is_none() {
-                let (nx, ny) = to_norm(pos);
-                let nx = nx.clamp(0.001, 0.999);
-                let ins = points.iter().position(|p| p.0 > nx).unwrap_or(points.len());
-                points.insert(ins, (nx, ny));
-                active = Some(ins);
-                changed = true;
-            }
-            ui.memory_mut(|m| m.data.insert_temp(active_id, active));
-        }
-    }
-
-    if response.dragged() {
-        if let (Some(i), Some(pos)) = (active, response.interact_pointer_pos()) {
-            let (mut nx, ny) = to_norm(pos);
-            let last = points.len() - 1;
-            if i == 0 {
-                nx = 0.0;
-            } else if i == last {
-                nx = 1.0;
-            } else {
-                let lo = points[i - 1].0 + 0.001;
-                let hi = points[i + 1].0 - 0.001;
-                nx = nx.clamp(lo, hi);
-            }
-            points[i] = (nx, ny);
+    if response.drag_started()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        active = nearest(pos, points);
+        if active.is_none() {
+            let (nx, ny) = to_norm(pos);
+            let nx = nx.clamp(0.001, 0.999);
+            let ins = points.iter().position(|p| p.0 > nx).unwrap_or(points.len());
+            points.insert(ins, (nx, ny));
+            active = Some(ins);
             changed = true;
         }
+        ui.memory_mut(|m| m.data.insert_temp(active_id, active));
+    }
+
+    if response.dragged()
+        && let (Some(i), Some(pos)) = (active, response.interact_pointer_pos())
+    {
+        let (mut nx, ny) = to_norm(pos);
+        let last = points.len() - 1;
+        if i == 0 {
+            nx = 0.0;
+        } else if i == last {
+            nx = 1.0;
+        } else {
+            let lo = points[i - 1].0 + 0.001;
+            let hi = points[i + 1].0 - 0.001;
+            nx = nx.clamp(lo, hi);
+        }
+        points[i] = (nx, ny);
+        changed = true;
     }
 
     if response.drag_stopped() {
         ui.memory_mut(|m| m.data.insert_temp(active_id, active));
     }
 
-    if response.secondary_clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some(i) = nearest(pos, points) {
-                if i != 0 && i != points.len() - 1 {
-                    points.remove(i);
-                    changed = true;
-                }
-            }
-        }
+    if response.secondary_clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(i) = nearest(pos, points)
+        && i != 0
+        && i != points.len() - 1
+    {
+        points.remove(i);
+        changed = true;
     }
 
     let mut poly = Vec::with_capacity(129);
@@ -1828,35 +1827,35 @@ pub(crate) fn levels_input_graph(
         egui::Sense::click_and_drag(),
     );
 
-    if black_resp.dragged() || black_resp.clicked() {
-        if let Some(pos) = black_resp.interact_pointer_pos() {
-            let v = x_to_level(graph_rect, pos.x).min(in_white.saturating_sub(1));
-            if *in_black != v {
-                *in_black = v;
-                changed = true;
-            }
+    if (black_resp.dragged() || black_resp.clicked())
+        && let Some(pos) = black_resp.interact_pointer_pos()
+    {
+        let v = x_to_level(graph_rect, pos.x).min(in_white.saturating_sub(1));
+        if *in_black != v {
+            *in_black = v;
+            changed = true;
         }
     }
-    if white_resp.dragged() || white_resp.clicked() {
-        if let Some(pos) = white_resp.interact_pointer_pos() {
-            let v = x_to_level(graph_rect, pos.x).max(in_black.saturating_add(1));
-            if *in_white != v {
-                *in_white = v;
-                changed = true;
-            }
+    if (white_resp.dragged() || white_resp.clicked())
+        && let Some(pos) = white_resp.interact_pointer_pos()
+    {
+        let v = x_to_level(graph_rect, pos.x).max(in_black.saturating_add(1));
+        if *in_white != v {
+            *in_white = v;
+            changed = true;
         }
     }
-    if gamma_resp.dragged() || gamma_resp.clicked() {
-        if let Some(pos) = gamma_resp.interact_pointer_pos() {
-            let ib = *in_black as f32 / 255.0;
-            let iw = *in_white as f32 / 255.0;
-            let level = x_to_level(graph_rect, pos.x) as f32 / 255.0;
-            let mid = ((level - ib) / (iw - ib).max(0.001)).clamp(0.02, 0.98);
-            let next_gamma = (mid.ln() / 0.5_f32.ln()).clamp(0.10, 9.99);
-            if (*gamma - next_gamma).abs() > 0.001 {
-                *gamma = next_gamma;
-                changed = true;
-            }
+    if (gamma_resp.dragged() || gamma_resp.clicked())
+        && let Some(pos) = gamma_resp.interact_pointer_pos()
+    {
+        let ib = *in_black as f32 / 255.0;
+        let iw = *in_white as f32 / 255.0;
+        let level = x_to_level(graph_rect, pos.x) as f32 / 255.0;
+        let mid = ((level - ib) / (iw - ib).max(0.001)).clamp(0.02, 0.98);
+        let next_gamma = (mid.ln() / 0.5_f32.ln()).clamp(0.10, 9.99);
+        if (*gamma - next_gamma).abs() > 0.001 {
+            *gamma = next_gamma;
+            changed = true;
         }
     }
 
@@ -1933,22 +1932,22 @@ pub(crate) fn levels_output_bar(ui: &mut egui::Ui, out_black: &mut u8, out_white
     );
 
     let mut changed = false;
-    if black_resp.dragged() || black_resp.clicked() {
-        if let Some(pos) = black_resp.interact_pointer_pos() {
-            let v = x_to_level(bar_rect, pos.x).min(out_white.saturating_sub(1));
-            if *out_black != v {
-                *out_black = v;
-                changed = true;
-            }
+    if (black_resp.dragged() || black_resp.clicked())
+        && let Some(pos) = black_resp.interact_pointer_pos()
+    {
+        let v = x_to_level(bar_rect, pos.x).min(out_white.saturating_sub(1));
+        if *out_black != v {
+            *out_black = v;
+            changed = true;
         }
     }
-    if white_resp.dragged() || white_resp.clicked() {
-        if let Some(pos) = white_resp.interact_pointer_pos() {
-            let v = x_to_level(bar_rect, pos.x).max(out_black.saturating_add(1));
-            if *out_white != v {
-                *out_white = v;
-                changed = true;
-            }
+    if (white_resp.dragged() || white_resp.clicked())
+        && let Some(pos) = white_resp.interact_pointer_pos()
+    {
+        let v = x_to_level(bar_rect, pos.x).max(out_black.saturating_add(1));
+        if *out_white != v {
+            *out_white = v;
+            changed = true;
         }
     }
 

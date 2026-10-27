@@ -1,7 +1,6 @@
 //! apply_ui_actions handlers: view zoom, whole-image ops (flip/rotate/
 //! resize), history and file I/O. Split out of actions.rs (phase 2).
 
-use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::ui::UiActions;
 use winit::event_loop::ActiveEventLoop;
@@ -28,12 +27,12 @@ impl App {
         }
         if let Some(focus) = actions.doc.flow_text_focus.take() {
             let idx = self.docs.active_doc_idx;
-            if let Some(doc) = self.docs.documents.get(idx) {
-                if doc.is_flow_text() {
-                    crate::ui::document_mode::request_focus(doc.id, focus);
-                    if let Some(window) = &self.win.window {
-                        window.request_redraw();
-                    }
+            if let Some(doc) = self.docs.documents.get(idx)
+                && doc.is_flow_text()
+            {
+                crate::ui::document_mode::request_focus(doc.id, focus);
+                if let Some(window) = &self.win.window {
+                    window.request_redraw();
                 }
             }
         }
@@ -48,20 +47,18 @@ impl App {
             actions.doc.cancel_mail_merge = false;
             self.cancel_mail_merge();
         }
-        if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take() {
-            if let Some(doc) = self.docs.by_id_mut(doc_id) {
-                if let Some(text) = doc.flow_text.as_mut() {
-                    text.replace_document(document);
-                }
-            }
+        if let Some((doc_id, document)) = actions.doc.replace_flow_text_document.take()
+            && let Some(doc) = self.docs.by_id_mut(doc_id)
+            && let Some(text) = doc.flow_text.as_mut()
+        {
+            text.replace_document(document);
         }
-        if let Some((doc_id, page_count, active_page)) = actions.doc.set_flow_text_layout.take() {
-            if let Some(doc) = self.docs.by_id_mut(doc_id) {
-                if let Some(text) = doc.flow_text.as_mut() {
-                    text.set_layout_page_count(page_count);
-                    text.set_active_page(active_page);
-                }
-            }
+        if let Some((doc_id, page_count, active_page)) = actions.doc.set_flow_text_layout.take()
+            && let Some(doc) = self.docs.by_id_mut(doc_id)
+            && let Some(text) = doc.flow_text.as_mut()
+        {
+            text.set_layout_page_count(page_count);
+            text.set_active_page(active_page);
         }
         let flow_text_active = self.docs.active().is_flow_text();
         if actions.doc.fit_to_screen {
@@ -106,57 +103,6 @@ impl App {
                 self.on_view_changed();
             }
         }
-        // Flip and 90° rotate are tile-native (per-layer TileMap::flip_*/rotate_*
-        // + offset/mask/selection remap), and flatten_full skips the flat buffer on
-        // large canvases — so they run under Viewport Streaming with no >25M px gate.
-        if actions.doc.flip_horizontal {
-            let _ = self.run_with("image.flip", serde_json::json!({"axis": "horizontal"}));
-        }
-        if actions.doc.flip_vertical {
-            let _ = self.run_with("image.flip", serde_json::json!({"axis": "vertical"}));
-        }
-        if actions.doc.rotate_cw
-            && self
-                .run_with("image.rotate", serde_json::json!({"angle": "90"}))
-                .is_ok()
-        {
-            self.fit_canvas_to_screen();
-        }
-        if actions.doc.rotate_ccw
-            && self
-                .run_with("image.rotate", serde_json::json!({"angle": "-90"}))
-                .is_ok()
-        {
-            self.fit_canvas_to_screen();
-        }
-        if let Some((w, h, _ox, _oy)) = actions.doc.canvas_resize.take() {
-            let w = w.max(1);
-            let h = h.max(1);
-            // Canvas Resize is tile-native (per-layer chunked blit), so it runs
-            // under Viewport Streaming with no >25M px gate.
-            let resized = self.docs.active_mut().canvas.resize(w, h);
-            if !resized {
-                self.shell.status_msg = "Resize bi huy: kich thuoc vuot gioi han".to_string();
-                return false;
-            }
-            if let Some(gpu) = &mut self.win.gpu {
-                gpu.resize_canvas_texture(w, h);
-            }
-            self.push_canvas_uniforms();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-            self.fit_canvas_to_screen();
-        }
-        if let Some(mm) = actions.doc.set_page_bleed_mm.take() {
-            self.set_page_setup(Some(mm), None);
-        }
-        if let Some(mm) = actions.doc.set_page_margin_mm.take() {
-            self.set_page_setup(None, Some(mm));
-        }
-        if actions.doc.add_artboard {
-            actions.doc.add_artboard = false;
-            self.add_artboard();
-        }
         if let Some(i) = actions.doc.set_active_artboard.take() {
             let active = self.docs.active_mut();
             if let Some(text) = active.flow_text.as_mut() {
@@ -179,25 +125,16 @@ impl App {
             self.shell.ui.page_rename_text.clear();
         }
         if let Some((from, to)) = actions.doc.move_page.take() {
-            self.move_page(from, to);
+            self.move_pdf_page(from, to);
         }
         if let Some(i) = actions.doc.delete_page.take() {
-            self.delete_page(i);
+            self.delete_pdf_page(i);
         }
         if let Some(position) = actions.doc.insert_pdf_blank.take() {
             self.insert_blank_pdf_page(position);
         }
         if let Some(position) = actions.doc.insert_pdf_files.take() {
             self.begin_pdf_page_insert_dialog(position);
-        }
-        if std::mem::take(&mut actions.doc.toggle_master_edit) {
-            self.toggle_master_edit();
-        }
-        if std::mem::take(&mut actions.doc.delete_master) {
-            self.delete_master();
-        }
-        if let Some((i, on)) = actions.doc.set_page_use_master.take() {
-            self.set_page_use_master(i, on);
         }
         if let Some(open) = actions.doc.show_pdf_export_dialog.take() {
             self.shell.ui.show_pdf_export_dialog = open;
@@ -213,25 +150,6 @@ impl App {
         }
         if std::mem::take(&mut actions.doc.run_pdf_export) {
             self.run_pdf_export();
-        }
-        if let Some((w, h, dpi)) = actions.doc.image_resize.take() {
-            let w = w.max(1);
-            let h = h.max(1);
-            // Image Size is tile-native (per-layer chunked resample), so it runs
-            // under Viewport Streaming with no >25M px gate.
-            let resized = self.docs.active_mut().canvas.resize_image(w, h, dpi);
-            if !resized {
-                self.shell.status_msg = "Image Size bi huy: kich thuoc vuot gioi han".to_string();
-                return false;
-            }
-            if let Some(gpu) = &mut self.win.gpu {
-                gpu.resize_canvas_texture(w, h);
-            }
-            self.push_canvas_uniforms();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
-            self.fit_canvas_to_screen();
-            self.shell.status_msg = format!("Image Size: {}x{} px", w, h);
         }
         true
     }
@@ -259,34 +177,23 @@ impl App {
                 actions.doc.jump_history = None;
             }
         }
+        // Undo, Redo and a step picked in History: the commands an agent
+        // runs.
         if actions.doc.undo {
-            self.sync_brush_gpu_to_cpu();
-            self.docs.active_mut().canvas.undo();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+            let _ = self.run_now("edit.undo");
         }
         if actions.doc.redo {
-            self.sync_brush_gpu_to_cpu();
-            self.docs.active_mut().canvas.redo();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.apply_canvas_event(CanvasEvent::SelectionChanged);
+            let _ = self.run_now("edit.redo");
         }
         if let Some(target_idx) = actions.doc.jump_history.take() {
             let current_idx = self.docs.active().canvas.undo_count();
-            if target_idx < current_idx {
-                self.sync_brush_gpu_to_cpu();
-                for _ in 0..(current_idx - target_idx) {
-                    self.docs.active_mut().canvas.undo();
-                }
-                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                self.apply_canvas_event(CanvasEvent::SelectionChanged);
-            } else if target_idx > current_idx {
-                self.sync_brush_gpu_to_cpu();
-                for _ in 0..(target_idx - current_idx) {
-                    self.docs.active_mut().canvas.redo();
-                }
-                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                self.apply_canvas_event(CanvasEvent::SelectionChanged);
+            let (id, steps) = if target_idx < current_idx {
+                ("edit.undo", current_idx - target_idx)
+            } else {
+                ("edit.redo", target_idx.saturating_sub(current_idx))
+            };
+            if steps > 0 {
+                let _ = self.run_with(id, serde_json::json!({"steps": steps.min(1000)}));
             }
         }
 
@@ -359,76 +266,9 @@ impl App {
             v.bleed_mm = v.bleed_mm.clamp(0.0, 20.0);
             self.shell.ui.export_pdf_marks = v;
         }
-        if let Some(profile) = actions.doc.assign_profile.take() {
-            self.docs.active_mut().canvas.assign_profile(profile);
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            // Assign changes the document tag/encoding. Rebuild the display LUT
-            // immediately; otherwise the next frame can interpret the new pixel
-            // values through the previous document profile.
-            self.apply_proof_settings();
-            self.shell.status_msg = format!("Assigned profile: {}", profile.name());
-        }
-        if let Some(profile) = actions.doc.convert_profile.take() {
-            self.docs.active_mut().canvas.convert_to_profile(profile);
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            // Conversion stores pixels encoded in the destination profile, so
-            // the document-to-display LUT must change in the same UI action.
-            self.apply_proof_settings();
-            self.shell.status_msg = format!("Converted to profile: {}", profile.name());
-        }
-        if actions.doc.convert_grayscale {
-            let _ = self.run_now("image.grayscale");
-        }
         self.handle_cmyk_mode_actions(actions);
-        if let Some(sixteen) = actions.doc.set_bit_depth.take() {
-            self.docs.active_mut().canvas.set_bit_depth(sixteen);
-            self.shell.status_msg = if sixteen {
-                "Mode: 16 Bits/Channel".to_string()
-            } else {
-                "Mode: 8 Bits/Channel".to_string()
-            };
-        }
 
         // Soft proof (View > Proof) is handled in a separate pass.
-    }
-
-    /// Set the page bleed / safe-margin for the active document as one undoable
-    /// step. Each argument is millimetres (`None` leaves that one unchanged);
-    /// values convert to document units through the canvas DPI. Recorded as a
-    /// [`crate::core::command::PageSetupCommand`] on the canvas history gate, so it
-    /// undoes and marks the document dirty. No-op when nothing actually changes.
-    pub fn set_page_setup(&mut self, bleed_mm: Option<f32>, margin_mm: Option<f32>) {
-        let idx = self.docs.active_doc_idx;
-        let dpi = self.docs.documents[idx]
-            .canvas
-            .metadata
-            .resolution_ppi
-            .max(1.0);
-        let mm_to_px = |mm: f32| mm.max(0.0) / 25.4 * dpi;
-        let (cur_bleed, cur_margin, artboards) = {
-            let m = &self.docs.documents[idx].canvas.metadata;
-            (m.page_bleed_px, m.page_margin_px, m.artboards.clone())
-        };
-        let bleed_px = bleed_mm.map_or(cur_bleed, mm_to_px);
-        let margin_px = margin_mm.map_or(cur_margin, mm_to_px);
-        if (bleed_px - cur_bleed).abs() < 1e-3 && (margin_px - cur_margin).abs() < 1e-3 {
-            return;
-        }
-        let _ = self.docs.documents[idx].canvas.execute(
-            Box::new(crate::core::command::PageSetupCommand::new(
-                "Page setup",
-                bleed_px,
-                margin_px,
-                artboards,
-            )),
-            crate::core::gateway::ChangeKind::LayerStructure,
-        );
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = format!(
-            "Trang: bleed {:.0}mm · lề an toàn {:.0}mm",
-            bleed_px / dpi * 25.4,
-            margin_px / dpi * 25.4
-        );
     }
 
     /// Add a new page to the active document (Corel/Excel-style): an independent
@@ -489,57 +329,25 @@ impl App {
         };
         let name = self.shell.ui.page_rename_text.trim().to_string();
         self.shell.ui.page_rename_text.clear();
-        let idx = self.docs.active_doc_idx;
-        if let Some(doc) = self.docs.documents.get_mut(idx) {
+        if let Some(pdf) = self.docs.active_mut().pdf_document.as_mut() {
             let default_label = format!("Trang {}", index + 1);
             let custom = (!name.is_empty() && name != default_label).then_some(name);
-            if let Some(pdf) = doc.pdf_document.as_mut() {
-                pdf.set_page_name(index, custom);
-            } else {
-                doc.set_page_name(index, custom);
-            }
+            pdf.set_page_name(index, custom);
+        } else {
+            let _ = self.run_with(
+                "page.rename",
+                serde_json::json!({"page": index, "name": name}),
+            );
         }
     }
 
-    /// Reorder a page (tab context menu "move left / right"): keeps the same
-    /// active content, only tab order changes, so no view resync is needed.
-    pub fn move_page(&mut self, from: usize, to: usize) {
-        let idx = self.docs.active_doc_idx;
-        if let Some(doc) = self.docs.documents.get_mut(idx) {
-            if let Some(pdf) = doc.pdf_document.as_mut() {
-                pdf.move_page(from, to);
-                self.shell.status_msg = format!("Đã chuyển trang {}", to + 1);
-            } else {
-                doc.move_page(from, to);
-            }
+    /// Reorder an opened PDF's page (tab context menu "move left / right"):
+    /// only the tab order changes, so no view resync is needed.
+    fn move_pdf_page(&mut self, from: usize, to: usize) {
+        if let Some(pdf) = self.docs.active_mut().pdf_document.as_mut() {
+            pdf.move_page(from, to);
+            self.shell.status_msg = format!("Đã chuyển trang {}", to + 1);
         }
-    }
-
-    /// Delete a page (tab context menu). Keeps at least one page; when the active
-    /// page is removed a neighbour takes over, so resync the GPU/view like a page
-    /// switch. Collapsing back to a single page hides the extra tab.
-    pub fn delete_page(&mut self, index: usize) {
-        let idx = self.docs.active_doc_idx;
-        if self.docs.documents[idx].pdf_document.is_some() {
-            self.delete_pdf_page(index);
-            return;
-        }
-        let Some(doc) = self.docs.documents.get_mut(idx) else {
-            return;
-        };
-        if doc.page_count() <= 1 || index >= doc.page_count() {
-            return;
-        }
-        // If the rename dialog targets this or a later page, its index is stale —
-        // close it rather than risk renaming the wrong page.
-        self.shell.ui.page_rename_target = None;
-        self.sync_brush_gpu_to_cpu();
-        self.docs.documents[idx].remove_page(index);
-        let count = self.docs.documents[idx].page_count();
-        // The checked-out canvas may have changed → full GPU/view resync + reframe.
-        self.refresh_active_document();
-        self.fit_canvas_to_screen();
-        self.shell.status_msg = format!("Đã xoá trang · còn {count}");
     }
 
     fn delete_pdf_page(&mut self, position: usize) {
@@ -617,73 +425,6 @@ impl App {
         self.shell.status_msg = format!("Đã xoá trang · còn {}", pdf.selected_pages.len());
     }
 
-    /// Page ▸ Master: enter or leave master-editing. On first use it creates the
-    /// shared master page (matching the current page) and checks it out into the
-    /// canvas; called again it finishes editing and restores the active page.
-    /// Either way the checked-out canvas changes → full GPU/view resync + reframe.
-    pub fn toggle_master_edit(&mut self) {
-        self.sync_brush_gpu_to_cpu();
-        let idx = self.docs.active_doc_idx;
-        let Some(doc) = self.docs.documents.get_mut(idx) else {
-            return;
-        };
-        // A PDF-import document is paged by the source, not by artboards — the
-        // master feature belongs to true multi-page artboard documents only.
-        if doc.pdf_document.is_some() {
-            self.shell.status_msg = "Trang nền chỉ dùng cho tài liệu đa trang".to_string();
-            return;
-        }
-        if doc.editing_master {
-            doc.exit_master_edit();
-            self.refresh_active_document();
-            self.fit_canvas_to_screen();
-            self.shell.status_msg = "Đã xong trang nền".to_string();
-        } else {
-            doc.ensure_master();
-            doc.enter_master_edit();
-            self.refresh_active_document();
-            self.fit_canvas_to_screen();
-            self.shell.status_msg =
-                "Đang chỉnh TRANG NỀN (hiện dưới mọi trang) — bấm lại để xong".to_string();
-        }
-    }
-
-    /// Page ▸ Master: delete the shared master page. Exits master-editing first, so
-    /// the active page is restored and the view resynced.
-    pub fn delete_master(&mut self) {
-        let idx = self.docs.active_doc_idx;
-        let Some(doc) = self.docs.documents.get_mut(idx) else {
-            return;
-        };
-        if !doc.has_master() {
-            return;
-        }
-        let was_editing = doc.editing_master;
-        doc.remove_master();
-        if was_editing {
-            self.refresh_active_document();
-            self.fit_canvas_to_screen();
-        } else {
-            // The master vanished from beneath every page → recomposite.
-            self.recomposite();
-        }
-        self.shell.status_msg = "Đã xoá trang nền".to_string();
-    }
-
-    /// Page-tab context menu: toggle whether page `index` shows the master beneath
-    /// it. Recomposites when the active page's own setting changed.
-    pub fn set_page_use_master(&mut self, index: usize, on: bool) {
-        let idx = self.docs.active_doc_idx;
-        let Some(doc) = self.docs.documents.get_mut(idx) else {
-            return;
-        };
-        let affects_active = index == doc.active_artboard && !doc.editing_master;
-        doc.set_page_use_master(index, on);
-        if affects_active {
-            self.recomposite();
-        }
-    }
-
     /// Image ▸ Mode CMYK actions: open/close the convert dialog (pre-loading the
     /// remembered ICC), pick an ICC, run the RGB→CMYK conversion, or drop back
     /// to RGB. The conversion is destructive (flatten + history clear); the
@@ -693,18 +434,18 @@ impl App {
             self.shell.ui.show_cmyk_convert_dialog = open;
             if open && self.shell.ui.cmyk_convert_icc.is_none() {
                 // Offer the last-used ICC as the pre-selected profile.
-                if let Some(path) = crate::ui::dialogs::load_last_cmyk_icc_path() {
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        if crate::core::cms::profile_is_cmyk(&bytes) {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("CMYK profile")
-                                .to_string();
-                            self.shell.ui.cmyk_convert_icc = Some((name, bytes));
-                            self.shell.ui.cmyk_convert_use_icc = true;
-                        }
-                    }
+                if let Some(path) = crate::ui::dialogs::load_last_cmyk_icc_path()
+                    && let Ok(bytes) = std::fs::read(&path)
+                    && crate::core::cms::profile_is_cmyk(&bytes)
+                {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("CMYK profile")
+                        .to_string();
+                    self.shell.ui.cmyk_convert_icc = Some((name, bytes));
+                    self.shell.ui.cmyk_convert_icc_path = Some(path.clone());
+                    self.shell.ui.cmyk_convert_use_icc = true;
                 }
             }
         }
@@ -713,71 +454,56 @@ impl App {
             self.shell.ui.cmyk_convert_use_icc = use_icc;
         }
 
-        if actions.doc.browse_cmyk_icc {
-            if let Some(window) = self.win.window.as_ref() {
-                let parent = crate::file_io::dialog_parent(window);
-                let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
-                if let Some(p) = parent {
-                    dialog = dialog.set_parent(&p);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    match std::fs::read(&path) {
-                        Ok(bytes) if crate::core::cms::profile_is_cmyk(&bytes) => {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("CMYK profile")
-                                .to_string();
-                            self.shell.ui.cmyk_convert_icc = Some((name, bytes));
-                            self.shell.ui.cmyk_convert_use_icc = true;
-                            crate::ui::dialogs::save_last_cmyk_icc_path(&path);
-                        }
-                        Ok(_) => {
-                            self.shell.status_msg =
-                                "The selected ICC file is not a CMYK profile".to_string();
-                        }
-                        Err(e) => {
-                            self.shell.status_msg = format!("Could not read ICC file: {e}");
-                        }
+        if actions.doc.browse_cmyk_icc
+            && let Some(window) = self.win.window.as_ref()
+        {
+            let parent = crate::file_io::dialog_parent(window);
+            let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
+            if let Some(p) = parent {
+                dialog = dialog.set_parent(&p);
+            }
+            if let Some(path) = dialog.pick_file() {
+                match std::fs::read(&path) {
+                    Ok(bytes) if crate::core::cms::profile_is_cmyk(&bytes) => {
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("CMYK profile")
+                            .to_string();
+                        self.shell.ui.cmyk_convert_icc = Some((name, bytes));
+                        self.shell.ui.cmyk_convert_icc_path = Some(path.clone());
+                        self.shell.ui.cmyk_convert_use_icc = true;
+                        crate::ui::dialogs::save_last_cmyk_icc_path(&path);
+                    }
+                    Ok(_) => {
+                        self.shell.status_msg =
+                            "The selected ICC file is not a CMYK profile".to_string();
+                    }
+                    Err(e) => {
+                        self.shell.status_msg = format!("Could not read ICC file: {e}");
                     }
                 }
             }
         }
 
         if actions.doc.convert_cmyk {
-            let profile = if self.shell.ui.cmyk_convert_use_icc {
-                match &self.shell.ui.cmyk_convert_icc {
-                    Some((name, data)) => crate::core::canvas::CmykProfile::Icc {
-                        name: name.clone(),
-                        data: data.clone(),
-                    },
-                    None => crate::core::canvas::CmykProfile::Naive,
-                }
-            } else {
-                crate::core::canvas::CmykProfile::Naive
-            };
-            match self.docs.active_mut().canvas.convert_to_cmyk(profile) {
-                Ok(()) => {
-                    self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                    self.shell.ui.show_channels_panel = true;
-                    self.shell.ui.show_layer_panel = false;
-                    let name = match &self.docs.active().canvas.color_mode {
-                        crate::core::canvas::ColorMode::Cmyk(p) => p.display_name().to_string(),
-                        crate::core::canvas::ColorMode::Rgb => String::new(),
-                    };
-                    self.shell.status_msg = format!("Mode: CMYK — {name}");
-                }
-                Err(e) => {
-                    self.shell.status_msg = format!("CMYK conversion failed: {e}");
-                }
+            // The command, with the printer's profile the dialog picked.
+            let mut args = serde_json::json!({"color": "cmyk"});
+            if let (true, Some(path), Some(fields)) = (
+                self.shell.ui.cmyk_convert_use_icc,
+                self.shell.ui.cmyk_convert_icc_path.as_ref(),
+                args.as_object_mut(),
+            ) {
+                fields.insert(
+                    "icc".to_string(),
+                    serde_json::json!({"path": path.display().to_string()}),
+                );
+            }
+            if self.run_with("image.mode", args).is_ok() {
+                self.shell.ui.show_channels_panel = true;
+                self.shell.ui.show_layer_panel = false;
             }
             self.shell.ui.show_cmyk_convert_dialog = false;
-        }
-
-        if actions.doc.convert_rgb_mode {
-            self.docs.active_mut().canvas.convert_to_rgb_mode();
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.shell.status_msg = "Mode: RGB".to_string();
         }
     }
 }

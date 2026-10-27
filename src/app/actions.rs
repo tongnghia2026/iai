@@ -39,10 +39,6 @@ mod ui_selection;
 mod ui_tools;
 mod update;
 
-/// Status line when Merge Down / Merge Selected is refused.
-pub(crate) const MERGE_REFUSED_MSG: &str =
-    "Không gộp được: không có layer phù hợp bên dưới (nhóm, adjustment hoặc đang khóa)";
-
 fn should_ring_modal_denial(denied: bool, text_input_frame: bool) -> bool {
     denied && !text_input_frame
 }
@@ -130,6 +126,14 @@ impl App {
         self.shell.status_msg = format!("Picked #{:02X}{:02X}{:02X}", color[0], color[1], color[2]);
     }
 
+    /// What the frame asked that is an engine command, run as an agent's
+    /// is: the same change, one undo step, what it says on the status line.
+    pub(super) fn handle_command_actions(&mut self, actions: &mut UiActions) {
+        for call in std::mem::take(&mut actions.commands) {
+            let _ = self.execute_command(call);
+        }
+    }
+
     pub fn apply_ui_actions(&mut self, mut actions: UiActions, event_loop: &ActiveEventLoop) {
         self.edit.input.paint_dialog_hovered = actions.dialogs.paint_dialog_hovered;
         self.poll_filter_preview();
@@ -143,6 +147,14 @@ impl App {
         self.poll_path_bake();
         // Off-thread crisp-Path display overlay bakes (zoom-bucket changes).
         self.poll_display_bake();
+
+        // An ID photo being made for the tab in front holds that tab, not
+        // the window: going to another tab, opening a photo or a new tab
+        // lets it go on (photos asked for there wait their turn), and its
+        // tab blinks when it is done. Those moves skip the dialog's gate.
+        let tab_moves = self
+            .photo_only_holds_tab()
+            .then(|| TabMoves::take(&mut actions, self.docs.active_doc_idx));
 
         // A tool picked while Auto retouch is open. The view tools leave a
         // retouch under way alone; any other has it applied as it stands
@@ -203,13 +215,16 @@ impl App {
             }
         }
 
+        if let Some(moves) = tab_moves {
+            moves.put_back(&mut actions);
+        }
+
         self.handle_chrome_actions(&mut actions);
         self.handle_library_actions(&mut actions);
         self.handle_text_actions(&mut actions);
         self.handle_transform_crop_actions(&mut actions, event_loop);
         self.handle_tool_color_actions(&mut actions, event_loop);
         self.handle_dialog_actions(&mut actions, event_loop);
-        self.handle_direct_adjustment_actions(&mut actions);
         self.handle_tool_options_actions(&mut actions, event_loop);
 
         self.handle_pro_actions(&mut actions);
@@ -219,6 +234,7 @@ impl App {
             self.shell.exit_requested = true;
         }
 
+        self.handle_command_actions(&mut actions);
         self.handle_layer_actions(&mut actions);
         if !self.handle_view_image_actions(&mut actions, event_loop) {
             return;
@@ -248,12 +264,10 @@ impl App {
             .doc
             .hovered_doc
             .and_then(|idx| self.docs.documents.get(idx))
+            && self.shell.ui_data_cache.doc_thumbs.request(doc)
+            && let Some(w) = &self.win.window
         {
-            if self.shell.ui_data_cache.doc_thumbs.request(doc) {
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
+            w.request_redraw();
         }
 
         // Dirty itself is derived from each document's saved checkpoint. Only the
@@ -265,10 +279,65 @@ impl App {
     }
 }
 
+/// The asks of a frame that only move between tabs: another tab, a new
+/// one, a photo opened, another tab closed.
+struct TabMoves {
+    switch_doc: Option<usize>,
+    new_doc_tab: bool,
+    open_file: bool,
+    open_recent: Option<std::path::PathBuf>,
+    close_doc_tab: Option<usize>,
+}
+
+impl TabMoves {
+    /// Take them out of `actions`; closing the tab in front stays there.
+    fn take(actions: &mut UiActions, active: usize) -> Self {
+        let doc = &mut actions.doc;
+        Self {
+            switch_doc: doc.switch_doc.take(),
+            new_doc_tab: std::mem::take(&mut doc.new_doc_tab),
+            open_file: std::mem::take(&mut doc.open_file),
+            open_recent: doc.open_recent.take(),
+            close_doc_tab: doc.close_doc_tab.take_if(|idx| *idx != active),
+        }
+    }
+
+    fn put_back(self, actions: &mut UiActions) {
+        let doc = &mut actions.doc;
+        doc.switch_doc = doc.switch_doc.or(self.switch_doc);
+        doc.new_doc_tab |= self.new_doc_tab;
+        doc.open_file |= self.open_file;
+        doc.open_recent = doc.open_recent.take().or(self.open_recent);
+        doc.close_doc_tab = doc.close_doc_tab.or(self.close_doc_tab);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{should_ring_modal_denial, within_text_input_window};
     use std::time::{Duration, Instant};
+
+    /// The tab moves skip the dialog's gate together and come back after
+    /// it; closing the tab in front is not one of them.
+    #[test]
+    fn tab_moves_are_taken_past_the_gate_and_put_back() {
+        let mut actions = crate::ui::UiActions::default();
+        actions.doc.switch_doc = Some(2);
+        actions.doc.open_file = true;
+        actions.doc.close_doc_tab = Some(0);
+        let moves = super::TabMoves::take(&mut actions, 0);
+        assert!(actions.doc.switch_doc.is_none() && !actions.doc.open_file);
+        assert_eq!(actions.doc.close_doc_tab, Some(0), "the tab in front stays");
+        moves.put_back(&mut actions);
+        assert_eq!(actions.doc.switch_doc, Some(2));
+        assert!(actions.doc.open_file);
+
+        actions.doc.close_doc_tab = Some(1);
+        let moves = super::TabMoves::take(&mut actions, 0);
+        assert!(actions.doc.close_doc_tab.is_none());
+        moves.put_back(&mut actions);
+        assert_eq!(actions.doc.close_doc_tab, Some(1));
+    }
 
     #[test]
     fn text_input_frames_never_ring_the_modal_bell() {
@@ -334,9 +403,10 @@ mod menu_runs_commands {
         )
         .unwrap();
         let mut actions = UiActions::default();
-        actions.sel.selection_grow = Some(3);
-        actions.sel.selection_feather = Some(0.0);
-        app.handle_selection_refine_actions(&mut actions);
+        actions.modify_selection("grow", 3.0);
+        actions.modify_selection("feather", 0.0);
+        assert_eq!(actions.commands.len(), 1, "no feather of 0 px is asked for");
+        app.handle_command_actions(&mut actions);
         let (x0, _, x1, _) = app.docs.active_mut().canvas.selection.bounding_box();
         assert_eq!((x0, x1), (0.0, 13.0));
 
@@ -350,12 +420,244 @@ mod menu_runs_commands {
         );
         assert!(app.docs.active_mut().canvas.can_undo());
 
+        // Merge Down from the panel: the layer goes into the one below; the
+        // bottom one has nothing below and says so.
+        app.run_with("layer.new", serde_json::json!({})).unwrap();
+        let top = app.docs.active().canvas.layer_stack.active_idx;
+        let ids = |app: &App| -> Vec<u32> {
+            let stack = &app.docs.active().canvas.layer_stack;
+            stack.layers.iter().map(|l| l.id).collect()
+        };
+        let mut actions = UiActions::default();
+        actions.run_on_layer(&ids(&app), top, "layer.merge_down", serde_json::json!({}));
+        app.handle_command_actions(&mut actions);
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 1);
+        let mut actions = UiActions::default();
+        actions.run_on_layer(&ids(&app), 0, "layer.merge_down", serde_json::json!({}));
+        app.handle_command_actions(&mut actions);
+        assert_eq!(
+            app.shell.status_msg,
+            iai_engine::cmds::arrange::MERGE_REFUSED_VI
+        );
+
         app.run_with("layer.new", serde_json::json!({})).unwrap();
         assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 2);
         let mut actions = UiActions::default();
-        actions.layers.merge_all = true;
-        app.handle_layer_actions(&mut actions);
+        actions.run("layer.flatten", serde_json::json!({}));
+        app.handle_command_actions(&mut actions);
         assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 1);
         assert_eq!(app.shell.status_msg, "Đã gộp thành một lớp");
+    }
+
+    fn run(app: &mut App, id: &str, args: serde_json::Value) {
+        let mut actions = UiActions::default();
+        actions.run(id, args);
+        app.handle_command_actions(&mut actions);
+        assert!(actions.commands.is_empty());
+    }
+
+    fn size(app: &App) -> (u32, u32) {
+        let canvas = &app.docs.active().canvas;
+        (canvas.width, canvas.height)
+    }
+
+    #[test]
+    fn rotate_canvas_and_image_size_from_the_menu_one_step_each() {
+        use serde_json::json;
+        let mut app = two_greys();
+        run(&mut app, "image.rotate", json!({"angle": "90"}));
+        assert_eq!(size(&app), (20, 40));
+        // A quarter turn clockwise: the dark left half is now on top.
+        assert_eq!((red_at(&app, 10, 5), red_at(&app, 10, 35)), (64, 160));
+
+        // Canvas Size: larger, the picture where it was, the rest clear.
+        run(
+            &mut app,
+            "image.canvas_size",
+            json!({"widthPx": 30, "heightPx": 44}),
+        );
+        assert_eq!(size(&app), (30, 44));
+        assert_eq!(red_at(&app, 10, 5), 64);
+        assert_eq!(app.shell.status_msg, "Canvas Size: 30×44 px");
+        let corner = {
+            let canvas = &app.docs.active().canvas;
+            canvas.layer_stack.layers[0].tiles.get_pixel(28, 42)
+        };
+        assert_eq!(corner.3, 0, "{corner:?}");
+
+        // Image Size: twice as large at 150 dpi.
+        run(
+            &mut app,
+            "image.resize",
+            json!({"widthPx": 60, "heightPx": 88, "dpi": 150.0}),
+        );
+        assert_eq!(size(&app), (60, 88));
+        assert_eq!(app.docs.active().canvas.metadata.resolution_ppi, 150.0);
+        assert_eq!(app.shell.status_msg, "Image Size: 60×88 px");
+
+        // Three steps, each undone on its own.
+        let canvas = &mut app.docs.active_mut().canvas;
+        assert_eq!(canvas.undo_count(), 3);
+        canvas.undo();
+        assert_eq!((canvas.width, canvas.height), (30, 44));
+        // Too large: refused, said, nothing changed.
+        run(
+            &mut app,
+            "image.canvas_size",
+            json!({"widthPx": 40000, "heightPx": 10}),
+        );
+        assert_eq!(size(&app), (30, 44));
+        assert!(!app.shell.status_msg.is_empty());
+    }
+
+    /// The last undo step's name.
+    fn last_step(app: &App) -> String {
+        app.docs
+            .active()
+            .canvas
+            .history_entries()
+            .into_iter()
+            .rev()
+            .find(|e| !e.is_undone)
+            .map(|e| e.label)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_layers_panel_buttons_run_their_commands_one_step_each_named_as_before() {
+        use serde_json::json;
+        let mut app = two_greys();
+        run(&mut app, "layer.new", json!({}));
+        run(&mut app, "layer.new", json!({}));
+        let ids: Vec<u32> = {
+            let stack = &app.docs.active().canvas.layer_stack;
+            stack.layers.iter().map(|l| l.id).collect()
+        };
+        assert_eq!(ids.len(), 3);
+        let on = |app: &mut App, idx: usize, id: &str, args: serde_json::Value| {
+            let mut actions = UiActions::default();
+            actions.run_on_layer(&ids, idx, id, args);
+            app.handle_command_actions(&mut actions);
+        };
+        let layer = |app: &App, id: u32| {
+            let stack = &app.docs.active().canvas.layer_stack;
+            stack.layers.iter().position(|l| l.id == id).unwrap()
+        };
+        let steps = |app: &App| app.docs.active().canvas.undo_count();
+        let before = steps(&app);
+
+        on(&mut app, 1, "layer.set", json!({"visible": false}));
+        assert!(!app.docs.active().canvas.layer_stack.layers[1].visible);
+        assert_eq!(last_step(&app), "Toggle Visibility");
+        on(&mut app, 1, "layer.set", json!({"locked": true}));
+        assert!(app.docs.active().canvas.layer_stack.layers[1].locked);
+        assert_eq!(last_step(&app), "Toggle Lock");
+        on(&mut app, 2, "layer.set", json!({"lockAlpha": true}));
+        assert!(app.docs.active().canvas.layer_stack.layers[2].lock_alpha);
+        assert_eq!(last_step(&app), "Toggle Lock Alpha");
+        on(&mut app, 2, "layer.set", json!({"blend": "multiply"}));
+        assert_eq!(
+            app.docs.active().canvas.layer_stack.layers[2].blend_mode,
+            crate::core::layer::BlendMode::Multiply
+        );
+        assert_eq!(last_step(&app), "Set Blend Mode");
+        on(&mut app, 2, "layer.set", json!({"name": "Áo"}));
+        assert_eq!(app.docs.active().canvas.layer_stack.layers[2].name, "Áo");
+        assert_eq!(last_step(&app), "Rename Layer");
+        assert_eq!(steps(&app), before + 5);
+
+        // Move Down, then Up: the layer goes below its neighbour and back.
+        on(&mut app, 2, "layer.move", json!({"to": "down"}));
+        assert_eq!(layer(&app, ids[2]), 1);
+        let ids_now: Vec<u32> = {
+            let stack = &app.docs.active().canvas.layer_stack;
+            stack.layers.iter().map(|l| l.id).collect()
+        };
+        let mut actions = UiActions::default();
+        actions.run_on_layer(&ids_now, 1, "layer.move", json!({"to": "up"}));
+        app.handle_command_actions(&mut actions);
+        assert_eq!(layer(&app, ids[2]), 2);
+
+        // Delete with two layers picked in the panel: both go, one step.
+        {
+            let stack = &mut app.docs.active_mut().canvas.layer_stack;
+            for (i, l) in stack.layers.iter_mut().enumerate() {
+                l.selected = i >= 1;
+            }
+        }
+        let before = steps(&app);
+        on(&mut app, 2, "layer.delete", json!({"picked": true}));
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 1);
+        assert_eq!(steps(&app), before + 1);
+        // The last layer stays, and says why.
+        on(&mut app, 0, "layer.delete", json!({"picked": true}));
+        assert_eq!(app.docs.active().canvas.layer_stack.layers.len(), 1);
+        assert_eq!(app.shell.status_msg, "Trang phải còn ít nhất một layer");
+    }
+
+    #[test]
+    fn file_new_makes_the_tab_the_command_makes() {
+        use crate::core::units::Unit;
+        let mut app = two_greys();
+        let tabs = app.docs.documents.len();
+        let mut actions = UiActions::default();
+        actions.doc.new_canvas_confirmed = Some((
+            "Thiệp".to_string(),
+            300,
+            200,
+            150.0,
+            2,
+            Unit::Millimeters,
+            false,
+        ));
+        actions.dialogs.show_new_dialog = Some(false);
+        app.handle_misc_dialog_actions(&mut actions);
+        assert_eq!(app.docs.documents.len(), tabs + 1);
+        let doc = app.docs.active();
+        assert_eq!(doc.title, "Thiệp");
+        assert_eq!((doc.canvas.width, doc.canvas.height), (300, 200));
+        assert_eq!(doc.canvas.metadata.resolution_ppi, 150.0);
+        // A clear page: one plain layer, not a Background.
+        let layer = &doc.canvas.layer_stack.layers[0];
+        assert!(!layer.is_background && layer.name == "Layer 1");
+        assert!(!doc.is_modified());
+        assert_eq!(app.shell.canvas_unit, Unit::Millimeters);
+
+        // In CMYK, on black.
+        let mut actions = UiActions::default();
+        actions.doc.new_canvas_confirmed =
+            Some(("In".to_string(), 40, 30, 300.0, 1, Unit::Pixels, true));
+        app.handle_misc_dialog_actions(&mut actions);
+        let doc = app.docs.active();
+        assert!(doc.canvas.is_cmyk());
+        assert!(doc.canvas.layer_stack.layers[0].is_background);
+        assert_eq!(app.docs.documents.len(), tabs + 2);
+    }
+
+    #[test]
+    fn new_layer_and_desaturate_from_the_menu_as_before() {
+        use serde_json::json;
+        let mut app = two_greys();
+        // An old pick left on the Background: the new layer alone is picked.
+        app.docs.active_mut().canvas.layer_stack.layers[0].selected = true;
+        run(&mut app, "layer.new", json!({}));
+        let stack = &app.docs.active().canvas.layer_stack;
+        assert_eq!(stack.layers.len(), 2);
+        let picked: Vec<bool> = stack.layers.iter().map(|l| l.selected).collect();
+        assert_eq!(picked, vec![false, true]);
+        assert_eq!(stack.active_idx, 1);
+
+        // Desaturate a red Background.
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].canvas = Canvas::from_rgba([200, 40, 40, 255].repeat(16), 4, 4);
+        run(
+            &mut app,
+            "image.adjust",
+            json!({"adjustment": {"kind": "desaturate"}}),
+        );
+        let px = app.docs.active().canvas.flatten_for_export();
+        assert!(px[0] == px[1] && px[1] == px[2], "{:?}", &px[..4]);
+        assert_eq!(app.docs.active().canvas.undo_count(), 1);
     }
 }

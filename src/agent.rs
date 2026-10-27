@@ -6,6 +6,10 @@
 //! - `iai.exe mcp --bridge [--control-file FILE] …`: the same server, on the
 //!   documents of the iAi window the person has open (when they let AI in,
 //!   it writes where it can be reached to `%APPDATA%\IAI\control.json`);
+//! - `iai.exe mcp --prefer-window …`: on that window while it lets AI in,
+//!   on documents of its own when not (what Antigravity runs);
+//! - `iai.exe antigravity-relay`: what Antigravity runs beside it, to take
+//!   the errands the person sends from the window (see `crate::antigravity`);
 //! - `iai.exe run SCRIPT.json [same options]`: run a script of commands
 //!   (`[{"command": …, "args": …}, …]`, or `{"calls": […], "atomic": true}`)
 //!   and print what each answered. A script that is not atomic may be longer
@@ -23,7 +27,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use iai_automation::bridge::{BridgeHost, Control};
+use iai_automation::bridge::{BridgeHost, Control, PreferWindow};
 use iai_automation::{Gate, Host, LocalHost, Roots};
 use iai_engine::{CommandCall, Effect, Engine, Policy, Source};
 
@@ -32,6 +36,9 @@ iAi for AI agents and scripts (no window)
 
   iai.exe mcp [options]            MCP server on stdin/stdout
   iai.exe mcp --bridge [options]   MCP server on the iAi window that is open
+  iai.exe mcp --prefer-window [options]
+                                   on that window while it lets AI in, else alone
+  iai.exe antigravity-relay        take the window's errands to Antigravity
   iai.exe run SCRIPT.json [options]
   iai.exe run --skill NAME [--param NAME=VALUE]... [options]
 
@@ -53,6 +60,7 @@ struct Options {
     print: bool,
     network: bool,
     bridge: bool,
+    prefer_window: bool,
     control: Option<PathBuf>,
     script: Option<PathBuf>,
     skills: Option<PathBuf>,
@@ -68,6 +76,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         print: false,
         network: false,
         bridge: false,
+        prefer_window: false,
         control: None,
         script: None,
         skills: None,
@@ -99,6 +108,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--allow-network" => o.network = true,
             "--dry-run" => o.dry_run = true,
             "--bridge" => o.bridge = true,
+            "--prefer-window" => o.prefer_window = true,
             "-h" | "--help" => return Err(String::new()),
             other if !other.starts_with('-') && o.script.is_none() => {
                 o.script = Some(PathBuf::from(other));
@@ -119,8 +129,9 @@ pub fn control_file() -> PathBuf {
 pub fn registry_for_agents() -> iai_engine::Registry {
     #[cfg_attr(not(feature = "pro"), allow(unused_mut))]
     let mut registry = iai_engine::cmds::core_registry();
+    // A test reads nothing of this machine's Pro: open, as a test's is.
     #[cfg(feature = "pro")]
-    if crate::pro::Pro::load().status().open() {
+    if cfg!(test) || crate::pro::Pro::load().status().open() {
         crate::pro::cmds::register(&mut registry);
     } else {
         crate::pro::cmds::register_locked(&mut registry);
@@ -149,6 +160,10 @@ fn version() -> String {
 pub fn run_if_asked() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mode, rest) = args.split_first()?;
+    if mode == crate::antigravity::RELAY_ARG {
+        crate::diag::start_without_window(&version(), &format!("agent: iai {mode}"));
+        return Some(crate::antigravity::relay(&control_file()));
+    }
     if mode != "mcp" && mode != "run" {
         return None;
     }
@@ -192,7 +207,17 @@ pub fn run_if_asked() -> Option<i32> {
         }
     } else {
         let engine = Engine::new(registry_for_agents(), Source::Agent, policy(&options));
-        Box::new(LocalHost::new(engine))
+        let alone = LocalHost::new(engine);
+        if options.prefer_window {
+            let file = options.control.clone().unwrap_or_else(control_file);
+            let host = PreferWindow::new(file, alone);
+            if host.on_window() {
+                crate::diag::note("agent", "on the open window");
+            }
+            Box::new(host)
+        } else {
+            Box::new(alone)
+        }
     };
     let library = iai_automation::skills::Store::new(
         options
@@ -408,7 +433,12 @@ mod tests {
         assert_eq!(o.read, [PathBuf::from("in"), PathBuf::from("in2")]);
         assert!(o.skill.is_none() && o.params.is_empty());
         assert_eq!(o.write, [PathBuf::from("out")]);
-        assert!(o.print && !o.network && !o.bridge);
+        assert!(o.print && !o.network && !o.bridge && !o.prefer_window);
+        assert!(
+            parse(&["--prefer-window".to_string()])
+                .unwrap()
+                .prefer_window
+        );
         assert_eq!(o.script, Some(PathBuf::from("script.json")));
         assert!(policy(&o).grants(&[Effect::Print]));
         assert!(!policy(&o).grants(&[Effect::Network]));

@@ -3,33 +3,8 @@
 
 use crate::app::render::CanvasEvent;
 use crate::app::state::App;
-use crate::ui::UiActions;
 
 impl App {
-    pub(super) fn handle_direct_adjustment_actions(&mut self, actions: &mut UiActions) {
-        if actions.dialogs.auto_levels {
-            self.do_auto_levels();
-        }
-
-        if let Some(adj) = actions.dialogs.apply_direct_adjustment.take() {
-            let name = adj.name().to_string();
-            if self
-                .docs
-                .active_mut()
-                .canvas
-                .apply_adjustment_to_active_layer(adj)
-            {
-                self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-                self.shell.status_msg = name;
-            } else {
-                self.shell.status_msg = format!("{name} requires an unlocked raster layer");
-            }
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-        }
-    }
-
     pub(crate) fn begin_adjustment_preview(
         &mut self,
         adj: crate::core::layer::AdjustmentType,
@@ -289,17 +264,8 @@ impl App {
     /// black/white points the Levels dialog's "Auto" button derives, applied directly
     /// without opening a dialog.
     pub(crate) fn do_auto_levels(&mut self) {
-        let options =
-            crate::ui::dialogs::sanitize_adjustment_options(self.shell.ui.adjustment_options);
-        let monochromatic =
-            options.auto_levels_algorithm == crate::ui::AutoLevelsAlgorithm::Monochromatic;
-        let _ = self.run_with(
-            "image.auto_levels",
-            serde_json::json!({
-                "monochromatic": monochromatic,
-                "clipPercent": options.auto_clip_percent,
-            }),
-        );
+        let args = crate::ui::dialogs::auto_levels_args(self.shell.ui.adjustment_options);
+        let _ = self.run_with("image.auto_levels", args);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -480,20 +446,20 @@ impl App {
             {
                 event = Some(CanvasEvent::LayerPixelsChanged);
             }
-        } else if let Some(edit) = &self.edit.adjustment_layer_edit {
-            if self.docs.active().id == edit.doc_id {
-                use crate::core::layer::LayerType;
-                let canvas = &mut self.docs.active_mut().canvas;
-                if let Some(layer) = canvas
-                    .layer_stack
-                    .layers
-                    .iter_mut()
-                    .find(|l| l.id == edit.layer_id)
-                {
-                    layer.layer_type = LayerType::Adjustment(edit.original_adj.clone());
-                    canvas.layer_revision += 1;
-                    event = Some(CanvasEvent::LayerStructureChanged);
-                }
+        } else if let Some(edit) = &self.edit.adjustment_layer_edit
+            && self.docs.active().id == edit.doc_id
+        {
+            use crate::core::layer::LayerType;
+            let canvas = &mut self.docs.active_mut().canvas;
+            if let Some(layer) = canvas
+                .layer_stack
+                .layers
+                .iter_mut()
+                .find(|l| l.id == edit.layer_id)
+            {
+                layer.layer_type = LayerType::Adjustment(edit.original_adj.clone());
+                canvas.layer_revision += 1;
+                event = Some(CanvasEvent::LayerStructureChanged);
             }
         }
 
@@ -667,11 +633,11 @@ fn curve_points_with_middle(x: f32, y: f32) -> Vec<(f32, f32)> {
 fn push_curve_point(points: &mut Vec<(f32, f32)>, x: f32, y: f32) {
     let x = x.clamp(0.0, 1.0);
     let y = y.clamp(0.0, 1.0);
-    if let Some(last) = points.last_mut() {
-        if (last.0 - x).abs() < 1e-6 {
-            last.1 = y;
-            return;
-        }
+    if let Some(last) = points.last_mut()
+        && (last.0 - x).abs() < 1e-6
+    {
+        last.1 = y;
+        return;
     }
     points.push((x, y));
 }
@@ -679,7 +645,7 @@ fn push_curve_point(points: &mut Vec<(f32, f32)>, x: f32, y: f32) {
 #[cfg(test)]
 mod tests {
     use super::{apply_adjustment_eyedropper_to_params, levels_histogram_from_rgba};
-    use crate::core::layer::{curve_is_identity, AdjustmentType, LevelsParams};
+    use crate::core::layer::{AdjustmentType, LevelsParams, curve_is_identity};
     use crate::ui::AdjEyedropperKind;
 
     #[test]

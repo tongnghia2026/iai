@@ -14,7 +14,7 @@
 
 use base64::Engine;
 use iai_canvas::canvas::Canvas;
-use iai_canvas::print::{layer_vector_objects_srgb, PdfPaintColor, PdfVectorObject};
+use iai_canvas::print::{PdfPaintColor, PdfVectorObject, layer_vector_objects_srgb};
 use iai_color::cms::naive_cmyk_to_rgb;
 use iai_doc::vector::path::PathData;
 use iai_doc::vector::style::{Gradient, GradientKind, LineCap, LineJoin};

@@ -4,11 +4,11 @@
 
 use super::render::CanvasEvent;
 use super::state::{App, TextEditState, TextFontPreviewSession, TextFontPreviewState};
-use crate::core::canvas::text_layer::{layer_name_from, rasterize_into_layer};
+use crate::core::canvas::text_layer::rasterize_into_layer;
 use crate::core::command::LayerStructureCommand;
 use crate::core::layer::{Layer, LayerType};
-use crate::core::text::rasterize_placed;
 use crate::core::text::TextData;
+use crate::core::text::rasterize_placed;
 use crate::core::tile::TileMap;
 use crate::tools::ToolId;
 
@@ -153,10 +153,10 @@ fn resync_glyph_styles(
     };
 
     let seed = || -> crate::core::text::GlyphStyle {
-        if let Some((caret, style)) = pending.as_ref() {
-            if *caret == p {
-                return style.clone();
-            }
+        if let Some((caret, style)) = pending.as_ref()
+            && *caret == p
+        {
+            return style.clone();
         }
         if p > 0 {
             old_styles[p - 1].clone()
@@ -191,111 +191,17 @@ impl App {
     /// `Layer::opacity`, while `TextData::opacity` is folded into each object's
     /// `VectorStyle::opacity` by [`crate::core::text::text_to_curves`].
     pub fn text_to_curves(&mut self, idx: usize) -> bool {
-        use crate::core::command_vector::apply_object_to_layer;
-        use crate::core::vector::affine::AffineTransform;
-        use crate::core::vector::color::ColorValue;
-        use crate::core::vector::object::VectorObjectData;
-        use crate::core::vector::style::VectorStyle;
+        self.layer_to_curves(idx)
+    }
 
-        // Snapshot the text layer's data + the properties extra colour layers
-        // inherit.
-        let (td, layer_offset, blend, layer_opacity, visible, parent_id, page_id) = {
-            let canvas = &self.docs.active().canvas;
-            let Some(layer) = canvas.layer_stack.layers.get(idx) else {
-                return false;
-            };
-            let LayerType::Text(td) = &layer.layer_type else {
-                return false;
-            };
-            (
-                td.clone(),
-                layer.offset,
-                layer.blend_mode,
-                layer.opacity,
-                layer.visible,
-                layer.parent_id,
-                layer.page_id,
-            )
-        };
-        let td_opacity = td.opacity.clamp(0.0, 1.0);
-
-        // Build one validated vector object per colour group (skip any the parser
-        // limits would reject, so a pathological glyph count can't poison a file).
-        let mut objects: Vec<VectorObjectData> = Vec::new();
-        for grp in crate::core::text::text_to_curves(&td, layer_offset) {
-            let style = VectorStyle {
-                opacity: td_opacity,
-                ..VectorStyle::filled(ColorValue::from_rgba8(grp.color))
-            };
-            let obj = VectorObjectData::new(grp.path, style, AffineTransform::IDENTITY);
-            if obj.validate().is_ok() {
-                objects.push(obj);
-            }
-        }
-        if objects.is_empty() {
-            self.shell.status_msg = "No text to convert to curves".to_string();
+    /// `vector.to_curves` on the layer at `idx`.
+    pub(crate) fn layer_to_curves(&mut self, idx: usize) -> bool {
+        let stack = &self.docs.active().canvas.layer_stack;
+        let Some(id) = stack.layers.get(idx).map(|l| l.id) else {
             return false;
-        }
-
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
         };
-        let canvas = &mut self.docs.active_mut().canvas;
-        let before =
-            LayerStructureCommand::capture_before("Text to Curves", &canvas.layer_stack, cw, ch);
-
-        // First colour reuses the text layer slot in place.
-        {
-            let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
-                return false;
-            };
-            apply_object_to_layer(layer, objects[0].clone());
-        }
-        canvas.layer_stack.active_idx = idx;
-
-        // Extra colours: fresh Path layers just above, inheriting the text layer's
-        // compositing so the stack looks identical.
-        for obj in objects.iter().skip(1) {
-            let new_idx = canvas.layer_stack.add_layer(cw, ch);
-            let layer = &mut canvas.layer_stack.layers[new_idx];
-            apply_object_to_layer(layer, obj.clone());
-            layer.blend_mode = blend;
-            layer.opacity = layer_opacity;
-            layer.visible = visible;
-            layer.parent_id = parent_id;
-            layer.page_id = page_id;
-            layer.name = layer_name_from(&td.content);
-        }
-
-        // CMYK: re-derive ink planes for the new Path rasters from their RGB mirror.
-        canvas.reconcile_path_ink();
-        canvas.layer_revision += 1;
-
-        // Select the converted layer so the Move box shows without an extra click.
-        // Do this before capturing the after-state so redo restores the exact
-        // selection produced by the original conversion.
-        for l in &mut canvas.layer_stack.layers {
-            l.selected = false;
-        }
-        let active = canvas
-            .layer_stack
-            .active_idx
-            .min(canvas.layer_stack.layers.len().saturating_sub(1));
-        if let Some(l) = canvas.layer_stack.layers.get_mut(active) {
-            l.selected = true;
-        }
-
-        let mut cmd = before;
-        cmd.capture_after(&canvas.layer_stack, cw, ch);
-        canvas.record(Box::new(cmd));
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Converted text to curves (Path)".to_string();
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-        true
+        self.run_with("vector.to_curves", serde_json::json!({"layer": id}))
+            .is_ok()
     }
 
     /// True when the active layer is an editable Text layer.
@@ -626,14 +532,13 @@ impl App {
 
             // content_bounds is pixel-accurate, so the padded bbox test is the
             // whole hit-test (any opaque pixel lies inside the bbox).
-            if let Some((min_x, min_y, max_x, max_y)) = layer.tiles.content_bounds() {
-                if lx >= min_x - TEXT_HIT_PAD
-                    && lx < max_x + TEXT_HIT_PAD
-                    && ly >= min_y - TEXT_HIT_PAD
-                    && ly < max_y + TEXT_HIT_PAD
-                {
-                    return Some(idx);
-                }
+            if let Some((min_x, min_y, max_x, max_y)) = layer.tiles.content_bounds()
+                && lx >= min_x - TEXT_HIT_PAD
+                && lx < max_x + TEXT_HIT_PAD
+                && ly >= min_y - TEXT_HIT_PAD
+                && ly < max_y + TEXT_HIT_PAD
+            {
+                return Some(idx);
             }
         }
         None
@@ -1170,11 +1075,9 @@ impl App {
         let changed = session.is_new || session.orig.as_ref() != Some(&td);
         rasterize_into_layer(canvas, idx, session.origin, td);
 
-        if changed {
-            if let Some(mut cmd) = session.before_cmd {
-                cmd.capture_after(&canvas.layer_stack, cw, ch);
-                canvas.record(Box::new(cmd));
-            }
+        if changed && let Some(mut cmd) = session.before_cmd {
+            cmd.capture_after(&canvas.layer_stack, cw, ch);
+            canvas.record(Box::new(cmd));
         }
         canvas.layer_revision += 1;
 

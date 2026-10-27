@@ -8,7 +8,7 @@
 use iai::core::develop::{self, DevelopSettings, TONE_DOWNSAMPLE};
 use iai::core::develop_scene::{self, SceneSource};
 use iai::core::layer::LayerStack;
-use iai::formats::{raw::RawImporter, Importer};
+use iai::formats::{Importer, raw::RawImporter};
 use iai::gpu::compositor::{
     ColorProxies, CompositorState, DevelopDetailGpu, DevelopGpuPreview, RegionLumaProxy,
 };
@@ -253,8 +253,15 @@ fn compare(a: &[u8], b: &[u8], stride: usize, cw: usize, ch: usize, block: usize
 fn print(label: &str, s: &Stats) {
     eprintln!(
         "  {label:<30} mean(R,G,B) {:+5.2} {:+5.2} {:+5.2}  |d| {:4.2}  p99 {:3}  max {:3}  worst-block {:5.1} at {:?} {:+.1?}",
-        s.mean[0], s.mean[1], s.mean[2], s.mean_abs, s.p99, s.max, s.block_max,
-        (s.block_worst.0, s.block_worst.1), s.block_worst.2
+        s.mean[0],
+        s.mean[1],
+        s.mean[2],
+        s.mean_abs,
+        s.p99,
+        s.max,
+        s.block_max,
+        (s.block_worst.0, s.block_worst.1),
+        s.block_worst.2
     );
 }
 
@@ -764,7 +771,18 @@ fn raw_open_look_probe() {
         eprintln!(
             "\n{}\n  camera JPEG : luma {:5.1}  contrast {:5.1}  chroma {:5.1}  RGB {:5.1} {:5.1} {:5.1}\n  iAi default : luma {:5.1}  contrast {:5.1}  chroma {:5.1}  RGB {:5.1} {:5.1} {:5.1}",
             path.file_name().unwrap().to_string_lossy(),
-            sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], sb[0], sb[1], sb[2], sb[3], sb[4], sb[5]
+            sa[0],
+            sa[1],
+            sa[2],
+            sa[3],
+            sa[4],
+            sa[5],
+            sb[0],
+            sb[1],
+            sb[2],
+            sb[3],
+            sb[4],
+            sb[5]
         );
         if let Some(p) = &scene.camera_profile {
             eprintln!(

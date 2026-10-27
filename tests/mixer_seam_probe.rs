@@ -13,10 +13,10 @@
 
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings, MIXER_BANDS};
 use iai::core::develop_scene::{
-    apply_scene_to_tilemap, build_scene_color_base_box, build_scene_fast_base,
-    build_scene_tone_for_scene, identity_fast_region_develop, render_default_look,
-    scene_fast_region_develop, tone_lowpass_scene_region, tone_scene_color_samples, BaseLook,
-    SceneSource,
+    BaseLook, SceneSource, apply_scene_to_tilemap, build_scene_color_base_box,
+    build_scene_fast_base, build_scene_tone_for_scene, identity_fast_region_develop,
+    render_default_look, scene_fast_region_develop, tone_lowpass_scene_region,
+    tone_scene_color_samples,
 };
 use iai::core::layer::{Layer, LayerStack};
 use iai::core::tile::TileMap;

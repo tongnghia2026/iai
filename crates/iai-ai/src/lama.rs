@@ -153,10 +153,10 @@ fn download_blocking() -> Result<(), String> {
         .map_err(|e| format!("HTTP client: {e}"))?;
 
     let mut req = client.get(MODEL_URL);
-    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN")) {
-        if !token.trim().is_empty() {
-            req = req.bearer_auth(token.trim());
-        }
+    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
+        && !token.trim().is_empty()
+    {
+        req = req.bearer_auth(token.trim());
     }
 
     let resp = req
@@ -241,10 +241,10 @@ pub fn preload() {
     let _ = std::thread::Builder::new()
         .name("lama-preload".into())
         .spawn(|| {
-            if let Ok(mut guard) = session_cell().lock() {
-                if guard.is_none() {
-                    load_session(&mut guard);
-                }
+            if let Ok(mut guard) = session_cell().lock()
+                && guard.is_none()
+            {
+                load_session(&mut guard);
             }
         });
 }
@@ -264,11 +264,7 @@ fn hole_bbox(hole: &[bool], w: usize, h: usize) -> Option<(usize, usize, usize, 
             }
         }
     }
-    if any {
-        Some((x0, y0, x1, y1))
-    } else {
-        None
-    }
+    if any { Some((x0, y0, x1, y1)) } else { None }
 }
 
 /// Inpaint the `hole` pixels of a straight-alpha RGBA8 buffer (`w×h`) with LaMa.

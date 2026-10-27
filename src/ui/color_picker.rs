@@ -8,8 +8,8 @@
 
 use egui::ecolor::{Hsva, HsvaGamma};
 use egui::{
-    epaint, lerp, pos2, remap_clamp, vec2, Color32, DragValue, Mesh, Response, Rgba, Sense, Shape,
-    Stroke, StrokeKind, Ui, Vec2,
+    Color32, DragValue, Mesh, Response, Rgba, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, epaint,
+    lerp, pos2, remap_clamp, vec2,
 };
 
 /// Vertices per dimension in the colour meshes (multiple of 6 to hit pure hues).
@@ -163,17 +163,17 @@ fn hex_field(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
     if resp.has_focus() {
         // Editing: accept `#RRGGBB` or `RRGGBB`, keep the buffer verbatim.
         let s = text.trim().trim_start_matches('#');
-        if s.len() == 6 {
-            if let Ok(v) = u32::from_str_radix(s, 16) {
-                let parsed = [
-                    ((v >> 16) & 0xFF) as u8,
-                    ((v >> 8) & 0xFF) as u8,
-                    (v & 0xFF) as u8,
-                ];
-                *rgb = parsed;
-                mapped = parsed;
-                changed = true;
-            }
+        if s.len() == 6
+            && let Ok(v) = u32::from_str_radix(s, 16)
+        {
+            let parsed = [
+                ((v >> 16) & 0xFF) as u8,
+                ((v >> 8) & 0xFF) as u8,
+                (v & 0xFF) as u8,
+            ];
+            *rgb = parsed;
+            mapped = parsed;
+            changed = true;
         }
         ui.data_mut(|d| d.insert_temp(id, (text, mapped)));
     } else {

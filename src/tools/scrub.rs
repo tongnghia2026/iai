@@ -8,7 +8,7 @@
 
 use crate::core::canvas::Canvas;
 use crate::core::layer::{Layer, PaintTarget};
-use crate::core::tile::{TilePos, TILE_SIZE};
+use crate::core::tile::{TILE_SIZE, TilePos};
 
 /// Soft-round brush coverage at squared distance `dist2` for a tip of `radius`
 /// and `hardness` (0 = soft, 1 = hard). Matches the Brush tip falloff so the

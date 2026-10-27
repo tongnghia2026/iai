@@ -1240,17 +1240,13 @@ impl App {
         }
         // A click without a drag leaves a zero-length linear gradient (full
         // weight everywhere); give it a sensible downward run instead.
-        if let Some((_, Some(idx))) = self.shell.ui.develop_local_arm {
-            if let Some(l) = self.shell.ui.develop_settings.locals.get_mut(idx) {
-                if let crate::core::develop::LocalMaskShape::Linear { x0, y0, x1, y1 } =
-                    &mut l.shape
-                {
-                    if (*x1 - *x0).powi(2) + (*y1 - *y0).powi(2) < 1e-6 {
-                        *x1 = *x0;
-                        *y1 = *y0 + 0.25;
-                    }
-                }
-            }
+        if let Some((_, Some(idx))) = self.shell.ui.develop_local_arm
+            && let Some(l) = self.shell.ui.develop_settings.locals.get_mut(idx)
+            && let crate::core::develop::LocalMaskShape::Linear { x0, y0, x1, y1 } = &mut l.shape
+            && (*x1 - *x0).powi(2) + (*y1 - *y0).powi(2) < 1e-6
+        {
+            *x1 = *x0;
+            *y1 = *y0 + 0.25;
         }
         self.shell.ui.develop_local_arm = None;
         let settings = self.shell.ui.develop_settings.clone();
@@ -1294,21 +1290,22 @@ impl App {
 
         let mut pending = None;
         let mut applied = false;
-        if let Some(preview) = &mut self.dev.develop_preview {
-            if result.job_id == preview.job_id && self.docs.active().id == preview.doc_id {
-                let layer_id = preview.layer_id;
-                let restored = self
-                    .docs
-                    .active_mut()
-                    .canvas
-                    .preview_layer_tiles(layer_id, result.tiles);
-                if restored {
-                    preview.last_preview_settings = result.settings;
-                    preview.gpu_preview_active = false;
-                    applied = true;
-                }
-                pending = preview.pending_settings.take();
+        if let Some(preview) = &mut self.dev.develop_preview
+            && result.job_id == preview.job_id
+            && self.docs.active().id == preview.doc_id
+        {
+            let layer_id = preview.layer_id;
+            let restored = self
+                .docs
+                .active_mut()
+                .canvas
+                .preview_layer_tiles(layer_id, result.tiles);
+            if restored {
+                preview.last_preview_settings = result.settings;
+                preview.gpu_preview_active = false;
+                applied = true;
             }
+            pending = preview.pending_settings.take();
         }
 
         if applied {

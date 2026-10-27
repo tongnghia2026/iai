@@ -466,7 +466,7 @@ pub fn mixer_mask_preview(settings: &DevelopSettings, rgb: [f32; 3]) -> f32 {
 mod v2_tests {
     use super::*;
     use iai_color::perceptual_color::{
-        linear_srgb_to_oklab, perceptual_to_working_rgb, working_rgb_to_perceptual, PerceptualColor,
+        PerceptualColor, linear_srgb_to_oklab, perceptual_to_working_rgb, working_rgb_to_perceptual,
     };
     use iai_color::working_color::WorkingColorSpace;
 

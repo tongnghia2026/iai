@@ -5,7 +5,7 @@
 
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
-use crate::core::units::{from_pixels, to_pixels, Unit};
+use crate::core::units::{Unit, from_pixels, to_pixels};
 
 /// Quad corner order: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,11 +301,7 @@ impl PerspectiveCropTool {
             return None;
         }
         let (w, h) = self.output_size();
-        if w < 2 || h < 2 {
-            None
-        } else {
-            Some((w, h))
-        }
+        if w < 2 || h < 2 { None } else { Some((w, h)) }
     }
 
     pub fn commit(&mut self, canvas: &mut Canvas) {

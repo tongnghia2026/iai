@@ -1,4 +1,4 @@
-use iai::core::cms::{self, WorkingProfile, DEFAULT_INTENT};
+use iai::core::cms::{self, DEFAULT_INTENT, WorkingProfile};
 
 #[test]
 fn built_in_rgb_profiles_roundtrip_rgba_and_preserve_alpha() {

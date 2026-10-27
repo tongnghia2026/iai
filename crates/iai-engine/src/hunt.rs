@@ -7,17 +7,17 @@
 //! those tests.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use iai_canvas::document::Document;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
+use crate::ErrorCode;
 use crate::command::{Effect, Registry};
 use crate::session::{CommandCall, Engine};
 use crate::workspace::Workspace;
-use crate::ErrorCode;
 
 /// A call that panicked or hung.
 #[derive(Debug, Clone)]
@@ -379,11 +379,12 @@ impl Gen {
                     .get("maximum")
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::MAX);
-                json!(min
-                    .max(0)
-                    .min(max)
-                    .max(min)
-                    .max(if name == "doc" { 1 } else { min }))
+                json!(
+                    min.max(0)
+                        .min(max)
+                        .max(min)
+                        .max(if name == "doc" { 1 } else { min })
+                )
             }
             "number" => {
                 let min = schema.get("minimum").and_then(Value::as_f64).unwrap_or(0.0);

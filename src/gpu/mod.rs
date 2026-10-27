@@ -1673,15 +1673,14 @@ impl GpuState {
         // just stop drawing with no error anywhere. Leave a crash-log trace so
         // a field report of "the panel went blank" is diagnosable.
         for prim in primitives {
-            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
-                if self.main.egui_renderer.texture(&mesh.texture_id).is_none()
-                    && self.missing_texture_logged.insert(mesh.texture_id)
-                {
-                    crate::log_crash(&format!(
-                        "egui mesh references missing texture {:?} — that UI region will not draw",
-                        mesh.texture_id
-                    ));
-                }
+            if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive
+                && self.main.egui_renderer.texture(&mesh.texture_id).is_none()
+                && self.missing_texture_logged.insert(mesh.texture_id)
+            {
+                crate::log_crash(&format!(
+                    "egui mesh references missing texture {:?} — that UI region will not draw",
+                    mesh.texture_id
+                ));
             }
         }
 

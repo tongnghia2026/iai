@@ -65,13 +65,13 @@ impl TextFontFamily {
             return known_family_from_name(name)
                 .unwrap_or_else(|| TextFontFamily::System(name.to_string()));
         }
-        if let Some(face) = s.strip_prefix("SystemFace:") {
-            if let Some((family, style)) = face.split_once('\u{1f}') {
-                return TextFontFamily::SystemFace {
-                    family: family.to_string(),
-                    style: style.to_string(),
-                };
-            }
+        if let Some(face) = s.strip_prefix("SystemFace:")
+            && let Some((family, style)) = face.split_once('\u{1f}')
+        {
+            return TextFontFamily::SystemFace {
+                family: family.to_string(),
+                style: style.to_string(),
+            };
         }
         match s {
             "Arial" => TextFontFamily::Arial,

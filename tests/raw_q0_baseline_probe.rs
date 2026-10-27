@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use iai::core::camera_profile::resolver::SelectedProfileProvenance;
 use iai::core::canvas::Canvas;
-use iai::core::color_reference::{summarize_encoded_rgba16, ImageQualitySummary};
+use iai::core::color_reference::{ImageQualitySummary, summarize_encoded_rgba16};
 use iai::core::develop::DevelopSettings;
 use iai::core::develop_scene::render_default_look;
 use iai::formats::png::PngExporter;

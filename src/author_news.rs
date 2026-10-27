@@ -379,7 +379,7 @@ fn read_kept(dir: &Path) -> Option<(News, HashMap<String, Logo>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::tests::{serve, TempFolder};
+    use crate::update::tests::{TempFolder, serve};
 
     /// A picture file of one colour, `width × height`.
     fn png(width: u32, height: u32) -> Vec<u8> {

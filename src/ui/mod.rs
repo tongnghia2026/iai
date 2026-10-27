@@ -38,7 +38,6 @@ pub mod widgets;
 pub use intent::*;
 pub use viewmodel::*;
 
-use crate::core::canvas::StrokeParams;
 use crate::core::develop::DevelopSettings;
 use crate::core::document::GuideOrientation;
 use crate::core::filters::FilterType;
@@ -454,10 +453,9 @@ fn text_preview_texture(
     let cache_id = egui::Id::new("text_overlay_raster_preview_texture");
     if let Some((cached_hash, texture, w, h)) =
         ctx.data(|data| data.get_temp::<(u64, egui::TextureHandle, u32, u32)>(cache_id))
+        && cached_hash == hash
     {
-        if cached_hash == hash {
-            return Some((texture, w, h));
-        }
+        return Some((texture, w, h));
     }
     let raster = crate::core::text::rasterize_stretched(td)?;
 
@@ -465,18 +463,18 @@ fn text_preview_texture(
         [raster.width as usize, raster.height as usize],
         &raster.rgba,
     );
-    let texture = if let Some((_, mut texture, _, _)) =
-        ctx.data(|data| data.get_temp::<(u64, egui::TextureHandle, u32, u32)>(cache_id))
-    {
-        texture.set(image, egui::TextureOptions::NEAREST);
-        texture
-    } else {
-        ctx.load_texture(
-            "text_overlay_raster_preview",
-            image,
-            egui::TextureOptions::NEAREST,
-        )
-    };
+    let texture =
+        match ctx.data(|data| data.get_temp::<(u64, egui::TextureHandle, u32, u32)>(cache_id)) {
+            Some((_, mut texture, _, _)) => {
+                texture.set(image, egui::TextureOptions::NEAREST);
+                texture
+            }
+            _ => ctx.load_texture(
+                "text_overlay_raster_preview",
+                image,
+                egui::TextureOptions::NEAREST,
+            ),
+        };
     ctx.data_mut(|data| {
         data.insert_temp(
             cache_id,
@@ -729,6 +727,44 @@ pub enum LayerAlign {
 pub enum LayerDistribute {
     HorizontalCenters,
     VerticalCenters,
+}
+
+/// The `vector.shaping` arguments for `op`.
+pub fn shaping_args(op: crate::core::vector::boolean::BooleanOp) -> serde_json::Value {
+    use crate::core::vector::boolean::BooleanOp;
+    let op = match op {
+        BooleanOp::Union => "weld",
+        BooleanOp::Difference => "trim",
+        BooleanOp::Intersect => "intersect",
+        BooleanOp::Exclude => "simplify",
+    };
+    serde_json::json!({ "op": op })
+}
+
+impl LayerAlign {
+    /// Its `layer.align` arguments.
+    pub fn args(self) -> serde_json::Value {
+        let align = match self {
+            LayerAlign::Left => "left",
+            LayerAlign::HorizontalCenter => "horizontal_center",
+            LayerAlign::Right => "right",
+            LayerAlign::Top => "top",
+            LayerAlign::VerticalCenter => "vertical_center",
+            LayerAlign::Bottom => "bottom",
+        };
+        serde_json::json!({ "align": align })
+    }
+}
+
+impl LayerDistribute {
+    /// Its `layer.distribute` arguments.
+    pub fn args(self) -> serde_json::Value {
+        let axis = match self {
+            LayerDistribute::HorizontalCenters => "horizontal",
+            LayerDistribute::VerticalCenters => "vertical",
+        };
+        serde_json::json!({ "axis": axis })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1501,10 +1537,10 @@ fn draw_pen_path(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect)
             .iter()
             .map(|&(x, y)| to_screen_pos(x, y))
             .collect();
-        if data.tool.pen_closed {
-            if let Some(&first) = pts.first() {
-                pts.push(first);
-            }
+        if data.tool.pen_closed
+            && let Some(&first) = pts.first()
+        {
+            pts.push(first);
         }
         // Thin blue line, matching the Bézier handle arms.
         painter.add(egui::Shape::line(
@@ -2084,14 +2120,14 @@ fn draw_node_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::R
         }
         // Make the insertion target unambiguous without thickening every
         // contour: only the segment under the pointer is emphasized.
-        if let Some(line) = &overlay.hovered_segment {
-            if line.len() >= 2 {
-                let pts: Vec<egui::Pos2> = line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
-                painter.add(egui::Shape::line(
-                    pts,
-                    egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(70, 190, 255)),
-                ));
-            }
+        if let Some(line) = &overlay.hovered_segment
+            && line.len() >= 2
+        {
+            let pts: Vec<egui::Pos2> = line.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(70, 190, 255)),
+            ));
         }
         if let Some((x, y)) = overlay.insertion_marker {
             let p = to_screen_pos(x, y);
@@ -2292,6 +2328,7 @@ fn draw_preset_dialog(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiActions
         }
 
         egui::Window::new("Lưu Preset kích thước")
+            .order(dialogs::DIALOG_ORDER)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2397,10 +2434,10 @@ fn draw_delete_preset_dialog(ctx: &mut egui::Ui, data: &UiData, actions: &mut Ui
                     egui::RichText::new(format!("{}  Xóa", ph::TRASH))
                         .color(egui::Color32::from_rgb(220, 80, 80)),
                 );
-                if ui.add_enabled(picked.is_some(), delete).clicked() {
-                    if let Some(i) = picked.take() {
-                        actions.dialogs.delete_preset = Some((list, i));
-                    }
+                if ui.add_enabled(picked.is_some(), delete).clicked()
+                    && let Some(i) = picked.take()
+                {
+                    actions.dialogs.delete_preset = Some((list, i));
                 }
                 if ui.button("Close").clicked() {
                     actions.dialogs.close_delete_preset_dialog = true;
@@ -2790,72 +2827,72 @@ fn draw_transform_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: eg
             }
         }
 
-        if data.tool.transform_cursor_hint == 1 {
-            if let Some(mouse_pos) = ctx.pointer_hover_pos() {
-                let rotate_icon_pos = egui::pos2(mouse_pos.x + 14.0, mouse_pos.y - 14.0);
-                let font = egui::FontId::proportional(16.0);
-                let shadow_col = egui::Color32::from_black_alpha(200);
-                for (ox, oy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
-                    painter.text(
-                        egui::pos2(rotate_icon_pos.x + ox, rotate_icon_pos.y + oy),
-                        egui::Align2::LEFT_TOP,
-                        ph::ARROW_COUNTER_CLOCKWISE,
-                        font.clone(),
-                        shadow_col,
-                    );
-                }
+        if data.tool.transform_cursor_hint == 1
+            && let Some(mouse_pos) = ctx.pointer_hover_pos()
+        {
+            let rotate_icon_pos = egui::pos2(mouse_pos.x + 14.0, mouse_pos.y - 14.0);
+            let font = egui::FontId::proportional(16.0);
+            let shadow_col = egui::Color32::from_black_alpha(200);
+            for (ox, oy) in [(-1.0_f32, 0.0), (1.0, 0.0), (0.0, -1.0_f32), (0.0, 1.0)] {
                 painter.text(
-                    rotate_icon_pos,
+                    egui::pos2(rotate_icon_pos.x + ox, rotate_icon_pos.y + oy),
                     egui::Align2::LEFT_TOP,
                     ph::ARROW_COUNTER_CLOCKWISE,
-                    font,
-                    egui::Color32::WHITE,
+                    font.clone(),
+                    shadow_col,
                 );
             }
+            painter.text(
+                rotate_icon_pos,
+                egui::Align2::LEFT_TOP,
+                ph::ARROW_COUNTER_CLOCKWISE,
+                font,
+                egui::Color32::WHITE,
+            );
         }
     }
 }
 
 fn draw_smart_select_cursor(ctx: &mut egui::Ui, data: &UiData) {
-    if data.tool.active_tool == ToolId::SmartSelect {
-        if let Some(cursor_pos) = ctx.pointer_hover_pos() {
-            let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
-            // Modifiers win; otherwise the tool's own mode (Add after the
-            // first stroke) is shown, as Photoshop's cursor does.
-            use crate::core::selection::SelectionMode;
-            let symbol: &str = match (shift_held, alt_held, data.tool.smart_select_mode) {
-                (true, true, _) | (false, false, SelectionMode::Intersect) => "\u{00D7}",
-                (true, false, _) | (false, false, SelectionMode::Add) => "+",
-                (false, true, _) | (false, false, SelectionMode::Subtract) => "-",
-                _ => "",
+    if data.tool.active_tool == ToolId::SmartSelect
+        && let Some(cursor_pos) = ctx.pointer_hover_pos()
+    {
+        let (shift_held, alt_held) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
+        // Modifiers win; otherwise the tool's own mode (Add after the
+        // first stroke) is shown, as Photoshop's cursor does.
+        use crate::core::selection::SelectionMode;
+        let symbol: &str = match (shift_held, alt_held, data.tool.smart_select_mode) {
+            (true, true, _) | (false, false, SelectionMode::Intersect) => "\u{00D7}",
+            (true, false, _) | (false, false, SelectionMode::Add) => "+",
+            (false, true, _) | (false, false, SelectionMode::Subtract) => "-",
+            _ => "",
+        };
+        if !symbol.is_empty() {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("wand_modifier"),
+            ));
+            let text_pos = egui::pos2(cursor_pos.x + 10.0, cursor_pos.y - 18.0);
+            let shadow_col = egui::Color32::from_black_alpha(180);
+            painter.text(
+                text_pos + egui::vec2(1.0, 1.0),
+                egui::Align2::LEFT_TOP,
+                symbol,
+                egui::FontId::monospace(14.0),
+                shadow_col,
+            );
+            let sym_col = if shift_held {
+                egui::Color32::from_rgb(80, 200, 80)
+            } else {
+                egui::Color32::from_rgb(220, 80, 80)
             };
-            if !symbol.is_empty() {
-                let painter = ctx.layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("wand_modifier"),
-                ));
-                let text_pos = egui::pos2(cursor_pos.x + 10.0, cursor_pos.y - 18.0);
-                let shadow_col = egui::Color32::from_black_alpha(180);
-                painter.text(
-                    text_pos + egui::vec2(1.0, 1.0),
-                    egui::Align2::LEFT_TOP,
-                    symbol,
-                    egui::FontId::monospace(14.0),
-                    shadow_col,
-                );
-                let sym_col = if shift_held {
-                    egui::Color32::from_rgb(80, 200, 80)
-                } else {
-                    egui::Color32::from_rgb(220, 80, 80)
-                };
-                painter.text(
-                    text_pos,
-                    egui::Align2::LEFT_TOP,
-                    symbol,
-                    egui::FontId::monospace(14.0),
-                    sym_col,
-                );
-            }
+            painter.text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                symbol,
+                egui::FontId::monospace(14.0),
+                sym_col,
+            );
         }
     }
 }
@@ -3095,7 +3132,6 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
         let can_boolean = selected_vectors >= 2;
         let active_idx = data.layers.active_layer_idx;
         let has_doc = data.doc.has_doc;
-        use crate::app::powerclip_ops::PowerClipFit;
         use crate::core::vector::boolean::BooleanOp;
 
         let resp = egui::Area::new(egui::Id::new("object_ctx_menu"))
@@ -3126,15 +3162,30 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
                             clicked = true;
                         }
                         if item(ui, has_doc, "Duplicate", None) {
-                            actions.layers.duplicate_layer = Some(active_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                active_idx,
+                                "layer.duplicate",
+                                serde_json::json!({"picked": true}),
+                            );
                             clicked = true;
                         }
                         if item(ui, selected_vectors > 0, "Convert to Curves", None) {
-                            actions.layers.convert_to_curves = Some(active_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                active_idx,
+                                "vector.to_curves",
+                                serde_json::json!({}),
+                            );
                             clicked = true;
                         }
                         if item(ui, has_doc, "Delete", None) {
-                            actions.layers.remove_layer = Some(active_idx);
+                            actions.run_on_layer(
+                                &data.layers.layer_ids,
+                                active_idx,
+                                "layer.delete",
+                                serde_json::json!({"picked": true}),
+                            );
                             clicked = true;
                         }
 
@@ -3147,7 +3198,7 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
                             ("Simplify", BooleanOp::Exclude),
                         ] {
                             if item(ui, can_boolean, label, None) {
-                                actions.layers.boolean_op = Some(op);
+                                actions.run("vector.shaping", shaping_args(op));
                                 clicked = true;
                             }
                         }
@@ -3155,7 +3206,7 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
                         flat_context_menu_separator(ui, menu_w);
                         // PowerClip.
                         if item(ui, can_place, "PowerClip: Place Inside Frame", None) {
-                            actions.layers.powerclip_place = true;
+                            actions.run("vector.powerclip", serde_json::json!({"op": "place"}));
                             clicked = true;
                         }
                         let edit_label = if editing {
@@ -3173,18 +3224,18 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
                             clicked = true;
                         }
                         if item(ui, clipped_selected, "PowerClip: Extract From Frame", None) {
-                            actions.layers.powerclip_release = true;
+                            actions.run("vector.powerclip", serde_json::json!({"op": "extract"}));
                             clicked = true;
                         }
                         if clipped_selected {
-                            for (label, mode) in [
-                                ("PowerClip: Center", PowerClipFit::Center),
-                                ("PowerClip: Fit", PowerClipFit::Fit),
-                                ("PowerClip: Fill", PowerClipFit::Fill),
-                                ("PowerClip: Stretch", PowerClipFit::Stretch),
+                            for (label, op) in [
+                                ("PowerClip: Center", "center"),
+                                ("PowerClip: Fit", "fit"),
+                                ("PowerClip: Fill", "fill"),
+                                ("PowerClip: Stretch", "stretch"),
                             ] {
                                 if item(ui, true, label, None) {
-                                    actions.layers.powerclip_arrange = Some(mode);
+                                    actions.run("vector.powerclip", serde_json::json!({"op": op}));
                                     clicked = true;
                                 }
                             }
@@ -3234,11 +3285,11 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
 
                         if flat_context_menu_item(ui, menu_w, has_doc, "Select All", Some("Ctrl+A"))
                         {
-                            actions.sel.select_all = true;
+                            actions.run("select.all", serde_json::json!({}));
                             clicked = true;
                         }
                         if flat_context_menu_item(ui, menu_w, has_sel, "Deselect", Some("Ctrl+D")) {
-                            actions.sel.deselect = true;
+                            actions.run("select.none", serde_json::json!({}));
                             clicked = true;
                         }
                         if flat_context_menu_item(
@@ -3248,7 +3299,7 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
                             "Select Inverse",
                             Some("Shift+F7"),
                         ) {
-                            actions.sel.invert_selection = true;
+                            actions.run("select.invert", serde_json::json!({}));
                             clicked = true;
                         }
                         flat_context_menu_separator(ui, menu_w);
@@ -3273,17 +3324,20 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
                             clicked = true;
                         }
                         if flat_context_menu_item(ui, menu_w, has_sel, "Expand 1 px", None) {
-                            actions.sel.selection_grow = Some(1);
+                            actions.modify_selection("grow", 1.0);
                             clicked = true;
                         }
                         if flat_context_menu_item(ui, menu_w, has_sel, "Contract 1 px", None) {
-                            actions.sel.selection_shrink = Some(1);
+                            actions.modify_selection("shrink", 1.0);
                             clicked = true;
                         }
                         flat_context_menu_separator(ui, menu_w);
                         if flat_context_menu_item(ui, menu_w, has_doc, "Fill with Foreground", None)
                         {
-                            actions.doc.fill_foreground = true;
+                            actions.run(
+                                "edit.fill",
+                                serde_json::json!({"color": crate::ui::color_hex(data.tool.brush_color)}),
+                            );
                             clicked = true;
                         }
                         if flat_context_menu_item(ui, menu_w, has_sel, "Stroke...", None) {
@@ -3302,7 +3356,7 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
                             "Layer via Copy",
                             Some("Ctrl+J"),
                         ) {
-                            actions.layers.layer_via_copy = true;
+                            actions.run("layer.via_copy", serde_json::json!({}));
                             clicked = true;
                         }
                         if flat_context_menu_item(ui, menu_w, has_sel, "Copy", Some("Ctrl+C")) {
@@ -3660,20 +3714,21 @@ fn draw_text_editing_overlay(
         }
         let text_scale = (zoom / ctx.pixels_per_point()).max(0.001);
         let text_origin = egui::pos2(mx, my);
-        let preview_image = if let Some((texture, w, h)) = text_preview_texture(ctx, &preview_td) {
-            let corners = text_preview_corners(
-                text_origin,
-                w,
-                h,
-                text_scale,
-                data.tool.text_rotation_deg,
-                data.tool.text_flip_x,
-                data.tool.text_flip_y,
-            );
-            let bounds = text_preview_bounds(&corners);
-            Some((texture.id(), w, h, corners, bounds))
-        } else {
-            None
+        let preview_image = match text_preview_texture(ctx, &preview_td) {
+            Some((texture, w, h)) => {
+                let corners = text_preview_corners(
+                    text_origin,
+                    w,
+                    h,
+                    text_scale,
+                    data.tool.text_rotation_deg,
+                    data.tool.text_flip_x,
+                    data.tool.text_flip_y,
+                );
+                let bounds = text_preview_bounds(&corners);
+                Some((texture.id(), w, h, corners, bounds))
+            }
+            _ => None,
         };
         let preview_drawn = preview_image.is_some();
         let edit_width = preview_image
@@ -3783,29 +3838,29 @@ fn draw_text_editing_overlay(
             })
             .inner;
 
-        if handle_resp.drag_started() {
-            if let Some(pos) = handle_resp.interact_pointer_pos() {
-                let pointer_canvas = ((pos.x - ox) / zoom, (pos.y - oy) / zoom);
-                let grab_offset = (
-                    pointer_canvas.0 - data.tool.text_overlay_origin.0 as f32,
-                    pointer_canvas.1 - data.tool.text_overlay_origin.1 as f32,
-                );
-                ctx.data_mut(|d| d.insert_temp(drag_id, grab_offset));
-            }
+        if handle_resp.drag_started()
+            && let Some(pos) = handle_resp.interact_pointer_pos()
+        {
+            let pointer_canvas = ((pos.x - ox) / zoom, (pos.y - oy) / zoom);
+            let grab_offset = (
+                pointer_canvas.0 - data.tool.text_overlay_origin.0 as f32,
+                pointer_canvas.1 - data.tool.text_overlay_origin.1 as f32,
+            );
+            ctx.data_mut(|d| d.insert_temp(drag_id, grab_offset));
         }
-        if handle_resp.dragged() {
-            if let Some(pos) = handle_resp.interact_pointer_pos() {
-                let grab_offset = ctx
-                    .data(|d| d.get_temp::<(f32, f32)>(drag_id))
-                    .unwrap_or((9.0 / zoom, 8.0 / zoom));
-                let cx = ((pos.x - ox) / zoom - grab_offset.0)
-                    .round()
-                    .clamp(0.0, data.doc.canvas_w as f32) as i32;
-                let cy = ((pos.y - oy) / zoom - grab_offset.1)
-                    .round()
-                    .clamp(0.0, data.doc.canvas_h as f32) as i32;
-                actions.tool.text_move_origin = Some((cx, cy));
-            }
+        if handle_resp.dragged()
+            && let Some(pos) = handle_resp.interact_pointer_pos()
+        {
+            let grab_offset = ctx
+                .data(|d| d.get_temp::<(f32, f32)>(drag_id))
+                .unwrap_or((9.0 / zoom, 8.0 / zoom));
+            let cx = ((pos.x - ox) / zoom - grab_offset.0)
+                .round()
+                .clamp(0.0, data.doc.canvas_w as f32) as i32;
+            let cy = ((pos.y - oy) / zoom - grab_offset.1)
+                .round()
+                .clamp(0.0, data.doc.canvas_h as f32) as i32;
+            actions.tool.text_move_origin = Some((cx, cy));
         }
 
         // The raster pads (font_px*0.2) around the glyphs; shift the
@@ -4076,50 +4131,49 @@ fn draw_text_editing_overlay(
         if !data.tool.text_focus_pending
             && !data.dialogs.show_paint_color_dialog
             && ctx.input(|i| i.pointer.primary_clicked())
+            && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
         {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                let canvas_rect = egui::Rect::from_min_size(
-                    egui::pos2(ox, oy),
-                    egui::vec2(
-                        data.doc.canvas_w as f32 * zoom,
-                        data.doc.canvas_h as f32 * zoom,
-                    ),
+            let canvas_rect = egui::Rect::from_min_size(
+                egui::pos2(ox, oy),
+                egui::vec2(
+                    data.doc.canvas_w as f32 * zoom,
+                    data.doc.canvas_h as f32 * zoom,
+                ),
+            )
+            .intersect(canvas_viewport);
+            let text_preview_hit = preview_image.as_ref().is_some_and(|(_, w, h, _, _)| {
+                text_preview_contains(
+                    pos,
+                    text_origin,
+                    *w,
+                    *h,
+                    text_scale,
+                    data.tool.text_rotation_deg,
+                    data.tool.text_flip_x,
+                    data.tool.text_flip_y,
                 )
-                .intersect(canvas_viewport);
-                let text_preview_hit = preview_image.as_ref().is_some_and(|(_, w, h, _, _)| {
-                    text_preview_contains(
-                        pos,
-                        text_origin,
-                        *w,
-                        *h,
-                        text_scale,
-                        data.tool.text_rotation_deg,
-                        data.tool.text_flip_x,
-                        data.tool.text_flip_y,
-                    )
-                });
-                // Clicks on floating egui UI (toolbox, popups) over the
-                // canvas are not canvas clicks.
-                let over_floating_ui = ctx.layer_id_at(pos).is_some_and(|l| {
-                    l.order != egui::Order::Background
-                        && l.id != egui::Id::new("text_overlay")
-                        && l.id != egui::Id::new("text_overlay_drag_handle")
-                });
-                // With a raster preview up, `text_preview_hit` is the exact
-                // extent of the drawn (possibly rotated) block. The
-                // TextEdit's own rect is an axis-aligned box at the upright
-                // origin and would swallow clicks on empty canvas.
-                let over_edit_box = !preview_drawn && resp.rect.contains(pos);
-                if canvas_rect.contains(pos)
-                    && !over_floating_ui
-                    && !over_edit_box
-                    && !text_preview_hit
-                    && !handle_resp.rect.contains(pos)
-                {
-                    let cx = ((pos.x - ox) / zoom).clamp(0.0, data.doc.canvas_w as f32);
-                    let cy = ((pos.y - oy) / zoom).clamp(0.0, data.doc.canvas_h as f32);
-                    actions.tool.text_canvas_click = Some((cx, cy));
-                }
+            });
+            // Clicks on floating egui UI (toolbox, popups) over the
+            // canvas are not canvas clicks.
+            let over_floating_ui = ctx.layer_id_at(pos).is_some_and(|l| {
+                l.order != egui::Order::Background
+                    && l.id != egui::Id::new("text_overlay")
+                    && l.id != egui::Id::new("text_overlay_drag_handle")
+            });
+            // With a raster preview up, `text_preview_hit` is the exact
+            // extent of the drawn (possibly rotated) block. The
+            // TextEdit's own rect is an axis-aligned box at the upright
+            // origin and would swallow clicks on empty canvas.
+            let over_edit_box = !preview_drawn && resp.rect.contains(pos);
+            if canvas_rect.contains(pos)
+                && !over_floating_ui
+                && !over_edit_box
+                && !text_preview_hit
+                && !handle_resp.rect.contains(pos)
+            {
+                let cx = ((pos.x - ox) / zoom).clamp(0.0, data.doc.canvas_w as f32);
+                let cy = ((pos.y - oy) / zoom).clamp(0.0, data.doc.canvas_h as f32);
+                actions.tool.text_canvas_click = Some((cx, cy));
             }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -4376,12 +4430,12 @@ fn draw_rulers(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
             let resp = ui.interact(rect, ui.id().with("h_ruler"), egui::Sense::click_and_drag());
             // Drag from the top ruler → a horizontal guide positioned by canvas Y.
-            if resp.dragged() {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    let cy = (p.y - data.doc.offset_y) / data.doc.zoom;
-                    actions.chrome.ruler_guide_drag =
-                        Some((crate::core::document::GuideOrientation::Horizontal, cy));
-                }
+            if resp.dragged()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                let cy = (p.y - data.doc.offset_y) / data.doc.zoom;
+                actions.chrome.ruler_guide_drag =
+                    Some((crate::core::document::GuideOrientation::Horizontal, cy));
             }
             if resp.drag_stopped() {
                 actions.chrome.ruler_guide_commit = true;
@@ -4414,12 +4468,12 @@ fn draw_rulers(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
             let resp = ui.interact(rect, ui.id().with("v_ruler"), egui::Sense::click_and_drag());
             // Drag from the left ruler → a vertical guide positioned by canvas X.
-            if resp.dragged() {
-                if let Some(p) = resp.interact_pointer_pos() {
-                    let cx = (p.x - data.doc.offset_x) / data.doc.zoom;
-                    actions.chrome.ruler_guide_drag =
-                        Some((crate::core::document::GuideOrientation::Vertical, cx));
-                }
+            if resp.dragged()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                let cx = (p.x - data.doc.offset_x) / data.doc.zoom;
+                actions.chrome.ruler_guide_drag =
+                    Some((crate::core::document::GuideOrientation::Vertical, cx));
             }
             if resp.drag_stopped() {
                 actions.chrome.ruler_guide_commit = true;

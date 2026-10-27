@@ -11,10 +11,10 @@
 //! set IAI_PERF_RAW=D:\path\to\file.cr2   (optional override)
 //! ```
 
-use iai::core::develop::{self, fast_preview_downsample, DevelopSettings, TONE_DOWNSAMPLE};
+use iai::core::develop::{self, DevelopSettings, TONE_DOWNSAMPLE, fast_preview_downsample};
 use iai::core::develop_scene::{self, SceneSource};
 use iai::core::layer::{Layer, LayerStack};
-use iai::formats::{raw::RawImporter, Importer};
+use iai::formats::{Importer, raw::RawImporter};
 use iai::gpu::compositor::{
     ColorProxies, CompositorState, DevelopDetailGpu, DevelopGpuPreview, RegionLumaProxy,
 };

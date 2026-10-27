@@ -11,7 +11,7 @@
 // Printing goes through GDI.
 #![allow(unsafe_code)]
 
-use super::print::{placement, printable_area_points, PrintLayout};
+use iai_canvas::print::{PrintLayout, placement, printable_area_points};
 
 /// Driver settings selected for one IAI print session.
 ///
@@ -176,7 +176,7 @@ pub struct DeviceMetrics {
 }
 
 impl DeviceMetrics {
-    /// Paper size in whole PDF points ([`super::print::PrinterInfo`] convention).
+    /// Paper size in whole PDF points ([`iai_canvas::print::PrinterInfo`] convention).
     pub fn paper_points(&self) -> (u32, u32) {
         let w = (self.paper_w as f32 / self.dpi_x * 72.0).round().max(1.0) as u32;
         let h = (self.paper_h as f32 / self.dpi_y * 72.0).round().max(1.0) as u32;
@@ -184,7 +184,7 @@ impl DeviceMetrics {
     }
 
     /// Printable rect in whole points with a bottom-left origin
-    /// ([`super::print::PrinterInfo`] convention).
+    /// ([`iai_canvas::print::PrinterInfo`] convention).
     pub fn printable_rect_points(&self) -> (u32, u32, u32, u32) {
         let to_x = |v: i32| (v as f32 / self.dpi_x * 72.0).round().max(0.0) as u32;
         let to_y = |v: i32| (v as f32 / self.dpi_y * 72.0).round().max(0.0) as u32;
@@ -201,11 +201,16 @@ impl DeviceMetrics {
     /// (PDF points, bottom-left origin), keeping the user's margin/centering/
     /// intent. Using DC ground truth instead of the enumerated printer list
     /// guarantees the blit lands where the driver actually prints.
+    /// The paper's height in PDF points, as `to_layout` sets it.
+    pub fn page_height_points(&self) -> f32 {
+        self.paper_h as f32 * 72.0 / self.dpi_y
+    }
+
     pub fn to_layout(&self, user: &PrintLayout) -> PrintLayout {
         let ptx = 72.0 / self.dpi_x;
         let pty = 72.0 / self.dpi_y;
         let page_w = self.paper_w as f32 * ptx;
-        let page_h = self.paper_h as f32 * pty;
+        let page_h = self.page_height_points();
         let w = self.printable_w as f32 * ptx;
         let h = self.printable_h as f32 * pty;
         let x = self.printable_x as f32 * ptx;
@@ -229,7 +234,7 @@ pub fn image_dest_rect(
 ) -> (i32, i32, i32, i32) {
     let layout = m.to_layout(user);
     let (dw, dh, tx, ty) = placement(&layout, img_w, img_h, dpi);
-    let (_, page_h) = layout.page_points.expect("to_layout always sets page");
+    let page_h = m.page_height_points();
     let x = (tx / 72.0 * m.dpi_x).round() as i32 - m.printable_x;
     let y = ((page_h - ty - dh) / 72.0 * m.dpi_y).round() as i32 - m.printable_y;
     let w = ((dw / 72.0 * m.dpi_x).round() as i32).max(1);
@@ -249,7 +254,7 @@ pub fn clip_dest_rect(
 ) -> (i32, i32, i32, i32) {
     let layout = m.to_layout(user);
     let (cx, cy, cw, ch) = printable_area_points(&layout, img_w, img_h, dpi);
-    let (_, page_h) = layout.page_points.expect("to_layout always sets page");
+    let page_h = m.page_height_points();
     let left = (cx / 72.0 * m.dpi_x).round() as i32 - m.printable_x;
     let top = ((page_h - cy - ch) / 72.0 * m.dpi_y).round() as i32 - m.printable_y;
     let right = left + ((cw / 72.0 * m.dpi_x).round() as i32).max(1);
@@ -323,7 +328,7 @@ mod ffi {
     }
 
     #[link(name = "gdi32")]
-    extern "system" {
+    unsafe extern "system" {
         pub fn CreateDCW(
             driver: *const u16,
             device: *const u16,
@@ -384,7 +389,7 @@ mod ffi {
     }
 
     #[link(name = "winspool")]
-    extern "system" {
+    unsafe extern "system" {
         pub fn OpenPrinterW(
             printer_name: *mut u16,
             printer: *mut Handle,
@@ -847,7 +852,7 @@ fn print_bands_to(
         let mut y = 0u32;
         while y < img_h {
             progress.step()?;
-            let rows = super::print::PDF_STREAM_BAND_ROWS.min(img_h - y);
+            let rows = iai_canvas::print::PDF_STREAM_BAND_ROWS.min(img_h - y);
             let band = next_band(y, rows)?;
             let expected = (img_w as usize) * (rows as usize) * 4;
             if band.len() < expected {

@@ -6,8 +6,7 @@ pub(crate) mod save_export;
 pub(in crate::app) use pdf_session::PdfProjectSnapshot;
 
 use super::state::App;
-use crate::core::canvas::{Canvas, CanvasMetadata};
-use crate::core::tile::TileMap;
+use crate::core::canvas::Canvas;
 use std::path::Path;
 
 pub(in crate::app) fn normalized_path_key(path: &Path) -> String {
@@ -117,17 +116,21 @@ mod tests {
                 assert_eq!(project.active_page, 0);
                 assert_eq!(project.pages.len(), 2);
                 let page0 = project.pages.iter().find(|p| p.index == 0).unwrap();
-                assert!(page0
-                    .canvas
-                    .export_flat()
-                    .chunks_exact(4)
-                    .all(|px| px[0] > 200 && px[2] < 20));
+                assert!(
+                    page0
+                        .canvas
+                        .export_flat()
+                        .chunks_exact(4)
+                        .all(|px| px[0] > 200 && px[2] < 20)
+                );
                 let page1 = project.pages.iter().find(|p| p.index == 1).unwrap();
-                assert!(page1
-                    .canvas
-                    .export_flat()
-                    .chunks_exact(4)
-                    .all(|px| px[2] > 200 && px[0] < 20));
+                assert!(
+                    page1
+                        .canvas
+                        .export_flat()
+                        .chunks_exact(4)
+                        .all(|px| px[2] > 200 && px[0] < 20)
+                );
             }
             _ => panic!("expected a PDF project"),
         }
@@ -166,100 +169,6 @@ impl App {
             self.shell.ui.show_welcome = true;
             self.mark_active_saved();
         }
-    }
-
-    /// Create a new blank canvas in a new tab and switch to it.
-    /// Called from the New Canvas dialog (Ctrl+N confirm).
-    /// Unlike `do_new`, this never overwrites an existing document.
-    #[allow(clippy::too_many_arguments)]
-    pub fn do_new_tab(
-        &mut self,
-        name: String,
-        w: u32,
-        h: u32,
-        dpi: f32,
-        bg: u8,
-        unit: crate::core::units::Unit,
-        cmyk: bool,
-    ) {
-        let w = w.max(1);
-        let h = h.max(1);
-        self.shell.canvas_unit = unit;
-
-        let id = crate::core::document::DocumentId(self.docs.next_doc_id);
-        self.docs.next_doc_id += 1;
-
-        let mut canvas = Canvas::new(w, h);
-        match bg {
-            0 => {
-                canvas.layer_stack.layers[0].is_background = true;
-            }
-            1 => {
-                canvas.layer_stack.layers[0].tiles = crate::core::tile::TileMap::new_black(w, h);
-                canvas.layer_stack.layers[0].is_background = true;
-            }
-            2 => {
-                canvas.layer_stack.layers[0].tiles = TileMap::new(w, h);
-                canvas.layer_stack.layers[0].name = "Layer 1".to_string();
-                canvas.layer_stack.layers[0].is_background = false;
-                canvas.layer_stack.layers[0].locked = false;
-            }
-            _ => {}
-        }
-        canvas.metadata = CanvasMetadata {
-            resolution_ppi: dpi,
-            ..Default::default()
-        };
-
-        // A CMYK document is created as RGB then converted through the built-in
-        // Generic naive space (flattens onto ink planes, clears the empty history).
-        if cmyk {
-            let _ = canvas.convert_to_cmyk(crate::core::canvas::CmykProfile::Naive);
-        }
-
-        // `from_canvas`, not `new` then a swap: `new` would build and flatten
-        // a second blank canvas of this size only to have it replaced.
-        let mut doc = crate::core::document::Document::from_canvas(id, canvas, None);
-        doc.title = name.clone();
-
-        if self.has_only_welcome_placeholder() {
-            self.docs.documents[0] = doc;
-            self.docs.active_doc_idx = 0;
-        } else {
-            self.docs.documents.push(doc);
-            self.docs.active_doc_idx = self.docs.documents.len() - 1;
-        }
-        self.touch_doc_mru();
-
-        self.docs.current_file = None;
-        self.mark_active_saved();
-        self.shell.ui.show_new_dialog = false;
-        self.shell.ui.show_welcome = false;
-        self.edit.input.painting = false;
-        self.edit.transform_state = None;
-        self.edit.pending_stroke_inputs.clear();
-
-        if let Some(gpu) = &mut self.win.gpu {
-            gpu.resize_canvas_texture(w, h);
-            gpu.compositor.tile_atlas.clear();
-            gpu.compositor.ping_initialized = false;
-            gpu.compositor.last_result_is_ping = false;
-        }
-
-        let needs_viewport_mode = self.win.gpu.as_ref().is_some_and(|g| g.is_large_canvas);
-        if needs_viewport_mode {
-            self.shell.status_msg = format!(
-                "Canvas {}×{} — Viewport Streaming mode (canvas lớn, CPU composite)",
-                w, h
-            );
-        } else {
-            self.shell.status_msg = format!("New canvas {}x{}", w, h);
-        }
-
-        self.fit_canvas_for_open();
-        self.push_canvas_uniforms();
-        self.upload_full();
-        self.upload_selection_mask();
     }
 
     pub fn do_new(&mut self, name: String, w: u32, h: u32, dpi: f32, bg: u8) {

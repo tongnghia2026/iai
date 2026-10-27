@@ -13,78 +13,14 @@
 use super::render::CanvasEvent;
 use super::state::App;
 use crate::core::command::LayerStructureCommand;
-use crate::core::layer::{Layer, LayerType};
+use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::boolean::{boolean, boolean_many, intersect_overlaps, BooleanOp};
-use crate::core::vector::brush::BrushStroke;
+use crate::core::vector::boolean::{BooleanOp, boolean};
 use crate::core::vector::from_shape;
-use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::path::PathData;
-use crate::core::vector::raster;
-use crate::core::vector::style::VectorStyle;
 
-/// A vector layer eligible for a boolean: selected, unlocked, not the background,
-/// and holding either a parametric primitive or a Bézier path.
-fn is_boolean_target(layer: &Layer) -> bool {
-    layer.selected
-        && !layer.locked
-        && !layer.is_background
-        && matches!(layer.layer_type, LayerType::Vector(_))
-}
-
-/// Reduce one vector layer to a canvas-space fill path plus its style. Returns
-/// `None` for non-vector layers.
-fn layer_canvas_path(layer: &Layer) -> Option<(PathData, VectorStyle)> {
-    match &layer.layer_type {
-        LayerType::Vector(VectorGeometry::Path(obj)) => {
-            // The model lives in layer space; `Layer::offset` is normally its
-            // derived raster origin (delta-0). Fold any residual drag drift so the
-            // path we compose is in true canvas space.
-            let mut p = obj.path_in_layer_space();
-            if let Some((origin, _, _)) = raster::raster_geometry(obj) {
-                let dx = (layer.offset.0 - origin.0) as f32;
-                let dy = (layer.offset.1 - origin.1) as f32;
-                if dx != 0.0 || dy != 0.0 {
-                    p.transform(&AffineTransform::translate(dx, dy));
-                }
-            }
-            Some((p, obj.style))
-        }
-        LayerType::Vector(VectorGeometry::Primitive(shape)) => {
-            let (x0, y0, x1, y1) = shape.canvas_span(layer.offset);
-            use crate::core::shape::ShapeKind;
-            let path = match shape.kind {
-                ShapeKind::Rectangle => {
-                    from_shape::rect_path(x0, y0, x1, y1, shape.effective_radius())
-                }
-                ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
-                ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
-                ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, shape.sides),
-                ShapeKind::Star => {
-                    from_shape::star_path(x0, y0, x1, y1, shape.sides, shape.star_inner)
-                }
-            };
-            Some((path, shape.style))
-        }
-        _ => None,
-    }
-}
-
-/// Like [`layer_canvas_path`] but also returns the object's Vector Brush (its
-/// width scaled into canvas units) when the layer is a brush stroke, so an
-/// open-stroke cut can preserve the variable width. `None` for non-vector layers.
-fn layer_canvas_object(layer: &Layer) -> Option<(PathData, VectorStyle, Option<BrushStroke>)> {
-    let (path, style) = layer_canvas_path(layer)?;
-    let brush = match &layer.layer_type {
-        LayerType::Vector(VectorGeometry::Path(obj)) => obj.brush.as_ref().map(|b| BrushStroke {
-            base_width: b.base_width * obj.transform_scale(),
-            profile: b.profile.clone(),
-            cap: b.cap,
-        }),
-        _ => None,
-    };
-    Some((path, style, brush))
-}
+use iai_canvas::shaping::{is_boolean_target, layer_canvas_object};
 
 impl App {
     /// Number of vector layers currently eligible for a boolean. The menu enables
@@ -111,232 +47,8 @@ impl App {
     ///   Simplify      → preserve the visible stack: each lower object loses the
     ///                   area hidden by selected objects above it.
     pub fn apply_boolean(&mut self, op: BooleanOp) -> bool {
-        // Selected vector layers bottom-to-top: (layer index, canvas-space path,
-        // style). Index 0 is the bottom layer.
-        let items: Vec<(usize, PathData, VectorStyle)> = {
-            let stack = &self.docs.active().canvas.layer_stack;
-            stack
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| is_boolean_target(l))
-                .filter_map(|(i, l)| layer_canvas_path(l).map(|(p, s)| (i, p, s)))
-                .collect()
-        };
-        if items.len() < 2 {
-            self.shell.status_msg = "Select at least 2 vector objects to shape".to_string();
-            return false;
-        }
-        let indices: Vec<usize> = items.iter().map(|(i, _, _)| *i).collect();
-        let paths: Vec<&PathData> = items.iter().map(|(_, p, _)| p).collect();
-        let target_idx = indices[0];
-        // Merge results inherit the bottom (target) object's style.
-        let target_style = items[0].2;
-
-        let name = match op {
-            BooleanOp::Union => "Weld",
-            BooleanOp::Intersect => "Intersect",
-            BooleanOp::Difference => "Trim",
-            BooleanOp::Exclude => "Simplify",
-        };
-
-        // Compute the geometry up front so an empty/failed result aborts cleanly,
-        // before any layer is touched.
-        enum Plan {
-            /// Remove all sources, insert one result at the bottom (Weld).
-            Merge(VectorObjectData),
-            /// Replace only the bottom target. `None` means it was fully trimmed.
-            ReplaceTarget(Option<VectorObjectData>),
-            /// Keep all sources, add one result on top (Intersect).
-            AddOnTop(VectorObjectData),
-            /// Replace each source's geometry in place; `None` = fully consumed,
-            /// remove that layer (Simplify). The top selected layer is untouched.
-            PerLayer(Vec<(usize, Option<VectorObjectData>)>),
-        }
-        let new_obj =
-            |p: PathData, s: VectorStyle| VectorObjectData::new(p, s, AffineTransform::IDENTITY);
-
-        let plan = match op {
-            BooleanOp::Union => match boolean_many(&paths, op).filter(|r| !r.contours.is_empty()) {
-                Some(r) => Plan::Merge(new_obj(r, target_style)),
-                None => {
-                    self.shell.status_msg = "Empty result".to_string();
-                    return false;
-                }
-            },
-            BooleanOp::Difference => {
-                let result = boolean_many(&paths, op)
-                    .filter(|r| !r.contours.is_empty())
-                    .map(|r| new_obj(r, target_style));
-                Plan::ReplaceTarget(result)
-            }
-            BooleanOp::Intersect => {
-                match intersect_overlaps(&paths).filter(|r| !r.contours.is_empty()) {
-                    Some(r) => Plan::AddOnTop(new_obj(r, target_style)),
-                    None => {
-                        self.shell.status_msg = "No intersection".to_string();
-                        return false;
-                    }
-                }
-            }
-            BooleanOp::Exclude => {
-                // Corel Simplify: top objects act as cutters for objects below.
-                // The top selected object stays untouched.
-                let mut per: Vec<(usize, Option<VectorObjectData>)> =
-                    Vec::with_capacity(items.len().saturating_sub(1));
-                for (k, (idx, _p, style)) in
-                    items.iter().enumerate().take(items.len().saturating_sub(1))
-                {
-                    let mut refs: Vec<&PathData> = vec![paths[k]];
-                    refs.extend(paths.iter().skip(k + 1).copied());
-                    let r = boolean_many(&refs, BooleanOp::Difference)
-                        .filter(|r| !r.contours.is_empty());
-                    match r {
-                        Some(r) => per.push((*idx, Some(new_obj(r, *style)))),
-                        None => per.push((*idx, None)),
-                    }
-                }
-                Plan::PerLayer(per)
-            }
-        };
-
-        let valid = match &plan {
-            Plan::Merge(o) | Plan::AddOnTop(o) => o.validate().is_ok(),
-            Plan::ReplaceTarget(o) => o.as_ref().is_none_or(|o| o.validate().is_ok()),
-            Plan::PerLayer(v) => v
-                .iter()
-                .all(|(_, o)| o.as_ref().is_none_or(|o| o.validate().is_ok())),
-        };
-        if !valid {
-            self.shell.status_msg = "Invalid result".to_string();
-            return false;
-        }
-
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
-        let canvas = &mut self.docs.active_mut().canvas;
-        let before = LayerStructureCommand::capture_before(name, &canvas.layer_stack, cw, ch);
-
-        let mut removed_empty = 0usize;
-        match plan {
-            Plan::Merge(object) => {
-                let new_id = canvas.layer_stack.next_id();
-                canvas.layer_stack.set_next_id(new_id + 1);
-                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
-                new_layer.id = new_id;
-                new_layer.name = name.to_string();
-                new_layer.mask = None;
-                crate::core::command_vector::apply_object_to_layer(&mut new_layer, object);
-                // Remove sources highest-index-first so lower indices stay valid.
-                let mut desc = indices.clone();
-                desc.sort_unstable_by(|a, b| b.cmp(a));
-                for &i in &desc {
-                    canvas.layer_stack.layers.remove(i);
-                }
-                let insert_at = target_idx.min(canvas.layer_stack.layers.len());
-                canvas.layer_stack.layers.insert(insert_at, new_layer);
-                canvas.layer_stack.active_idx = insert_at;
-                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
-                    l.selected = i == insert_at;
-                }
-            }
-            Plan::AddOnTop(object) => {
-                let new_id = canvas.layer_stack.next_id();
-                canvas.layer_stack.set_next_id(new_id + 1);
-                let mut new_layer = canvas.layer_stack.layers[target_idx].clone();
-                new_layer.id = new_id;
-                new_layer.name = name.to_string();
-                new_layer.mask = None;
-                crate::core::command_vector::apply_object_to_layer(&mut new_layer, object);
-                let top = *indices.last().unwrap_or(&target_idx);
-                let insert_at = (top + 1).min(canvas.layer_stack.layers.len());
-                canvas.layer_stack.layers.insert(insert_at, new_layer);
-                canvas.layer_stack.active_idx = insert_at;
-                for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
-                    l.selected = i == insert_at;
-                }
-            }
-            Plan::ReplaceTarget(object) => {
-                if let Some(object) = object {
-                    crate::core::command_vector::apply_object_to_layer(
-                        &mut canvas.layer_stack.layers[target_idx],
-                        object,
-                    );
-                    canvas.layer_stack.active_idx = target_idx;
-                } else {
-                    canvas.layer_stack.layers.remove(target_idx);
-                    removed_empty = 1;
-                    canvas.layer_stack.active_idx =
-                        target_idx.min(canvas.layer_stack.layers.len().saturating_sub(1));
-                }
-                let active = canvas.layer_stack.active_idx;
-                for (i, layer) in canvas.layer_stack.layers.iter_mut().enumerate() {
-                    layer.selected = i == active;
-                }
-            }
-            Plan::PerLayer(per) => {
-                // In-place edits keep indices stable; collect the empties and drop
-                // them afterwards (highest-first). Edited layers stay selected.
-                let mut empties: Vec<usize> = Vec::new();
-                for (idx, obj) in per {
-                    match obj {
-                        Some(o) => {
-                            let layer = &mut canvas.layer_stack.layers[idx];
-                            crate::core::command_vector::apply_object_to_layer(layer, o);
-                        }
-                        None => empties.push(idx),
-                    }
-                }
-                empties.sort_unstable_by(|a, b| b.cmp(a));
-                for &i in &empties {
-                    canvas.layer_stack.layers.remove(i);
-                }
-                removed_empty = empties.len();
-                if let Some(pos) = canvas.layer_stack.layers.iter().position(|l| l.selected) {
-                    canvas.layer_stack.active_idx = pos;
-                } else {
-                    canvas.layer_stack.active_idx = canvas
-                        .layer_stack
-                        .active_idx
-                        .min(canvas.layer_stack.layers.len().saturating_sub(1));
-                }
-            }
-        }
-
-        // CMYK: re-derive ink planes for the new Path raster(s) from the RGB mirror.
-        canvas.reconcile_path_ink();
-        canvas.layer_revision += 1;
-
-        let mut cmd = before;
-        cmd.capture_after(&canvas.layer_stack, cw, ch);
-        canvas.record(Box::new(cmd));
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        self.shell.status_msg = match op {
-            BooleanOp::Union => format!("Welded {} vector objects", indices.len()),
-            BooleanOp::Difference => {
-                if removed_empty == 0 {
-                    format!(
-                        "Trimmed the target with {} source(s) — sources kept",
-                        indices.len() - 1
-                    )
-                } else {
-                    "Target fully trimmed away — sources kept".to_string()
-                }
-            }
-            BooleanOp::Intersect => "Created the intersection (originals kept)".to_string(),
-            BooleanOp::Exclude => format!(
-                "Simplified the overlap — {} shapes remain",
-                indices.len() - removed_empty
-            ),
-        };
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-        true
+        self.run_with("vector.shaping", crate::ui::shaping_args(op))
+            .is_ok()
     }
 
     /// Whether the active layer can be trimmed by the current selection: there is
@@ -372,7 +84,7 @@ impl App {
     pub fn trim_active_vector_by_selection(&mut self) -> bool {
         use crate::core::geometry::Point;
         use crate::core::vector::path::{Contour, FillRule};
-        use crate::core::vector::segment_cut::{cut_open_contour, OpenPiece};
+        use crate::core::vector::segment_cut::{OpenPiece, cut_open_contour};
 
         let doc = self.docs.active_doc_idx;
         let target_idx = self.docs.documents[doc].canvas.layer_stack.active_idx;
@@ -635,7 +347,9 @@ mod tests {
     use crate::core::shape::{ShapeData, ShapeKind};
     use crate::core::vector::color::ColorValue;
     use crate::core::vector::flatten::flatten_path;
+    use crate::core::vector::object::VectorGeometry;
     use crate::core::vector::path::{Contour, FillRule, Node};
+    use crate::core::vector::style::VectorStyle;
     use crate::core::vector::style::{LineCap, Paint};
 
     fn rect_shape(x0: f32, y0: f32, x1: f32, y1: f32) -> ShapeData {

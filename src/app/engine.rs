@@ -106,6 +106,7 @@ impl App {
     /// it names another. What it changed is redrawn and what it says goes to
     /// the status line, a failure included.
     pub(crate) fn execute_command(&mut self, call: CommandCall) -> Result<Reply, CmdError> {
+        let command = call.command.clone();
         self.prepare_for_command();
         let over_welcome = self.has_only_welcome_placeholder();
         let reply = {
@@ -118,6 +119,13 @@ impl App {
         self.apply_engine_events();
         if let Err(e) = &reply {
             self.shell.status_msg = error_line(e);
+        }
+        // The Channels panel shows the channel picked; it changed with them.
+        if command.starts_with("channel.") || command == "select.from_channel" {
+            self.refresh_channel_view_display();
+        }
+        if command == "page.delete" || command == "page.move" {
+            self.shell.ui.page_rename_target = None;
         }
         reply
     }
@@ -255,23 +263,7 @@ impl App {
             }
         }
         if refresh {
-            // A text being typed belongs to the tab it was started in.
-            let shown = self.docs.active().id;
-            if self
-                .edit
-                .text_edit
-                .as_ref()
-                .is_some_and(|t| t.doc_id != shown)
-            {
-                self.commit_text_edit();
-            }
-            self.shell.ui.show_welcome = false;
-            self.refresh_active_document();
-            if fit {
-                self.fit_canvas_to_screen();
-            }
-            let idx = self.docs.active_doc_idx;
-            self.ensure_raw_resident(idx);
+            self.show_new_tab_or_page(fit);
         } else {
             if structure {
                 self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -287,6 +279,51 @@ impl App {
         for (job, command, error) in finished {
             self.on_job_finished(job, &command, error.as_ref());
         }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Another tab (or page) is shown: draw it.
+    fn show_new_tab_or_page(&mut self, fit: bool) {
+        // A text being typed belongs to the tab it was started in.
+        let shown = self.docs.active().id;
+        if self
+            .edit
+            .text_edit
+            .as_ref()
+            .is_some_and(|t| t.doc_id != shown)
+        {
+            self.commit_text_edit();
+        }
+        self.shell.ui.show_welcome = false;
+        self.refresh_active_document();
+        if fit {
+            self.fit_canvas_to_screen();
+        }
+        let idx = self.docs.active_doc_idx;
+        self.ensure_raw_resident(idx);
+    }
+
+    /// Documents made elsewhere (by a job on an engine of its own) become
+    /// tabs, the last one shown.
+    pub(in crate::app) fn adopt_documents(&mut self, docs: Vec<Document>) {
+        if docs.is_empty() {
+            return;
+        }
+        self.prepare_for_command();
+        let over_welcome = self.has_only_welcome_placeholder();
+        {
+            let mut ws = GuiWorkspace {
+                docs: &mut self.docs,
+                over_welcome,
+            };
+            for mut doc in docs {
+                doc.id = ws.new_document_id();
+                ws.add(doc);
+            }
+        }
+        self.show_new_tab_or_page(false);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -426,7 +463,7 @@ mod tests {
     #[cfg(feature = "pro")]
     #[test]
     fn panic_hunt_finds_nothing_in_the_pro_commands() {
-        use iai_engine::hunt::{hunt, hunting_ground, Fixture};
+        use iai_engine::hunt::{Fixture, hunt, hunting_ground};
         use std::sync::Arc;
         crate::core::ai::take_model_test_turn();
         let scratch = std::env::temp_dir().join(format!("iai-hunt-pro-{}", std::process::id()));

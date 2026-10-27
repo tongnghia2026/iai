@@ -124,6 +124,12 @@ impl App {
         if let Some(name) = actions.chrome.remove_skill.take() {
             self.remove_skill(&name);
         }
+        if let Some(intent) = actions.chrome.errand.take() {
+            self.errand_intent(intent);
+        }
+        if let Some(intent) = actions.chrome.quick.take() {
+            self.quick_intent(intent);
+        }
         // The first start of a new build: what is new in it and the ask for
         // support, once the user is free to read them.
         if self.shell.updated_notice && self.free_for_update() {
@@ -163,10 +169,8 @@ impl App {
             crate::update::set_relaunch(true);
             actions.doc.exit = true;
         }
-        if arrived {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if arrived && let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 

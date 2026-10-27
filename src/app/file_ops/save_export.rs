@@ -4,7 +4,7 @@
 use crate::app::autosave::{content_fingerprint, detached_canvas};
 use crate::app::state::App;
 use crate::core::canvas::Canvas;
-use crate::core::document::{file_modified_at, DocumentId};
+use crate::core::document::{DocumentId, file_modified_at};
 use crate::file_io;
 use crate::formats::ExportOptions;
 use std::path::{Path, PathBuf};
@@ -533,10 +533,10 @@ impl App {
             }
         }
         // Nothing else wakes the loop when a worker finishes.
-        if !self.docs.save_jobs.is_empty() {
-            if let Some(window) = &self.win.window {
-                window.request_redraw();
-            }
+        if !self.docs.save_jobs.is_empty()
+            && let Some(window) = &self.win.window
+        {
+            window.request_redraw();
         }
     }
 
@@ -1144,7 +1144,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{requires_project_save_on_close, App, SaveWait};
+    use super::{App, SaveWait, requires_project_save_on_close};
     use crate::core::canvas::Canvas;
     use crate::core::print::prepare_pdf_pixels;
 

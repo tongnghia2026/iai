@@ -376,10 +376,10 @@ impl Session<'_> {
                 }
                 let revision = self.target_revision(&call.args);
                 let reply = Reply::Done { result, revision };
-                if !call.dry_run {
-                    if let Some(rid) = call.request_id {
-                        self.engine.remember_reply(rid, reply.clone());
-                    }
+                if !call.dry_run
+                    && let Some(rid) = call.request_id
+                {
+                    self.engine.remember_reply(rid, reply.clone());
                 }
                 Ok(reply)
             }
@@ -645,10 +645,10 @@ impl Session<'_> {
             self.engine.events.push(EngineEvent::Structure { doc });
             self.engine.events.push(EngineEvent::Selection { doc });
         }
-        if !opened.is_empty() {
-            if let Some(doc) = self.active_id() {
-                self.engine.events.push(EngineEvent::Shown { doc });
-            }
+        if !opened.is_empty()
+            && let Some(doc) = self.active_id()
+        {
+            self.engine.events.push(EngineEvent::Shown { doc });
         }
     }
 

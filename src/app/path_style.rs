@@ -18,8 +18,8 @@ use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::style::{
-    ArrowHead, DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint,
-    VectorStyle, MAX_DASHES, MAX_GRADIENT_STOPS,
+    ArrowHead, DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin, MAX_DASHES,
+    MAX_GRADIENT_STOPS, Paint, VectorStyle,
 };
 
 impl App {
@@ -45,10 +45,10 @@ impl App {
 
     pub fn active_gradient_ui_type(&self) -> u8 {
         if self.active_gradient_mode() == 2 {
-            if let Some((_, style)) = self.active_path_style() {
-                if let Paint::Gradient(gradient) = style.fill {
-                    return u8::from(gradient.kind == GradientKind::Radial);
-                }
+            if let Some((_, style)) = self.active_path_style()
+                && let Paint::Gradient(gradient) = style.fill
+            {
+                return u8::from(gradient.kind == GradientKind::Radial);
             }
             return u8::from(
                 self.edit.tools.gradient().gradient_type
@@ -59,16 +59,15 @@ impl App {
     }
 
     pub fn active_gradient_ui_stops(&self) -> Vec<(f32, [u8; 4])> {
-        if self.active_gradient_mode() == 2 {
-            if let Some((_, style)) = self.active_path_style() {
-                if let Paint::Gradient(gradient) = style.fill {
-                    return gradient
-                        .active_stops()
-                        .iter()
-                        .map(|stop| (stop.offset, stop.color.to_rgba8()))
-                        .collect();
-                }
-            }
+        if self.active_gradient_mode() == 2
+            && let Some((_, style)) = self.active_path_style()
+            && let Paint::Gradient(gradient) = style.fill
+        {
+            return gradient
+                .active_stops()
+                .iter()
+                .map(|stop| (stop.offset, stop.color.to_rgba8()))
+                .collect();
         }
         self.edit
             .tools
@@ -598,12 +597,12 @@ impl App {
 
     pub fn path_set_fill_end_color(&mut self, rgba: [u8; 4]) {
         self.path_style_begin();
-        if let Some((id, mut style)) = self.active_path_style() {
-            if let Paint::Gradient(g) = &mut style.fill {
-                let last = g.stop_count.saturating_sub(1) as usize;
-                g.stops[last].color = ColorValue::from_rgba8(rgba);
-                self.preview_path_style_live(id, style);
-            }
+        if let Some((id, mut style)) = self.active_path_style()
+            && let Paint::Gradient(g) = &mut style.fill
+        {
+            let last = g.stop_count.saturating_sub(1) as usize;
+            g.stops[last].color = ColorValue::from_rgba8(rgba);
+            self.preview_path_style_live(id, style);
         }
     }
 
@@ -611,13 +610,13 @@ impl App {
     /// `path_style_commit` on OK/Cancel so the whole interaction is one undo.
     pub fn path_set_gradient_stop_color(&mut self, index: u8, rgba: [u8; 4]) {
         self.path_style_begin();
-        if let Some((id, mut style)) = self.active_path_style() {
-            if let Paint::Gradient(g) = &mut style.fill {
-                let index = index as usize;
-                if index < g.stop_count as usize {
-                    g.stops[index].color = ColorValue::from_rgba8(rgba);
-                    self.preview_path_style_live(id, style);
-                }
+        if let Some((id, mut style)) = self.active_path_style()
+            && let Paint::Gradient(g) = &mut style.fill
+        {
+            let index = index as usize;
+            if index < g.stop_count as usize {
+                g.stops[index].color = ColorValue::from_rgba8(rgba);
+                self.preview_path_style_live(id, style);
             }
         }
     }
@@ -625,28 +624,28 @@ impl App {
     /// Live-preview a stop location while preserving sorted gradient order.
     pub fn path_set_gradient_stop_offset(&mut self, index: u8, offset: f32) {
         self.path_style_begin();
-        if let Some((id, mut style)) = self.active_path_style() {
-            if let Paint::Gradient(g) = &mut style.fill {
-                let index = index as usize;
-                let count = g.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize;
-                if index < count {
-                    let lo = if index == 0 {
-                        0.0
-                    } else {
-                        g.stops[index - 1].offset
-                    };
-                    let hi = if index + 1 == count {
-                        1.0
-                    } else {
-                        g.stops[index + 1].offset
-                    };
-                    g.stops[index].offset = if offset.is_finite() {
-                        offset.clamp(lo, hi)
-                    } else {
-                        lo
-                    };
-                    self.preview_path_style_live(id, style);
-                }
+        if let Some((id, mut style)) = self.active_path_style()
+            && let Paint::Gradient(g) = &mut style.fill
+        {
+            let index = index as usize;
+            let count = g.stop_count.min(MAX_GRADIENT_STOPS as u8) as usize;
+            if index < count {
+                let lo = if index == 0 {
+                    0.0
+                } else {
+                    g.stops[index - 1].offset
+                };
+                let hi = if index + 1 == count {
+                    1.0
+                } else {
+                    g.stops[index + 1].offset
+                };
+                g.stops[index].offset = if offset.is_finite() {
+                    offset.clamp(lo, hi)
+                } else {
+                    lo
+                };
+                self.preview_path_style_live(id, style);
             }
         }
     }
@@ -657,11 +656,11 @@ impl App {
             return;
         }
         self.path_style_begin();
-        if let Some((id, mut style)) = self.active_path_style() {
-            if let Paint::Gradient(g) = &mut style.fill {
-                g.transform = transform;
-                self.preview_path_style_model_only(id, style);
-            }
+        if let Some((id, mut style)) = self.active_path_style()
+            && let Paint::Gradient(g) = &mut style.fill
+        {
+            g.transform = transform;
+            self.preview_path_style_model_only(id, style);
         }
     }
 
@@ -680,11 +679,7 @@ impl App {
                 (0usize, -1.0_f32),
                 |best, (index, pair)| {
                     let gap = pair[1].offset - pair[0].offset;
-                    if gap > best.1 {
-                        (index, gap)
-                    } else {
-                        best
-                    }
+                    if gap > best.1 { (index, gap) } else { best }
                 },
             );
             let right = left + 1;
@@ -1223,7 +1218,7 @@ mod tests {
         let (mut app, id) = app_with_path();
         let dirty_before = app.docs.documents[0].canvas.is_dirty();
         app.path_set_fill_color([10, 20, 30, 255]); // preview
-                                                    // "Cancel": restore original, then commit sees no net change.
+        // "Cancel": restore original, then commit sees no net change.
         app.path_set_fill_color([255, 0, 0, 255]);
         app.path_style_commit();
         assert_eq!(

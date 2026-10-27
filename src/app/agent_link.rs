@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iai_automation::bridge::{self, BridgeServer, Control};
 use iai_engine::{
@@ -22,12 +22,34 @@ use super::state::App;
 pub struct AgentLink {
     server: BridgeServer,
     file: PathBuf,
+    /// What this window wrote to the file.
+    control: Control,
+    /// When the file was last looked at.
+    checked: Instant,
+}
+
+impl AgentLink {
+    /// The file says where this window is: written again when it is gone
+    /// (another window that went away, or another program, took it out). A
+    /// file another window wrote since is left to it.
+    fn keep_file(&mut self) {
+        if self.checked.elapsed() < Duration::from_secs(3) {
+            return;
+        }
+        self.checked = Instant::now();
+        if !self.file.exists() {
+            let _ = self.control.write(&self.file);
+        }
+    }
 }
 
 impl Drop for AgentLink {
     fn drop(&mut self) {
-        // Stale, it would send agents to a port nobody listens on.
-        let _ = std::fs::remove_file(&self.file);
+        // Stale, it would send agents to a port nobody listens on; another
+        // window's file is not this one's to take out.
+        if Control::read(&self.file).is_ok_and(|c| c == self.control) {
+            let _ = std::fs::remove_file(&self.file);
+        }
     }
 }
 
@@ -56,7 +78,13 @@ impl WindowHost<'_> {
 fn pro_refused(app: &App, id: &str) -> Option<CmdError> {
     #[cfg(feature = "pro")]
     {
-        let pro = ["id_photo.make", "print.impose_sheet"];
+        let pro = [
+            "id_photo.make",
+            "id_photo.batch",
+            "id_photo.dress",
+            "id_photo.dress_input",
+            "print.impose_sheet",
+        ];
         if pro.contains(&id) && !app.shell.pro.status().open() {
             return Some(
                 CmdError::new(
@@ -162,7 +190,7 @@ impl App {
     }
 
     /// Listen, and say where in `file`.
-    fn start_agent_link(&self, file: PathBuf) -> std::io::Result<AgentLink> {
+    pub(super) fn start_agent_link(&self, file: PathBuf) -> std::io::Result<AgentLink> {
         let token = bridge::new_token()?;
         let window = self.win.window.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -171,13 +199,18 @@ impl App {
             }
         });
         let server = BridgeServer::start(token.clone(), wake)?;
-        Control {
+        let control = Control {
             port: server.port(),
             token,
             pid: std::process::id(),
-        }
-        .write(&file)?;
-        Ok(AgentLink { server, file })
+        };
+        control.write(&file)?;
+        Ok(AgentLink {
+            server,
+            file,
+            control,
+            checked: Instant::now(),
+        })
     }
 
     pub(crate) fn agent_control_on(&self) -> bool {
@@ -282,11 +315,22 @@ impl App {
         {
             self.shell.agent_skills = Some((std::time::Instant::now(), Self::read_skills()));
         }
+        if let Some(link) = self.shell.agent_link.as_mut() {
+            link.keep_file();
+        }
         // A few at most a frame: the window keeps drawing.
         for _ in 0..8 {
             let Some(request) = self.shell.agent_link.as_ref().and_then(|l| l.server.next()) else {
                 return;
             };
+            if !request.op.is_command() {
+                self.answer_errand_word(request);
+                continue;
+            }
+            if let Some(refused) = self.errand_step(&request.op) {
+                request.answer(Err(refused));
+                continue;
+            }
             let mut host = WindowHost { app: self };
             bridge::answer_with(&mut host, request);
         }
@@ -296,8 +340,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iai_automation::bridge::BridgeHost;
     use iai_automation::Host;
+    use iai_automation::bridge::BridgeHost;
     use iai_engine::ErrorCode;
     use serde_json::json;
 
@@ -347,10 +391,11 @@ mod tests {
         assert_eq!(canvas.layer_count(), 1);
         // The window is the person's again.
         assert_eq!(app.engine.source(), Source::Gui);
-        assert!(app
-            .engine
-            .policy()
-            .grants(&[Effect::Print, Effect::Network]));
+        assert!(
+            app.engine
+                .policy()
+                .grants(&[Effect::Print, Effect::Network])
+        );
 
         // In the middle of an edit: the agent may look, not change.
         app.shell.ui.show_adjustment_dialog = true;
@@ -360,14 +405,37 @@ mod tests {
             .execute(CommandCall::new("image.flip", json!({"axis": "vertical"})))
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::Busy);
-        assert!(host
-            .execute(CommandCall::new("doc.inspect", json!({})))
-            .is_ok());
+        assert!(
+            host.execute(CommandCall::new("doc.inspect", json!({})))
+                .is_ok()
+        );
         app.shell.ui.show_adjustment_dialog = false;
+
+        // The file taken out from under it: written again, as it was.
+        let ours = Control::read(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let past = |app: &mut App| {
+            if let Some(link) = app.shell.agent_link.as_mut() {
+                link.checked = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+            }
+        };
+        past(&mut app);
+        app.poll_agent_link();
+        assert_eq!(Control::read(&file).unwrap(), ours);
 
         // Off: the file that pointed agents here is gone.
         app.set_agent_control(false);
         assert!(!file.exists());
         assert!(!app.agent_control_on());
+
+        // Another window's file is not this one's to take out.
+        app.shell.agent_link = Some(app.start_agent_link(file.clone()).unwrap());
+        let other = Control { port: 1, ..ours };
+        other.write(&file).unwrap();
+        past(&mut app);
+        app.poll_agent_link();
+        app.set_agent_control(false);
+        assert_eq!(Control::read(&file).unwrap(), other);
+        let _ = std::fs::remove_file(&file);
     }
 }

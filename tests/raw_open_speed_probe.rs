@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use iai::formats::raw::{RawDecodeControl, RawImporter};
 use iai::formats::Importer;
+use iai::formats::raw::{RawDecodeControl, RawImporter};
 
 fn fnv1a(hash: &mut u64, words: &[u16]) {
     for &word in words {

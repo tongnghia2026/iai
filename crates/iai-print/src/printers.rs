@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::core::print::PrinterInfo;
+use iai_canvas::print::PrinterInfo;
 
 #[cfg(target_os = "windows")]
 mod winspool {
@@ -15,8 +15,9 @@ mod winspool {
         pub attributes: u32,
     }
 
+    #[allow(unsafe_code)] // Win32 functions declared for the unsafe calls below.
     #[link(name = "winspool")]
-    extern "system" {
+    unsafe extern "system" {
         pub fn EnumPrintersW(
             flags: u32,
             name: *const u16,
@@ -116,9 +117,9 @@ pub fn query_printer(name: &str) -> Result<PrinterInfo, String> {
 #[cfg(target_os = "windows")]
 pub fn query_printer_with_settings(
     name: &str,
-    settings: Option<&crate::core::print_gdi::PrinterSettings>,
+    settings: Option<&crate::print_gdi::PrinterSettings>,
 ) -> Result<PrinterInfo, String> {
-    let metrics = crate::core::print_gdi::printer_page_metrics_with_settings(name, settings)?;
+    let metrics = crate::print_gdi::printer_page_metrics_with_settings(name, settings)?;
     Ok(PrinterInfo {
         name: name.to_string(),
         is_default: false,
@@ -188,18 +189,18 @@ pub fn available_printers() -> Result<Vec<PrinterInfo>, String> {
 #[cfg(target_os = "windows")]
 pub fn open_printer_settings(
     printer: &str,
-    current: Option<&crate::core::print_gdi::PrinterSettings>,
+    current: Option<&crate::print_gdi::PrinterSettings>,
     owner_hwnd: isize,
-) -> Result<Option<crate::core::print_gdi::PrinterSettings>, String> {
-    crate::core::print_gdi::prompt_printer_settings(printer, current, owner_hwnd)
+) -> Result<Option<crate::print_gdi::PrinterSettings>, String> {
+    crate::print_gdi::prompt_printer_settings(printer, current, owner_hwnd)
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn open_printer_settings(
     _printer: &str,
-    _current: Option<&crate::core::print_gdi::PrinterSettings>,
+    _current: Option<&crate::print_gdi::PrinterSettings>,
     _owner_hwnd: isize,
-) -> Result<Option<crate::core::print_gdi::PrinterSettings>, String> {
+) -> Result<Option<crate::print_gdi::PrinterSettings>, String> {
     Err("Printer driver settings are only wired on Windows right now".to_string())
 }
 
@@ -220,7 +221,7 @@ pub fn send_to_printer_with_options(
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "shell32")]
-    extern "system" {
+    unsafe extern "system" {
         fn ShellExecuteW(
             hwnd: *mut core::ffi::c_void,
             op: *const u16,

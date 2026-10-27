@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use iai_engine::{CommandCall, Engine, ErrorCode, Policy, Source};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::learn::{generalize, Recorded};
+use super::learn::{Recorded, generalize};
 use super::*;
 use crate::gate::{Gate, Roots};
 use crate::host::{Host, LocalHost};
@@ -300,9 +300,11 @@ fn the_library_counts_a_job_again_learns_new_values_and_keeps_new_jobs_apart() {
         "{md}"
     );
     assert!(md.contains("| `size` | text | `3x4` |"), "{md}");
-    assert!(std::fs::read_to_string(dir.join("lich_su.md"))
-        .unwrap()
-        .contains("tạo"));
+    assert!(
+        std::fs::read_to_string(dir.join("lich_su.md"))
+            .unwrap()
+            .contains("tạo")
+    );
     assert_eq!(store.load(&name).unwrap().meta.status, Status::AutoSaved);
 
     // The same job on other folders: one more use, and these folders next time.
@@ -559,6 +561,83 @@ fn a_skill_runs_its_loop_over_the_folder_and_stops_and_goes_on_when_time_is_up()
     let e = Run::start(&store, &g, "hong", &params).err().unwrap();
     assert_eq!(e.code, ErrorCode::NotFound);
     assert!(e.message.contains("needs fixing"), "{}", e.message);
+}
+
+#[test]
+fn a_recipe_iai_carries_runs_as_a_saved_one_and_says_its_round() {
+    let (input, output, lib) = (
+        Dir::new("in-quick"),
+        Dir::new("out-quick"),
+        Dir::new("lib-quick"),
+    );
+    let mut host = host();
+    make_pngs(&mut host, &input);
+    let store = Store::new(&lib.0);
+    let g = gate(&input, &output);
+    let params =
+        json!({"vao": input.0.display().to_string(), "ra": output.0.display().to_string()});
+    let (mut run, plan) = Run::start_recipe(&store, &g, "lat-anh", flip_recipe(), &params).unwrap();
+    assert_eq!(plan["loops"][0]["files"], json!(2));
+    assert_eq!(run.rounds(), None);
+    // Little time each call (more when none was enough for a step): the
+    // loop's round is told as it goes.
+    let mut budget = std::time::Duration::from_micros(1);
+    let mut seen = Vec::new();
+    loop {
+        let before = run.calls;
+        let until = std::time::Instant::now() + budget;
+        match run.advance(&mut host, &g, &store, Some(until)) {
+            Ok(Progress::Done) => break,
+            Ok(Progress::Paused) => {}
+            Err(f) => panic!("{:?}", f.error),
+        }
+        budget = if run.calls == before {
+            budget * 2
+        } else {
+            std::time::Duration::from_micros(1)
+        };
+        seen.extend(run.rounds());
+    }
+    assert!(seen.contains(&(1, 2)) && seen.contains(&(2, 2)), "{seen:?}");
+    assert!(output.0.join("a_lat.png").is_file() && output.0.join("b_lat.png").is_file());
+    // Nothing was saved in the library.
+    assert!(store.list().is_empty());
+}
+
+#[test]
+fn a_skill_on_a_folder_is_offered_to_run_without_an_agent() {
+    let flip = flip_recipe();
+    assert!(flip.runs_on_a_folder());
+    let mut broken = flip.clone();
+    broken.meta.status = Status::NeedsFix;
+    assert!(!broken.runs_on_a_folder());
+    let mut tier2 = flip.clone();
+    tier2.meta.tier = 2;
+    assert!(!tier2.runs_on_a_folder());
+    // A single file to read, or a list, is an agent's to fill.
+    let mut one_file = flip.clone();
+    one_file.params.remove("vao");
+    one_file.params.insert(
+        "tep".to_string(),
+        Param {
+            kind: recipe::ParamKind::File,
+            ..Param::default()
+        },
+    );
+    assert!(!one_file.runs_on_a_folder());
+    let mut listed = flip.clone();
+    listed.params.insert(
+        "anh".to_string(),
+        Param {
+            kind: recipe::ParamKind::List,
+            ..Param::default()
+        },
+    );
+    assert!(!listed.runs_on_a_folder());
+    // Only a folder to write: nothing to work on.
+    let mut no_input = flip;
+    no_input.params.remove("vao");
+    assert!(!no_input.runs_on_a_folder());
 }
 
 #[test]

@@ -471,10 +471,11 @@ mod tests {
         assert_eq!(c.nodes.len(), 4);
         assert_eq!(c.nodes[0].anchor, Point::new(10.0, 20.0));
         assert_eq!(c.nodes[2].anchor, Point::new(50.0, 40.0));
-        assert!(c
-            .nodes
-            .iter()
-            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        assert!(
+            c.nodes
+                .iter()
+                .all(|n| n.in_handle.is_none() && n.out_handle.is_none())
+        );
     }
 
     #[test]
@@ -530,10 +531,11 @@ mod tests {
         let c = &p.contours[0];
         assert_eq!(c.nodes.len(), 8);
         // No handles anywhere → every segment is straight, including the cuts.
-        assert!(c
-            .nodes
-            .iter()
-            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        assert!(
+            c.nodes
+                .iter()
+                .all(|n| n.in_handle.is_none() && n.out_handle.is_none())
+        );
         // The top-left cut (segment 0: S_TL→E_TL) is the straight diagonal; its
         // midpoint sits off both edges, inside the box, near the corner.
         let (p0, p1, p2, p3) = c.segment(0).unwrap();
@@ -610,10 +612,11 @@ mod tests {
         let c = &p.contours[0];
         assert!(c.closed);
         assert_eq!(c.nodes.len(), 6);
-        assert!(c
-            .nodes
-            .iter()
-            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        assert!(
+            c.nodes
+                .iter()
+                .all(|n| n.in_handle.is_none() && n.out_handle.is_none())
+        );
         assert!((c.nodes[0].anchor.x - 50.0).abs() < 0.01 && c.nodes[0].anchor.y.abs() < 0.01);
     }
 

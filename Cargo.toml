@@ -1,7 +1,7 @@
 [package]
 name = "iai"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A high-performance, GPU-accelerated image editor written in Rust."
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/tongnghia2026/iai"
@@ -25,7 +25,7 @@ default = []
 # The Pro pack: the "AI" window (ID photos, garments, portrait retouch, print
 # sheets, Gemini / ChatGPT) and the key that opens it. A build without it
 # (`--no-default-features`) is the free core, whole.
-pro = ["raw-dll", "dep:ed25519-compact", "dep:socket2", "dep:tungstenite", "iai-imaging/pro", "iai-ai/pro"]
+pro = ["raw-dll", "dep:socket2", "dep:tungstenite", "iai-imaging/pro", "iai-ai/pro"]
 # The library that decodes camera RAW files (crates/iai-raw: rawloader and
 # rawler, both LGPL-2.1) is loaded at run time from iai_raw.dll beside the
 # exe instead of being linked into it, so that whoever has the app can put a
@@ -69,7 +69,6 @@ rfd = "0.15"
 egui = "0.34"
 egui-wgpu = "0.34"
 egui-winit = "0.34"
-arboard = "3.6.1"
 png = "0.17"
 tiff = "0.11"
 lcms2 = "6"
@@ -101,6 +100,7 @@ iai-vector = { path = "crates/iai-vector" }
 iai-history = { path = "crates/iai-history" }
 iai-doc = { path = "crates/iai-doc" }
 iai-platform = { path = "crates/iai-platform" }
+iai-print = { path = "crates/iai-print" }
 iai-raster = { path = "crates/iai-raster" }
 iai-color = { path = "crates/iai-color" }
 iai-geom = { path = "crates/iai-geom" }
@@ -138,9 +138,6 @@ rustc-demangle = "0.1"
 # Draws the bank-transfer QR code of "Ủng hộ tác giả" (src/core/vietqr.rs).
 # MIT, no dependencies of its own.
 qrcodegen = "1.8"
-# Checks the author's signature under a Pro key, and signs keys on his own
-# machine (src/pro/key.rs). MIT; `random` makes his signing key.
-ed25519-compact = { version = "2", default-features = false, features = ["std", "random"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # The Win32_System_Diagnostics_* / Threading / Memory / ProcessStatus / Kernel /

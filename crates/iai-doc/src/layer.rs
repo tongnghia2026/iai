@@ -765,11 +765,7 @@ impl LayerMask {
         let y = y.min(self.height - 1);
         let (r, _, _, _) = self.tiles.get_pixel(x, y);
         let v = r as f32 / 255.0;
-        if self.inverted {
-            1.0 - v
-        } else {
-            v
-        }
+        if self.inverted { 1.0 - v } else { v }
     }
 
     /// Resize the mask canvas keeping content at (0,0); new area is filled
@@ -870,7 +866,7 @@ impl LayerMask {
     /// (the group content is clipped to the canvas anyway), and tiles that end up
     /// fully transparent are dropped so the atlas isn't left with phantom tiles.
     pub fn bake_into_child_alpha(&self, layer: &mut Layer) {
-        use iai_raster::tile::{TilePos, TILE_SIZE};
+        use iai_raster::tile::{TILE_SIZE, TilePos};
         let (ox, oy) = layer.offset;
         let mw = self.width as i32;
         let mh = self.height as i32;
@@ -1287,12 +1283,10 @@ impl Layer {
                         }
 
                         let mut sa = opacity;
-                        if has_mask {
-                            if let Some(ref mask) = self.mask {
-                                let mx = (x as i32 - ox).max(0) as u32;
-                                let my = (y as i32 - oy).max(0) as u32;
-                                sa *= mask.sample(mx, my);
-                            }
+                        if has_mask && let Some(ref mask) = self.mask {
+                            let mx = (x as i32 - ox).max(0) as u32;
+                            let my = (y as i32 - oy).max(0) as u32;
+                            sa *= mask.sample(mx, my);
                         }
                         if sa < 0.001 {
                             continue;
@@ -1375,11 +1369,9 @@ impl Layer {
 
                             let src_alpha = sa8 as f32 / 255.0;
                             let mut sa = src_alpha * opacity;
-                            if has_mask {
-                                if let Some(ref mask) = self.mask {
-                                    let layer_px = (px as i32 - ox) as u32;
-                                    sa *= mask.sample(layer_px, layer_y);
-                                }
+                            if has_mask && let Some(ref mask) = self.mask {
+                                let layer_px = (px as i32 - ox) as u32;
+                                sa *= mask.sample(layer_px, layer_y);
                             }
                             if mode == BlendMode::Dissolve {
                                 let threshold = dissolve_threshold(px, y);
@@ -1445,12 +1437,10 @@ impl Layer {
                     for x in 0..dst_w {
                         let di = (x * 4) as usize;
                         let mut sa = opacity;
-                        if has_mask {
-                            if let Some(ref mask) = self.mask {
-                                let mx = (x as i32 - ox).max(0) as u32;
-                                let my = (y as i32 - oy).max(0) as u32;
-                                sa *= mask.sample(mx, my);
-                            }
+                        if has_mask && let Some(ref mask) = self.mask {
+                            let mx = (x as i32 - ox).max(0) as u32;
+                            let my = (y as i32 - oy).max(0) as u32;
+                            sa *= mask.sample(mx, my);
                         }
                         if sa < 0.001 {
                             continue;
@@ -1494,10 +1484,8 @@ impl Layer {
                     let lx = lx as u32;
                     let (sr16, sg16, sb16, sa16) = self.tiles.get_pixel16(lx, ly);
                     let mut sa = (sa16 as f32 / 65535.0) * opacity;
-                    if has_mask {
-                        if let Some(ref mask) = self.mask {
-                            sa *= mask.sample(lx, ly);
-                        }
+                    if has_mask && let Some(ref mask) = self.mask {
+                        sa *= mask.sample(lx, ly);
                     }
                     if mode == BlendMode::Dissolve {
                         let threshold = dissolve_threshold(x, y as u32);
@@ -2283,10 +2271,10 @@ impl LayerStack {
         // A clipped bottom keeps its managed clip mask: like Photoshop, the
         // merged layer stays in its clipping group.
         if bottom_clip.is_none() {
-            if let Some(mask) = bottom.mask.take() {
-                if mask.enabled {
-                    mask.apply_to_layer(bottom);
-                }
+            if let Some(mask) = bottom.mask.take()
+                && mask.enabled
+            {
+                mask.apply_to_layer(bottom);
             }
             bottom.mask_active = false;
             bottom.paint_target = PaintTarget::Pixels;
@@ -2740,13 +2728,14 @@ impl LayerStack {
 
         for i in 0..self.layers.len() {
             if self.layers[i].is_group() {
-                if eff[i] && Self::group_needs_isolation(&self.layers[i]) {
-                    if let Some(mut buf) = group_bufs.remove(&self.layers[i].id) {
-                        Self::bake_opacity_mask_region(&mut buf, cw, ch, cx, cy, &self.layers[i]);
-                        let mut synth = Layer::from_rgba(0, "", buf, cw, ch);
-                        synth.blend_mode = self.layers[i].blend_mode;
-                        synth.blend_onto_region(&mut out, cw, 0, 0, cw, ch);
-                    }
+                if eff[i]
+                    && Self::group_needs_isolation(&self.layers[i])
+                    && let Some(mut buf) = group_bufs.remove(&self.layers[i].id)
+                {
+                    Self::bake_opacity_mask_region(&mut buf, cw, ch, cx, cy, &self.layers[i]);
+                    let mut synth = Layer::from_rgba(0, "", buf, cw, ch);
+                    synth.blend_mode = self.layers[i].blend_mode;
+                    synth.blend_onto_region(&mut out, cw, 0, 0, cw, ch);
                 }
                 continue;
             }
@@ -3324,14 +3313,15 @@ impl LayerStack {
 
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.is_group() {
-                if self.is_effectively_visible(i) && Self::group_needs_isolation(layer) {
-                    if let Some(buf) = group_bufs.remove(&layer.id) {
-                        let mut synth = Layer::from_rgba(0, "", buf, width, height);
-                        synth.opacity = layer.opacity;
-                        synth.blend_mode = layer.blend_mode;
-                        synth.mask = layer.mask.clone();
-                        synth.blend_onto(&mut out, width);
-                    }
+                if self.is_effectively_visible(i)
+                    && Self::group_needs_isolation(layer)
+                    && let Some(buf) = group_bufs.remove(&layer.id)
+                {
+                    let mut synth = Layer::from_rgba(0, "", buf, width, height);
+                    synth.opacity = layer.opacity;
+                    synth.blend_mode = layer.blend_mode;
+                    synth.mask = layer.mask.clone();
+                    synth.blend_onto(&mut out, width);
                 }
                 continue;
             }
@@ -3634,14 +3624,13 @@ impl LayerStack {
                 }
                 continue;
             }
-            if let Some(pid) = layer.parent_id {
-                if self
+            if let Some(pid) = layer.parent_id
+                && self
                     .layers
                     .iter()
                     .any(|g| g.id == pid && g.is_group() && Self::group_needs_isolation(g))
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             if self.is_effectively_visible(i) {
                 let mut l = layer.clone();
@@ -3690,8 +3679,8 @@ impl LayerStack {
 #[cfg(test)]
 mod tests {
     use super::{
-        curve_is_identity, identity_curve, levels_eval, AdjustmentType, BlendMode, Layer,
-        LayerMask, LayerStack, LevelsParams,
+        AdjustmentType, BlendMode, Layer, LayerMask, LayerStack, LevelsParams, curve_is_identity,
+        identity_curve, levels_eval,
     };
     use iai_raster::tile::TileMap;
 

@@ -82,7 +82,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     ui.separator();
                 }
 
-                use crate::core::units::{format_value, from_pixels, Unit};
+                use crate::core::units::{Unit, format_value, from_pixels};
                 let size_text = if data.doc.canvas_unit == Unit::Pixels {
                     format!("{}x{} px", data.doc.canvas_w, data.doc.canvas_h)
                 } else {

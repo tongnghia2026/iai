@@ -108,8 +108,7 @@ mod tests {
 
     /// What the ACB app's own code for account 18278961 reads as (the image
     /// the app showed before it drew the code itself).
-    const FROM_THE_BANK: &str =
-        "00020101021138520010A000000727012201081827896100069704160208QRIBFTTA620053037045802VN63046B4F";
+    const FROM_THE_BANK: &str = "00020101021138520010A000000727012201081827896100069704160208QRIBFTTA620053037045802VN63046B4F";
 
     /// The fields of `text`, each with its id.
     fn fields(text: &str) -> Vec<(&str, &str)> {

@@ -349,10 +349,12 @@ mod tests {
             for rgb in VECTORS {
                 let lab = working_rgb_to_oklab(rgb, space);
                 let back = oklab_to_working_rgb(lab, space);
-                assert!([lab.l, lab.a, lab.b]
-                    .into_iter()
-                    .chain(back)
-                    .all(f32::is_finite));
+                assert!(
+                    [lab.l, lab.a, lab.b]
+                        .into_iter()
+                        .chain(back)
+                        .all(f32::is_finite)
+                );
                 let scale = rgb.into_iter().map(f32::abs).fold(1.0, f32::max);
                 for i in 0..3 {
                     assert!(

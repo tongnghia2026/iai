@@ -6,10 +6,11 @@
 # not counted.
 #
 # crate lint count
-iai clippy::expect_used 64
-iai clippy::undocumented_unsafe_blocks 48
-iai clippy::unreachable 4
-iai clippy::unwrap_used 18
+
+iai clippy::expect_used 61
+iai clippy::undocumented_unsafe_blocks 7
+iai clippy::unreachable 3
+iai clippy::unwrap_used 16
 iai-ai clippy::unwrap_used 3
 iai-canvas clippy::expect_used 1
 iai-canvas clippy::unwrap_used 4
@@ -27,6 +28,7 @@ iai-formats clippy::unreachable 1
 iai-gpu clippy::expect_used 2
 iai-gpu clippy::unwrap_used 6
 iai-platform clippy::undocumented_unsafe_blocks 1
+iai-print clippy::undocumented_unsafe_blocks 28
 iai-raster clippy::expect_used 1
 iai-raster clippy::unwrap_used 4
 iai-vector clippy::expect_used 3

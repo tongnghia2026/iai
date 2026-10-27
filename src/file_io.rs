@@ -83,6 +83,8 @@ pub enum FileDialogResult {
     PickedFolder(PathBuf),
     /// A folder of photos chosen in "Xếp ảnh in", to lay out on print sheets.
     PickedPrintFolder(PathBuf),
+    /// The folder of photos an errand ("Nhờ AI làm") is about.
+    PickedErrandFolder(PathBuf),
     /// A sponsor's logo chosen to send to the author.
     PickedSponsorLogo(PathBuf),
     /// Files selected for insertion into an existing multi-page PDF document.

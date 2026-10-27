@@ -19,9 +19,9 @@ use serde::Deserialize;
 
 use super::icc_camera::MAX_SCENE_CAMERA_ICC_BYTES;
 use super::resolver::{
-    camera_binding_matches, CameraIdentityRef, ManifestDcpCandidate, ProfileBlob, Sha256Digest,
-    TrustedSceneIccCandidate, MAX_IDENTITY_COMPONENT_BYTES, MAX_MANIFEST_ENTRY_ID_BYTES,
-    MAX_PROVENANCE_TEXT_BYTES,
+    CameraIdentityRef, MAX_IDENTITY_COMPONENT_BYTES, MAX_MANIFEST_ENTRY_ID_BYTES,
+    MAX_PROVENANCE_TEXT_BYTES, ManifestDcpCandidate, ProfileBlob, Sha256Digest,
+    TrustedSceneIccCandidate, camera_binding_matches,
 };
 
 /// The only manifest schema version this build understands.

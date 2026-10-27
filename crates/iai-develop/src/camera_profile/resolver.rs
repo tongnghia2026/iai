@@ -12,9 +12,9 @@ use unicode_normalization::UnicodeNormalization;
 use super::dcp::{self, DcpError, DcpProfile};
 use super::dcp_transform::{self, DcpCameraTransform, DcpTransformError};
 use super::icc_camera::{
-    SceneCameraIcc, SceneCameraIccError, SceneCameraIccMetadata, MAX_SCENE_CAMERA_ICC_BYTES,
+    MAX_SCENE_CAMERA_ICC_BYTES, SceneCameraIcc, SceneCameraIccError, SceneCameraIccMetadata,
 };
-use super::{resolve_decoder_matrix, RawDecoderBackend, ResolvedCameraProfile};
+use super::{RawDecoderBackend, ResolvedCameraProfile, resolve_decoder_matrix};
 
 /// Maximum number of candidates accepted in any non-explicit tier.
 pub const MAX_CANDIDATES_PER_TIER: usize = 8;
@@ -669,13 +669,13 @@ fn evaluate_dcp(
         }));
     }
     let digest = sha256(blob.bytes);
-    if let Some(expected) = expected_sha256 {
-        if digest != expected {
-            return Err(ProfileRejection::HashMismatch {
-                expected,
-                actual: digest,
-            });
-        }
+    if let Some(expected) = expected_sha256
+        && digest != expected
+    {
+        return Err(ProfileRejection::HashMismatch {
+            expected,
+            actual: digest,
+        });
     }
     let profile = dcp::parse(blob.bytes).map_err(ProfileRejection::DcpParse)?;
     validate_dcp_model(&profile, camera, model_policy)?;

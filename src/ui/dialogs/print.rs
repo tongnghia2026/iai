@@ -21,9 +21,13 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     let mut do_done = false;
     let mut do_cancel = esc_pressed;
     let print_layout = print_layout_for_selected_printer(data, layout);
-    let can_print = !data.print.print_refreshing
+    // A sheet still on its way does not hold up the next: it waits its turn.
+    // One that has waited long on its printer gives Print's place to Stop.
+    let waiting = !data.print.print_waiting_note.is_empty();
+    let pages = chosen_pages(ctx, data);
+    let can_print = pages.is_ok()
+        && !data.print.print_refreshing
         && !data.print.print_settings_open
-        && !data.print.print_sending
         && !data.print.print_printers.is_empty();
     let default_size = egui::vec2(980.0, 540.0);
     let screen = ctx.content_rect();
@@ -59,7 +63,6 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                     // A print that has outlived an ordinary one: Print gives
                     // way to the button that stops waiting for it, so another
                     // printer can be used while this one does not answer.
-                    let waiting = !data.print.print_waiting_note.is_empty();
                     if waiting {
                         if ui.button("  Dừng gửi  ").clicked() {
                             do_stop = true;
@@ -90,7 +93,7 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
             });
         });
 
-    if enter_pressed && can_print {
+    if enter_pressed && can_print && !waiting {
         do_print = true;
     }
     if changed {
@@ -98,7 +101,7 @@ pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     }
     if do_print {
         actions.print.set_print_layout = Some(print_layout_for_selected_printer(data, layout));
-        actions.print.print_send = true;
+        actions.print.print_send = pages.ok();
     }
     if do_stop {
         actions.print.print_stop = true;
@@ -431,6 +434,84 @@ pub(crate) fn print_printable_mode_label(
     }
 }
 
+/// Where the print range is kept between frames of the dialog.
+const PAGES_MODE: &str = "print_pages_mode";
+const PAGES_TEXT: &str = "print_pages_text";
+
+/// The pages the print range asks for: the page in front for a document of
+/// one page; otherwise what the "Trang in" group says. An error when the
+/// pages typed are not pages of the document.
+fn chosen_pages(ctx: &egui::Context, data: &UiData) -> Result<crate::ui::PrintPages, String> {
+    use crate::ui::PrintPages;
+    let count = data.doc.page_count;
+    if count <= 1 {
+        return Ok(PrintPages::Current);
+    }
+    let (mode, text) = ctx.data(|d| {
+        (
+            d.get_temp::<u8>(egui::Id::new(PAGES_MODE)).unwrap_or(0),
+            d.get_temp::<String>(egui::Id::new(PAGES_TEXT))
+                .unwrap_or_default(),
+        )
+    });
+    match mode {
+        1 => Ok(PrintPages::Pages((0..count).collect())),
+        2 => crate::ui::parse_pdf_page_range(&text, count).map(PrintPages::Pages),
+        _ => Ok(PrintPages::Current),
+    }
+}
+
+/// Corel's print range, for a document of several pages: the page in front,
+/// every page, or the pages typed ("1-3, 5").
+fn page_range_group(ui: &mut egui::Ui, data: &UiData) {
+    let count = data.doc.page_count;
+    if count <= 1 {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let (mode_id, text_id) = (egui::Id::new(PAGES_MODE), egui::Id::new(PAGES_TEXT));
+    let mut mode = ctx.data(|d| d.get_temp::<u8>(mode_id)).unwrap_or(0);
+    let mut text = ctx
+        .data(|d| d.get_temp::<String>(text_id))
+        .unwrap_or_default();
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("Trang in").strong());
+        ui.add_space(4.0);
+        ui.radio_value(
+            &mut mode,
+            0,
+            format!("Trang đang xem (trang {})", data.doc.active_artboard + 1),
+        );
+        ui.radio_value(&mut mode, 1, format!("Tất cả {count} trang"));
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut mode, 2, "Các trang:");
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut text)
+                    .hint_text("vd: 1-3, 5")
+                    .desired_width(150.0),
+            );
+            if edit.gained_focus() || edit.changed() {
+                mode = 2;
+            }
+        });
+        if mode == 2
+            && !text.trim().is_empty()
+            && let Err(why) = crate::ui::parse_pdf_page_range(&text, count)
+        {
+            ui.label(
+                egui::RichText::new(why)
+                    .color(egui::Color32::from_rgb(230, 120, 90))
+                    .size(10.0),
+            );
+        }
+    });
+    ui.add_space(6.0);
+    ctx.data_mut(|d| {
+        d.insert_temp(mode_id, mode);
+        d.insert_temp(text_id, text);
+    });
+}
+
 pub(crate) fn print_settings_panel(
     ui: &mut egui::Ui,
     data: &UiData,
@@ -442,6 +523,7 @@ pub(crate) fn print_settings_panel(
 
     ui.vertical(|ui| {
         ui.set_width(470.0);
+        page_range_group(ui, data);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("Printer Setup").strong());
             ui.add_space(6.0);
@@ -712,6 +794,60 @@ mod tests {
             .map(|(_, pos)| *pos + egui::vec2(4.0, 5.0))
     }
 
+    /// A tab of several pages prints the page in front, every page, or the
+    /// pages typed (Corel's print range); pages it does not have send nothing.
+    #[test]
+    fn a_document_of_several_pages_prints_the_pages_asked_for() {
+        use crate::ui::PrintPages;
+        let ctx = egui::Context::default();
+        let mut data = data_with_a_printer();
+        data.doc.page_count = 3;
+        data.doc.active_artboard = 1;
+        draw(&ctx, &data, vec![]);
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(place_of(&texts, "Trang đang xem (trang 2)").is_some());
+        let print = place_of(&texts, "  Print  ").expect("the Print button");
+        assert_eq!(
+            click(&ctx, &data, print).print.print_send,
+            Some(PrintPages::Current)
+        );
+
+        let all = place_of(&texts, "Tất cả 3 trang").expect("every page");
+        click(&ctx, &data, all);
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        let print = place_of(&texts, "  Print  ").unwrap();
+        assert_eq!(
+            click(&ctx, &data, print).print.print_send,
+            Some(PrintPages::Pages(vec![0, 1, 2]))
+        );
+
+        let typed = |text: &str| {
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new(PAGES_MODE), 2u8);
+                d.insert_temp(egui::Id::new(PAGES_TEXT), text.to_string());
+            });
+            let (_, texts) = draw(&ctx, &data, vec![]);
+            (
+                click(&ctx, &data, place_of(&texts, "  Print  ").unwrap())
+                    .print
+                    .print_send,
+                texts,
+            )
+        };
+        assert_eq!(typed("3, 1").0, Some(PrintPages::Pages(vec![0, 2])));
+        let (sent, texts) = typed("1-5");
+        assert_eq!(sent, None, "no page 5: nothing is sent");
+        assert!(
+            texts.iter().any(|(t, _)| t.contains('5')),
+            "the reason is said"
+        );
+
+        // A document of one page has no range to choose.
+        data.doc.page_count = 1;
+        let (_, texts) = draw(&ctx, &data, vec![]);
+        assert!(place_of(&texts, "Tất cả 1 trang").is_none());
+    }
+
     #[test]
     fn an_ordinary_print_leaves_the_print_button_and_offers_no_stop() {
         let ctx = egui::Context::default();
@@ -720,14 +856,15 @@ mod tests {
         let (_, texts) = draw(&ctx, &data, vec![]);
         let print = place_of(&texts, "  Print  ").expect("the Print button");
         assert!(place_of(&texts, "  Dừng gửi  ").is_none());
-        assert!(click(&ctx, &data, print).print.print_send);
+        assert!(click(&ctx, &data, print).print.print_send.is_some());
 
-        // On its way, still young: Print is there but off, and nothing to stop.
+        // On its way, still young: Print sends the next sheet (it waits its
+        // turn), and there is nothing to stop.
         data.print.print_sending = true;
         let (_, texts) = draw(&ctx, &data, vec![]);
         assert!(place_of(&texts, "  Dừng gửi  ").is_none());
         let asked = click(&ctx, &data, place_of(&texts, "  Print  ").unwrap());
-        assert!(!asked.print.print_send && !asked.print.print_stop);
+        assert!(asked.print.print_send.is_some() && !asked.print.print_stop);
     }
 
     #[test]
@@ -746,7 +883,7 @@ mod tests {
         let stop = place_of(&texts, "  Dừng gửi  ").expect("the stop button");
         let asked = click(&ctx, &data, stop);
         assert!(asked.print.print_stop);
-        assert!(!asked.print.print_send);
+        assert!(asked.print.print_send.is_none());
         assert_eq!(asked.print.show_print_dialog, None, "the dialog stays open");
 
         // Enter does not send a second print over the one that waits.
@@ -758,7 +895,7 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         let (asked, _) = draw(&ctx, &data, vec![enter]);
-        assert!(!asked.print.print_send && !asked.print.print_stop);
+        assert!(asked.print.print_send.is_none() && !asked.print.print_stop);
     }
 
     /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog waiting on a printer
@@ -776,6 +913,29 @@ mod tests {
         });
         image
             .save(std::path::Path::new(&dir).join("print_cho_may_in.png"))
+            .unwrap();
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the dialog of a tab of four
+    /// pages, pages typed, is drawn into `print_nhieu_trang.png` there.
+    #[test]
+    #[ignore]
+    fn probe_dialog_snapshot_of_a_print_range() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let mut data = data_with_a_printer();
+        data.doc.page_count = 4;
+        let image = crate::ui::snapshot::render(SCREEN.x, SCREEN.y, 1.0, None, |ctx| {
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new(PAGES_MODE), 2u8);
+                d.insert_temp(egui::Id::new(PAGES_TEXT), "1-2, 4".to_string());
+            });
+            let mut actions = UiActions::default();
+            print_dialog(ctx, &data, &mut actions);
+        });
+        image
+            .save(std::path::Path::new(&dir).join("print_nhieu_trang.png"))
             .unwrap();
     }
 }

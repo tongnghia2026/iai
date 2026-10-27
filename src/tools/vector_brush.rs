@@ -125,13 +125,13 @@ impl VectorBrushTool {
         let r = self.ratio(pressure);
         // Merge samples closer than the capture spacing (ratio already blended in
         // the model, but this keeps the vector small).
-        if let Some(&(last, _)) = self.samples.last() {
-            if last.distance_to(self.pen) < MIN_POINT_DIST {
-                if let Some(slot) = self.samples.last_mut() {
-                    slot.1 = 0.5 * (slot.1 + r);
-                }
-                return;
+        if let Some(&(last, _)) = self.samples.last()
+            && last.distance_to(self.pen) < MIN_POINT_DIST
+        {
+            if let Some(slot) = self.samples.last_mut() {
+                slot.1 = 0.5 * (slot.1 + r);
             }
+            return;
         }
         self.samples.push((self.pen, r));
     }

@@ -162,6 +162,56 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             actions.ai.open_ai_window = Some(super::ai_window::last_tab());
                         }
                     }
+
+                    // "Việc nhanh": a job iAi does by itself on a folder, no
+                    // AI; while it runs, the button says so.
+                    ui.add_space(6.0);
+                    let quick = &data.chrome.quick;
+                    let working = quick.run.as_ref().is_some_and(|r| r.running);
+                    let label = if working {
+                        format!("{}  Đang làm…", ph::LIGHTNING)
+                    } else {
+                        format!("{}  {}", ph::LIGHTNING, super::dialogs::QUICK_TITLE)
+                    };
+                    if ui
+                        .add(egui::Button::new(label).selected(quick.open))
+                        .on_hover_text("iAi tự làm việc trên cả thư mục ảnh, không cần AI")
+                        .clicked()
+                    {
+                        actions.chrome.quick = Some(if quick.open {
+                            crate::ui::QuickIntent::Close
+                        } else {
+                            crate::ui::QuickIntent::Open
+                        });
+                    }
+                    if working {
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    }
+
+                    // "Nhờ AI làm": a job for Gemini in Antigravity, done on
+                    // this window; while it runs, the button says so.
+                    ui.add_space(6.0);
+                    let errand = &data.chrome.errand;
+                    let running = errand.run.as_ref().is_some_and(|r| r.running);
+                    let label = if running {
+                        format!("{}  AI đang làm…", ph::SPARKLE)
+                    } else {
+                        format!("{}  {}", ph::SPARKLE, super::dialogs::ERRAND_TITLE)
+                    };
+                    if ui
+                        .add(egui::Button::new(label).selected(errand.open))
+                        .on_hover_text("Giao việc cho Gemini (Antigravity) làm ngay trên iAi")
+                        .clicked()
+                    {
+                        actions.chrome.errand = Some(if errand.open {
+                            crate::ui::ErrandIntent::Close
+                        } else {
+                            crate::ui::ErrandIntent::Open
+                        });
+                    }
+                    if running {
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    }
                 });
                 if data.chrome.is_tool_modal
                     && ui.input(|i| i.pointer.primary_clicked())
@@ -497,7 +547,10 @@ fn edit_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.doc.fill_foreground = true;
+        actions.run(
+            "edit.fill",
+            serde_json::json!({"color": crate::ui::color_hex(data.tool.brush_color)}),
+        );
         ui.close();
     }
     if ui
@@ -508,14 +561,20 @@ fn edit_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.doc.fill_background = true;
+        actions.run(
+            "edit.fill",
+            serde_json::json!({"color": crate::ui::color_hex(data.tool.bg_color)}),
+        );
         ui.close();
     }
     if ui
         .add(menu_item_enabled("Clear", "Delete", data.sel.has_selection))
         .clicked()
     {
-        actions.sel.clear_selection_pixels = true;
+        actions.run(
+            "edit.clear",
+            serde_json::json!({"background": crate::ui::color_hex(data.tool.bg_color)}),
+        );
         ui.close();
     }
     let pdf_base_selected = data.doc.pdf_nav.is_some()
@@ -597,6 +656,11 @@ fn edit_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 }
 
+/// A working profile as `image.profile` names it.
+fn profile_name(profile: crate::core::cms::WorkingProfile) -> serde_json::Value {
+    serde_json::to_value(iai_engine::cmds::mode::Profile::of(profile)).unwrap_or_default()
+}
+
 #[allow(deprecated)] // egui::SelectableLabel, in the Mode submenu
 fn image_menu(
     ui: &mut egui::Ui,
@@ -619,7 +683,7 @@ fn image_menu(
             .clicked()
         {
             if data.doc.is_cmyk {
-                actions.doc.convert_rgb_mode = true;
+                actions.run("image.mode", serde_json::json!({"color": "rgb"}));
             }
             ui.close();
         }
@@ -647,14 +711,14 @@ fn image_menu(
                 .selectable_label(data.doc.canvas_bit_depth == 8, "8 Bits/Channel")
                 .clicked()
             {
-                actions.doc.set_bit_depth = Some(false);
+                actions.run("image.mode", serde_json::json!({"bits": 8}));
                 ui.close();
             }
             if ui
                 .selectable_label(data.doc.canvas_bit_depth == 16, "16 Bits/Channel")
                 .clicked()
             {
-                actions.doc.set_bit_depth = Some(true);
+                actions.run("image.mode", serde_json::json!({"bits": 16}));
                 ui.close();
             }
         });
@@ -666,7 +730,7 @@ fn image_menu(
             )
             .clicked()
         {
-            actions.doc.convert_grayscale = true;
+            actions.run("image.grayscale", serde_json::json!({}));
             ui.close();
         }
     });
@@ -681,7 +745,10 @@ fn image_menu(
                 .add_enabled(data.doc.has_doc, egui::Button::new(wp.name()))
                 .clicked()
             {
-                actions.doc.assign_profile = Some(*wp);
+                actions.run(
+                    "image.profile",
+                    serde_json::json!({"action": "assign", "profile": profile_name(*wp)}),
+                );
                 ui.close();
             }
         }
@@ -696,7 +763,10 @@ fn image_menu(
                 .add_enabled(data.doc.has_doc, egui::Button::new(wp.name()))
                 .clicked()
             {
-                actions.doc.convert_profile = Some(*wp);
+                actions.run(
+                    "image.profile",
+                    serde_json::json!({"action": "convert", "profile": profile_name(*wp)}),
+                );
                 ui.close();
             }
         }
@@ -704,21 +774,21 @@ fn image_menu(
     ui.separator();
     ui.menu_button("Rotate Canvas", |ui| {
         if ui.button("90° Clockwise").clicked() {
-            actions.doc.rotate_cw = true;
+            actions.run("image.rotate", serde_json::json!({"angle": "90"}));
             ui.close();
         }
         if ui.button("90° Counter-Clockwise").clicked() {
-            actions.doc.rotate_ccw = true;
+            actions.run("image.rotate", serde_json::json!({"angle": "-90"}));
             ui.close();
         }
     });
     ui.menu_button("Flip Canvas", |ui| {
         if ui.button("Flip Horizontal").clicked() {
-            actions.doc.flip_horizontal = true;
+            actions.run("image.flip", serde_json::json!({"axis": "horizontal"}));
             ui.close();
         }
         if ui.button("Flip Vertical").clicked() {
-            actions.doc.flip_vertical = true;
+            actions.run("image.flip", serde_json::json!({"axis": "vertical"}));
             ui.close();
         }
     });
@@ -729,7 +799,7 @@ fn image_menu(
             .on_hover_text("Thêm một trang mới cạnh phải (mở rộng vùng làm việc)")
             .clicked()
         {
-            actions.doc.add_artboard = true;
+            actions.run("page.add", serde_json::json!({}));
             ui.close();
         }
         ui.separator();
@@ -739,7 +809,7 @@ fn image_menu(
         ui.menu_button("Bleed", |ui| {
             for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
                 if ui.add_enabled(en, egui::Button::new(label)).clicked() {
-                    actions.doc.set_page_bleed_mm = Some(mm);
+                    actions.run("page.setup", serde_json::json!({"bleedMm": mm}));
                     ui.close();
                 }
             }
@@ -747,7 +817,7 @@ fn image_menu(
         ui.menu_button("Lề an toàn", |ui| {
             for (label, mm) in [("Không", 0.0), ("3 mm", 3.0), ("5 mm", 5.0)] {
                 if ui.add_enabled(en, egui::Button::new(label)).clicked() {
-                    actions.doc.set_page_margin_mm = Some(mm);
+                    actions.run("page.setup", serde_json::json!({"marginMm": mm}));
                     ui.close();
                 }
             }
@@ -767,7 +837,12 @@ fn image_menu(
             .on_hover_text("Trang nền dùng chung hiện dưới mọi trang — sửa một lần, áp cho tất cả")
             .clicked()
         {
-            actions.doc.toggle_master_edit = true;
+            let op = if data.doc.editing_master {
+                "done"
+            } else {
+                "edit"
+            };
+            actions.run("page.master", serde_json::json!({"op": op}));
             ui.close();
         }
         if ui
@@ -777,7 +852,7 @@ fn image_menu(
             )
             .clicked()
         {
-            actions.doc.delete_master = true;
+            actions.run("page.master", serde_json::json!({"op": "delete"}));
             ui.close();
         }
     });
@@ -824,7 +899,10 @@ fn image_menu(
             ))
             .clicked()
         {
-            actions.dialogs.auto_levels = true;
+            actions.run(
+                "image.auto_levels",
+                super::dialogs::auto_levels_args(data.dialogs.adjustment_options),
+            );
             ui.close();
         }
         if ui
@@ -874,7 +952,10 @@ fn image_menu(
             ))
             .clicked()
         {
-            actions.dialogs.apply_direct_adjustment = Some(AdjustmentType::Desaturate);
+            actions.run(
+                "image.adjust",
+                serde_json::json!({"adjustment": {"kind": "desaturate"}}),
+            );
             ui.close();
         }
         if ui
@@ -885,7 +966,12 @@ fn image_menu(
             ))
             .clicked()
         {
-            actions.layers.invert_active = Some(data.layers.active_layer_idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                data.layers.active_layer_idx,
+                "layer.invert",
+                serde_json::json!({}),
+            );
             ui.close();
         }
         ui.separator();
@@ -958,7 +1044,7 @@ fn image_menu(
 
 fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui.button("New Layer").clicked() {
-        actions.layers.add_layer = true;
+        actions.run("layer.new", serde_json::json!({}));
         ui.close();
     }
     if ui
@@ -969,7 +1055,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.duplicate_layer = Some(data.layers.active_layer_idx);
+        actions.run_on_layer(
+            &data.layers.layer_ids,
+            data.layers.active_layer_idx,
+            "layer.duplicate",
+            serde_json::json!({"picked": true}),
+        );
         ui.close();
     }
     if ui
@@ -980,7 +1071,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.layer_via_copy = true;
+        actions.run("layer.via_copy", serde_json::json!({}));
         ui.close();
     }
     if ui
@@ -991,7 +1082,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.remove_layer = Some(data.layers.active_layer_idx);
+        actions.run_on_layer(
+            &data.layers.layer_ids,
+            data.layers.active_layer_idx,
+            "layer.delete",
+            serde_json::json!({"picked": true}),
+        );
         ui.close();
     }
     if ui
@@ -1005,7 +1101,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.rasterize_layer = Some(data.layers.active_layer_idx);
+        actions.run_on_layer(
+            &data.layers.layer_ids,
+            data.layers.active_layer_idx,
+            "layer.rasterize",
+            serde_json::json!({}),
+        );
         ui.close();
     }
     if ui
@@ -1019,7 +1120,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.convert_to_curves = Some(data.layers.active_layer_idx);
+        actions.run("vector.to_curves", serde_json::json!({}));
         ui.close();
     }
     {
@@ -1053,7 +1154,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     ("Simplify", BooleanOp::Exclude),
                 ] {
                     if ui.button(label).clicked() {
-                        actions.layers.boolean_op = Some(op);
+                        actions.run("vector.shaping", super::shaping_args(op));
                         ui.close();
                     }
                 }
@@ -1096,7 +1197,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 )
                 .clicked()
             {
-                actions.layers.powerclip_place = true;
+                actions.run("vector.powerclip", serde_json::json!({"op": "place"}));
                 ui.close();
             }
             if ui
@@ -1104,7 +1205,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                 .on_hover_text("Remove the clip: release the selected content")
                 .clicked()
             {
-                actions.layers.powerclip_release = true;
+                actions.run("vector.powerclip", serde_json::json!({"op": "extract"}));
                 ui.close();
             }
             // Edit the content in place (unclip → edit → re-clip).
@@ -1146,7 +1247,6 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             ui.separator();
             // Arrange the content inside its frame (Corel-style).
             // Enabled when a selected layer is PowerClip content.
-            use crate::app::powerclip_ops::PowerClipFit;
             let arrange_enabled = (0..data.layers.layer_count).any(|i| {
                 data.layers.layer_selected.get(i).copied().unwrap_or(false)
                     && data
@@ -1156,25 +1256,25 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                         .copied()
                         .unwrap_or(false)
             });
-            for (label, mode, hint) in [
+            for (label, op, hint) in [
                 (
                     "Center Content",
-                    PowerClipFit::Center,
+                    "center",
                     "Centre the content in the frame (no scaling)",
                 ),
                 (
                     "Fit Content",
-                    PowerClipFit::Fit,
+                    "fit",
                     "Scale the content to fit entirely inside the frame",
                 ),
                 (
                     "Fill Frame",
-                    PowerClipFit::Fill,
+                    "fill",
                     "Scale the content to cover the frame (overflow clipped)",
                 ),
                 (
                     "Stretch to Fill",
-                    PowerClipFit::Stretch,
+                    "stretch",
                     "Stretch the content to exactly fill the frame",
                 ),
             ] {
@@ -1183,7 +1283,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
                     .on_hover_text(hint)
                     .clicked()
                 {
-                    actions.layers.powerclip_arrange = Some(mode);
+                    actions.run("vector.powerclip", serde_json::json!({"op": op}));
                     ui.close();
                 }
             }
@@ -1201,7 +1301,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         )
         .clicked()
     {
-        actions.layers.toggle_clipping_mask = true;
+        actions.run("layer.clip", serde_json::json!({}));
         ui.close();
     }
     ui.separator();
@@ -1283,14 +1383,19 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     });
     ui.separator();
     if ui.add(menu_item("Group Layers", "Ctrl+G")).clicked() {
-        actions.layers.group_selected = true;
+        actions.run("layer.group", serde_json::json!({}));
         ui.close();
     }
     if ui
         .add(menu_item("Ungroup Layers", "Ctrl+Shift+G"))
         .clicked()
     {
-        actions.layers.ungroup = Some(data.layers.active_layer_idx);
+        actions.run_on_layer(
+            &data.layers.layer_ids,
+            data.layers.active_layer_idx,
+            "layer.ungroup",
+            serde_json::json!({}),
+        );
         ui.close();
     }
     ui.separator();
@@ -1302,7 +1407,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.merge_selected = true;
+        actions.run("layer.merge", serde_json::json!({"what": "picked"}));
         ui.close();
     }
     if ui
@@ -1313,25 +1418,35 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.merge_down = Some(data.layers.active_layer_idx);
+        actions.run("layer.merge_down", serde_json::json!({}));
         ui.close();
     }
     if ui.add(menu_item("Stamp Visible", "Ctrl+Shift+E")).clicked() {
-        actions.layers.merge_visible = true;
+        actions.run("layer.merge", serde_json::json!({"what": "visible"}));
         ui.close();
     }
     if ui.button("Merge All").clicked() {
-        actions.layers.merge_all = true;
+        actions.run("layer.flatten", serde_json::json!({}));
         ui.close();
     }
     ui.separator();
     ui.menu_button("Layer Mask", |ui| {
         if ui.button("Add Mask (Reveal All)").clicked() {
-            actions.layers.add_mask_white = Some(data.layers.active_layer_idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                data.layers.active_layer_idx,
+                "layer.mask",
+                serde_json::json!({"op": "reveal_all"}),
+            );
             ui.close();
         }
         if ui.button("Add Mask (Hide All)").clicked() {
-            actions.layers.add_mask_black = Some(data.layers.active_layer_idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                data.layers.active_layer_idx,
+                "layer.mask",
+                serde_json::json!({"op": "hide_all"}),
+            );
             ui.close();
         }
         if ui
@@ -1346,7 +1461,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             ))
             .clicked()
         {
-            actions.layers.apply_mask = Some(data.layers.active_layer_idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                data.layers.active_layer_idx,
+                "layer.mask",
+                serde_json::json!({"op": "apply"}),
+            );
             ui.close();
         }
         if ui
@@ -1361,7 +1481,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             ))
             .clicked()
         {
-            actions.layers.delete_mask = Some(data.layers.active_layer_idx);
+            actions.run_on_layer(
+                &data.layers.layer_ids,
+                data.layers.active_layer_idx,
+                "layer.mask",
+                serde_json::json!({"op": "delete"}),
+            );
             ui.close();
         }
     });
@@ -1409,7 +1534,7 @@ fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.layers.text_to_curves = Some(data.layers.active_layer_idx);
+        actions.run("vector.to_curves", serde_json::json!({}));
         ui.close();
     }
     ui.separator();
@@ -1428,7 +1553,7 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.sel.select_all = true;
+        actions.run("select.all", serde_json::json!({}));
         ui.close();
     }
     if ui
@@ -1439,7 +1564,7 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.sel.deselect = true;
+        actions.run("select.none", serde_json::json!({}));
         ui.close();
     }
     if ui
@@ -1450,7 +1575,7 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ))
         .clicked()
     {
-        actions.sel.invert_selection = true;
+        actions.run("select.invert", serde_json::json!({}));
         ui.close();
     }
     ui.separator();
@@ -2119,6 +2244,72 @@ mod tests {
         let image = bar.labels();
         assert!(image.iter().any(|label| label == "Develop..."), "{image:?}");
         assert!(!image.iter().any(|label| label.contains("retouch")));
+    }
+
+    /// Menu items that are engine commands ask for the command, with the
+    /// params an agent would give.
+    #[test]
+    fn menu_items_that_are_commands_ask_for_them() {
+        use serde_json::json;
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        data.sel.has_selection = true;
+        let asked = |path: &[&str], item: &str| -> Vec<(String, serde_json::Value)> {
+            let bar = Bar::new(&data);
+            for menu in path {
+                bar.click(menu);
+            }
+            bar.click(item)
+                .commands
+                .into_iter()
+                .map(|c| (c.command, c.args))
+                .collect()
+        };
+        let one = |id: &str, args: serde_json::Value| vec![(id.to_string(), args)];
+        assert_eq!(
+            asked(&["Image", "Rotate Canvas"], "90° Clockwise"),
+            one("image.rotate", json!({"angle": "90"}))
+        );
+        assert_eq!(
+            asked(&["Image", "Rotate Canvas"], "90° Counter-Clockwise"),
+            one("image.rotate", json!({"angle": "-90"}))
+        );
+        assert_eq!(
+            asked(&["Image", "Flip Canvas"], "Flip Vertical"),
+            one("image.flip", json!({"axis": "vertical"}))
+        );
+        assert_eq!(
+            asked(&["Image", "Mode"], "Grayscale"),
+            one("image.grayscale", json!({}))
+        );
+        assert_eq!(
+            asked(&["Image", "Adjustments"], "Desaturate"),
+            one(
+                "image.adjust",
+                json!({"adjustment": {"kind": "desaturate"}})
+            )
+        );
+        let auto = asked(&["Image", "Adjustments"], "Auto Levels");
+        assert_eq!(auto.len(), 1);
+        assert_eq!(auto[0].0, "image.auto_levels");
+        assert!(auto[0].1.get("clipPercent").is_some(), "{:?}", auto[0].1);
+        assert_eq!(asked(&["Layer"], "New Layer"), one("layer.new", json!({})));
+        assert_eq!(
+            asked(&["Layer"], "Merge All"),
+            one("layer.flatten", json!({}))
+        );
+        assert_eq!(
+            asked(&["Select"], "Select All"),
+            one("select.all", json!({}))
+        );
+        assert_eq!(
+            asked(&["Select"], "Deselect"),
+            one("select.none", json!({}))
+        );
+        assert_eq!(
+            asked(&["Select"], "Invert Selection"),
+            one("select.invert", json!({}))
+        );
     }
 
     #[cfg(feature = "pro")]

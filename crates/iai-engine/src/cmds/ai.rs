@@ -2,16 +2,16 @@
 //! would be behind it, fetch a model.
 
 use iai_ai::select_subject::{self, SelectSubjectModel};
-use iai_canvas::canvas::selection_output::{output_selection, SelectionOutput};
+use iai_canvas::canvas::selection_output::{SelectionOutput, output_selection};
 use iai_doc::selection::Selection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::common::{not_enabled, parse_color, Bounds};
+use super::common::{Bounds, not_enabled, parse_color};
 use crate::{
-    layer_index, Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job,
-    JobCtx, Plan, Session, Validate,
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, JobCtx, Plan,
+    Session, Validate, layer_index,
 };
 
 /// What the subject model found.

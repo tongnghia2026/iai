@@ -54,9 +54,11 @@ mod tests {
 
     #[test]
     fn palette_validation_rejects_empty_and_non_finite_entries() {
-        assert!(DocumentSwatch::new("", ColorValue::BLACK)
-            .validate()
-            .is_err());
+        assert!(
+            DocumentSwatch::new("", ColorValue::BLACK)
+                .validate()
+                .is_err()
+        );
         assert!(
             DocumentSwatch::new("Bad", ColorValue::rgb(f32::NAN, 0.0, 0.0))
                 .validate()

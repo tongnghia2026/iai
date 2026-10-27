@@ -75,10 +75,10 @@ impl SizePreset {
         if cfg!(test) {
             return;
         }
-        if let Some(path) = Self::presets_path(list) {
-            if let Ok(json) = serde_json::to_string_pretty(presets) {
-                let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
-            }
+        if let Some(path) = Self::presets_path(list)
+            && let Ok(json) = serde_json::to_string_pretty(presets)
+        {
+            let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
         }
     }
 
@@ -166,20 +166,19 @@ impl DevelopPreset {
     }
 
     pub fn save_all(presets: &[DevelopPreset]) {
-        if let Some(path) = Self::presets_path() {
-            if let Ok(json) = serde_json::to_string_pretty(presets) {
-                let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
-            }
+        if let Some(path) = Self::presets_path()
+            && let Ok(json) = serde_json::to_string_pretty(presets)
+        {
+            let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
         }
     }
 
     pub fn load_all() -> Vec<DevelopPreset> {
-        if let Some(path) = Self::presets_path() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(presets) = serde_json::from_str::<Vec<DevelopPreset>>(&content) {
-                    return presets;
-                }
-            }
+        if let Some(path) = Self::presets_path()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(presets) = serde_json::from_str::<Vec<DevelopPreset>>(&content)
+        {
+            return presets;
         }
         Vec::new()
     }
@@ -220,20 +219,19 @@ impl AdjustmentPresets {
     }
 
     pub fn save(&self) {
-        if let Some(path) = Self::presets_path() {
-            if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
-            }
+        if let Some(path) = Self::presets_path()
+            && let Ok(json) = serde_json::to_string_pretty(self)
+        {
+            let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
         }
     }
 
     pub fn load() -> Self {
-        if let Some(path) = Self::presets_path() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(presets) = serde_json::from_str::<AdjustmentPresets>(&content) {
-                    return presets;
-                }
-            }
+        if let Some(path) = Self::presets_path()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(presets) = serde_json::from_str::<AdjustmentPresets>(&content)
+        {
+            return presets;
         }
         Self::default()
     }

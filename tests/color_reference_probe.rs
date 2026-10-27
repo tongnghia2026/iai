@@ -18,10 +18,10 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use iai::core::color_reference::{
-    delta_e_2000, evaluate_colorchecker_linear, linear_srgb_to_lab_d50, ColorCheckerSummary,
-    ReferenceError,
+    ColorCheckerSummary, ReferenceError, delta_e_2000, evaluate_colorchecker_linear,
+    linear_srgb_to_lab_d50,
 };
-use iai::core::develop_scene::{render_default_look, SceneSource};
+use iai::core::develop_scene::{SceneSource, render_default_look};
 use iai::core::perceptual_color::linear_srgb_to_oklab;
 use iai::core::working_color::WorkingColorSpace;
 

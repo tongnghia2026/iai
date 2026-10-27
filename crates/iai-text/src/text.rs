@@ -11,13 +11,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
-use unicode_normalization::char::canonical_combining_class;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::canonical_combining_class;
 
 use iai_doc::model::text::normalized_family_key;
 
 pub use iai_doc::model::text::{
-    GlyphStyle, TextAlign, TextData, TextFontFamily, MAX_EDITABLE_FONT_PX, MIN_EDITABLE_FONT_PX,
+    GlyphStyle, MAX_EDITABLE_FONT_PX, MIN_EDITABLE_FONT_PX, TextAlign, TextData, TextFontFamily,
 };
 
 /// The font families installed on this machine, and the faces of one.
@@ -492,10 +492,10 @@ pub struct Rasterized {
 fn family_font(family: &TextFontFamily) -> Option<&'static FontVec> {
     let key = family.storage_name();
     let cache = FONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock() {
-        if let Some(font) = cache.get(&key).copied() {
-            return Some(font);
-        }
+    if let Ok(cache) = cache.lock()
+        && let Some(font) = cache.get(&key).copied()
+    {
+        return Some(font);
     }
 
     let bytes = font_bytes_for(family)?;
@@ -662,10 +662,10 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
             let glyph_font = font_for(&style.font_family).unwrap_or(base_font);
             let sf = glyph_font.as_scaled(PxScale::from(px));
             let id = sf.scaled_glyph(ch).id;
-            if let Some((p, prev_family)) = prev.as_ref() {
-                if prev_family == &style.font_family {
-                    pen += sf.kern(*p, id);
-                }
+            if let Some((p, prev_family)) = prev.as_ref()
+                && prev_family == &style.font_family
+            {
+                pen += sf.kern(*p, id);
             }
             let x_rel = pen;
             let adv = sf.h_advance(id);
@@ -1412,7 +1412,7 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
     use ab_glyph::OutlineCurve;
     use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
     use iai_geom::geometry::Point;
-    use iai_vector::vector::from_text::{glyph_contours, GlyphSegment};
+    use iai_vector::vector::from_text::{GlyphSegment, glyph_contours};
 
     let Some(base_font) = font_for(&td.font_family) else {
         return Vec::new();
@@ -1534,8 +1534,8 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
 #[cfg(test)]
 mod tests {
     use super::{
-        next_text_case, rasterize, rasterize_placed, text_case_of, transform_text_case, TextCase,
-        TextData, TextFontFamily,
+        TextCase, TextData, TextFontFamily, next_text_case, rasterize, rasterize_placed,
+        text_case_of, transform_text_case,
     };
 
     fn recase(s: &str, target: TextCase) -> String {

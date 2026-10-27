@@ -6,8 +6,8 @@
 //! IAI_PERF_IMAGE=<photo> cargo test --release --test detail_gpu_commit_probe \
 //!   -- --ignored --nocapture
 
-use iai::core::develop::{self, fast_preview_downsample, DevelopSettings, TONE_DOWNSAMPLE};
-use iai::core::develop_scene::{self, apply_scene_to_tilemap, SceneSource};
+use iai::core::develop::{self, DevelopSettings, TONE_DOWNSAMPLE, fast_preview_downsample};
+use iai::core::develop_scene::{self, SceneSource, apply_scene_to_tilemap};
 use iai::core::layer::{Layer, LayerStack};
 use iai::gpu::compositor::{
     ColorProxies, CompositorState, DevelopDetailGpu, DevelopGpuPreview, RegionLumaProxy,

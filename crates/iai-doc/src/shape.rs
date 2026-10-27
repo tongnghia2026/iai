@@ -618,11 +618,7 @@ impl ShapeData {
                         } else {
                             maxx = tx
                         }
-                        if top {
-                            miny = ty
-                        } else {
-                            maxy = ty
-                        }
+                        if top { miny = ty } else { maxy = ty }
                     }
                 } else if shift && (left || right) {
                     let new_h = (maxx - minx).abs() * orig_h / orig_w;
@@ -935,11 +931,7 @@ fn sdf_polygon(px: f32, py: f32, v: &[(f32, f32)]) -> f32 {
 
 fn stroke_pixel_phase(stroke_width: f32) -> f32 {
     let rounded = stroke_width.max(1.0).round() as i32;
-    if rounded & 1 == 0 {
-        0.0
-    } else {
-        0.5
-    }
+    if rounded & 1 == 0 { 0.0 } else { 0.5 }
 }
 
 fn snap_to_phase(v: f32, phase: f32) -> f32 {

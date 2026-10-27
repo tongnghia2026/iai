@@ -16,7 +16,7 @@
 //! `Selection`, UI or GPU.
 
 use crate::vector::path::{Contour, Node, NodeKind};
-use iai_geom::geometry::{cubic_bezier, Point};
+use iai_geom::geometry::{Point, cubic_bezier};
 
 /// One surviving (outside-the-region) run of an open contour.
 pub struct OpenPiece {

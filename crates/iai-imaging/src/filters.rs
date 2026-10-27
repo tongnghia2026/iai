@@ -727,7 +727,9 @@ mod tests {
             let ms_v = best_of(5, &mut || box_blur_v(&src, &mut dst, w, h, r));
             let d = digest(&mut dst.iter().flat_map(|v| v.to_bits().to_le_bytes()));
             let ms_h = best_of(5, &mut || box_blur_h(&src, &mut dst, w, h, r));
-            println!("box r={r:>3}: vertical {ms_v:>8.2} ms (digest {d:016x}), horizontal {ms_h:>8.2} ms");
+            println!(
+                "box r={r:>3}: vertical {ms_v:>8.2} ms (digest {d:016x}), horizontal {ms_h:>8.2} ms"
+            );
         }
         let img: Vec<u8> = src.iter().map(|v| (v * 255.0) as u8).collect();
         for sigma in [2.0f32, 15.0, 60.0] {

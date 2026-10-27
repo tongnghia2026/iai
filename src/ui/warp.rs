@@ -24,6 +24,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
 
     egui::Window::new("Warp")
         .id(egui::Id::new("warp_dialog"))
+        .order(crate::ui::dialogs::DIALOG_ORDER)
         .open(&mut open)
         .default_pos(egui::pos2(pos_x, 96.0))
         .default_width(PANEL_W)
@@ -175,4 +176,33 @@ fn draw_brush_ring(ctx: &egui::Context, data: &UiData, params: crate::core::warp
     );
     painter.circle_stroke(pos, r, egui::Stroke::new(1.0_f32, ring));
     painter.circle_filled(pos, 1.5, ring);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::dialogs::stage::Stage;
+
+    /// Ctrl+Shift+X over the floating panels: the Warp window is drawn above
+    /// them, not beneath (it was on a lower layer than every other window).
+    #[test]
+    fn the_warp_window_opens_above_the_floating_panels() {
+        let mut data = UiData::default();
+        data.dialogs.show_warp_dialog = true;
+        let stage = Stage::on(data, egui::vec2(1200.0, 900.0), |ctx, data, actions| {
+            egui::Window::new("Layers")
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .min_size(egui::vec2(1180.0, 880.0))
+                .show(ctx, |ui| ui.allocate_space(egui::vec2(1180.0, 880.0)));
+            build(ctx, data, actions);
+        });
+        let warp = egui::Id::new("warp_dialog");
+        let rect = stage
+            .ctx
+            .memory(|m| m.area_rect(warp))
+            .expect("the Warp window is shown");
+        let on_top = stage.ctx.layer_id_at(rect.center()).map(|l| l.id);
+        assert_eq!(on_top, Some(warp));
+    }
 }

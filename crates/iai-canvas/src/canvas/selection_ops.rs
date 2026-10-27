@@ -350,7 +350,7 @@ impl Canvas {
     /// Build (or reuse) the Lab + Sobel cache of the pixels Quick Select and
     /// the Refine Brush read. Returns `false` when there is nothing to sample.
     fn ensure_edge_cache(&mut self, sample_merged: bool) -> bool {
-        use iai_doc::selection::{compute_sobel, pixels_to_lab, EdgeCache};
+        use iai_doc::selection::{EdgeCache, compute_sobel, pixels_to_lab};
 
         let w = self.width;
         let h = self.height;

@@ -2,7 +2,6 @@
 //! filters, Smart Fill, AI panels, plus the New/preset/show_* dialog
 //! bookkeeping. Split out of actions.rs (phase 2).
 
-use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::ui::UiActions;
 
@@ -215,10 +214,11 @@ impl App {
             } else {
                 false
             };
-            if (proxy_changed || canvas_changed) && self.win.window.is_some() {
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+            if (proxy_changed || canvas_changed)
+                && self.win.window.is_some()
+                && let Some(w) = &self.win.window
+            {
+                w.request_redraw();
             }
         }
         if actions.dialogs.apply_filter_dialog {
@@ -274,11 +274,11 @@ impl App {
                 crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
             }
         }
-        if let Some(idx) = actions.develop.delete_develop_preset.take() {
-            if idx < self.shell.develop_presets.len() {
-                std::sync::Arc::make_mut(&mut self.shell.develop_presets).remove(idx);
-                crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
-            }
+        if let Some(idx) = actions.develop.delete_develop_preset.take()
+            && idx < self.shell.develop_presets.len()
+        {
+            std::sync::Arc::make_mut(&mut self.shell.develop_presets).remove(idx);
+            crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
         }
         if let Some(arm) = actions.develop.arm_develop_local.take() {
             self.shell.ui.develop_local_arm = Some(arm);
@@ -294,17 +294,12 @@ impl App {
                 w.request_redraw();
             }
         }
-        if let Some((idx, open)) = actions.develop.set_develop_section_open.take() {
-            if idx < crate::ui::develop::DEV_PANEL_SECTIONS
-                && self.dev.develop_sections_open[idx] != open
-            {
-                crate::ui::develop::set_section_open(
-                    &mut self.dev.develop_sections_open,
-                    idx,
-                    open,
-                );
-                crate::ui::develop::save_sections_open(&self.dev.develop_sections_open);
-            }
+        if let Some((idx, open)) = actions.develop.set_develop_section_open.take()
+            && idx < crate::ui::develop::DEV_PANEL_SECTIONS
+            && self.dev.develop_sections_open[idx] != open
+        {
+            crate::ui::develop::set_section_open(&mut self.dev.develop_sections_open, idx, open);
+            crate::ui::develop::save_sections_open(&self.dev.develop_sections_open);
         }
         if let Some(visible) = actions.develop.set_develop_scope_visibility.take() {
             let visible = visible & 0b111;
@@ -462,12 +457,51 @@ impl App {
         crate::ui::dialogs::shortcut_notice(&self.win.egui_ctx, notice);
     }
 
+    /// File ▸ New, as the command an agent runs: `bg` 0 white, 1 black, 2
+    /// clear. Whether the document was made.
+    #[allow(clippy::too_many_arguments)]
+    fn new_canvas(
+        &mut self,
+        name: &str,
+        w: u32,
+        h: u32,
+        dpi: f32,
+        bg: u8,
+        unit: crate::core::units::Unit,
+        cmyk: bool,
+    ) -> bool {
+        self.shell.canvas_unit = unit;
+        let background = match bg {
+            1 => "black",
+            2 => "transparent",
+            _ => "white",
+        };
+        let mut args = serde_json::json!({
+            "widthPx": w.max(1),
+            "heightPx": h.max(1),
+            "dpi": dpi.clamp(1.0, 9600.0),
+            "background": background,
+            "cmyk": cmyk,
+        });
+        let title: String = name.trim().chars().take(200).collect();
+        if let (false, Some(fields)) = (title.is_empty(), args.as_object_mut()) {
+            fields.insert("title".to_string(), title.into());
+        }
+        if self.run_with("file.new", args).is_err() {
+            return false;
+        }
+        if self.win.gpu.as_ref().is_some_and(|g| g.is_large_canvas) {
+            self.shell.status_msg =
+                format!("Canvas {w}×{h} — Viewport Streaming mode (canvas lớn, CPU composite)");
+        }
+        true
+    }
+
     pub(super) fn handle_misc_dialog_actions(&mut self, actions: &mut UiActions) {
         let created_new_canvas = if let Some((name, w, h, dpi, bg, unit, cmyk)) =
             actions.doc.new_canvas_confirmed.take()
         {
-            self.do_new_tab(name, w, h, dpi, bg, unit, cmyk);
-            true
+            self.new_canvas(&name, w, h, dpi, bg, unit, cmyk)
         } else {
             false
         };
@@ -610,10 +644,10 @@ impl App {
                 self.shell.ui.show_exit_dialog = true;
             }
         }
-        if let Some(v) = actions.dialogs.show_exit_dialog.take() {
-            if !v || !self.block_exit_if_active_operation() {
-                self.shell.ui.show_exit_dialog = v;
-            }
+        if let Some(v) = actions.dialogs.show_exit_dialog.take()
+            && (!v || !self.block_exit_if_active_operation())
+        {
+            self.shell.ui.show_exit_dialog = v;
         }
         if let Some(v) = actions.dialogs.show_close_dialog.take() {
             self.shell.ui.show_close_dialog = v;
@@ -645,9 +679,6 @@ impl App {
         if let Some(v) = actions.sel.show_stroke_dialog.take() {
             self.shell.ui.show_stroke_dialog = v;
         }
-        if let Some(params) = actions.sel.apply_stroke.take() {
-            self.edit.pending_stroke = Some(params);
-        }
         if let Some(v) = actions.sel.show_color_range_dialog.take() {
             if v {
                 self.open_color_range_dialog();
@@ -663,9 +694,6 @@ impl App {
         if let Some(f) = actions.sel.set_color_range_fuzziness.take() {
             self.shell.ui.color_range_fuzziness = f;
             self.rebuild_color_range_preview();
-        }
-        if std::mem::take(&mut actions.sel.apply_color_range) {
-            self.apply_color_range();
         }
 
         if let Some(true) = actions.doc.close_file_without_saving.take() {
@@ -967,56 +995,6 @@ impl App {
         }
         let img = egui::ColorImage::from_rgba_unmultiplied([pw as usize, ph as usize], &rgba);
         self.shell.ui.color_range_preview = Some(std::sync::Arc::new(img));
-    }
-
-    /// Apply the Color Range dialog's colour + fuzziness as a NEW selection over
-    /// the whole composited image (one undoable step), then close the dialog.
-    pub(crate) fn apply_color_range(&mut self) {
-        let idx = self.docs.active_doc_idx;
-        let (w, h) = {
-            let c = &self.docs.documents[idx].canvas;
-            (c.width, c.height)
-        };
-        if w == 0 || h == 0 {
-            self.shell.ui.show_color_range_dialog = false;
-            self.shell.ui.color_range_preview = None;
-            return;
-        }
-        self.docs.documents[idx].canvas.ensure_pixels();
-        let target = {
-            let c = self.shell.ui.color_range_color;
-            [c[0], c[1], c[2]]
-        };
-        let fuzz = self.shell.ui.color_range_fuzziness;
-        let mask = {
-            let pixels = &self.docs.documents[idx].canvas.pixels;
-            crate::core::selection::color_range_mask(pixels, w, h, target, fuzz)
-        };
-
-        {
-            let canvas = &mut self.docs.documents[idx].canvas;
-            if mask.len() == canvas.selection.mask.len() {
-                let mut cmd = crate::core::command::SelectionCommand::capture_before(
-                    "Color Range",
-                    &canvas.selection,
-                );
-                canvas
-                    .selection
-                    .apply_with_mode(mask, crate::core::selection::SelectionMode::New);
-                cmd.capture_after(&canvas.selection);
-                canvas.record_as(Box::new(cmd), crate::core::gateway::ChangeKind::Selection);
-            }
-        }
-
-        self.shell.ui.show_color_range_dialog = false;
-        self.shell.ui.color_range_preview = None;
-        self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        let selected = self.docs.documents[idx].canvas.selection.active;
-        self.shell.status_msg = if selected {
-            "Color Range: đã tạo vùng chọn theo màu".to_string()
-        } else {
-            "Color Range: không có điểm ảnh nào khớp màu".to_string()
-        };
     }
 }
 

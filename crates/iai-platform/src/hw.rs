@@ -167,7 +167,7 @@ fn total_ram_bytes() -> u64 {
         ull_avail_extended_virtual: u64,
     }
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
     }
     let mut status = MemoryStatusEx {
@@ -211,7 +211,7 @@ fn total_ram_bytes() -> u64 {
 
 #[cfg(target_os = "macos")]
 fn total_ram_bytes() -> u64 {
-    extern "C" {
+    unsafe extern "C" {
         fn sysctlbyname(
             name: *const std::ffi::c_char,
             oldp: *mut std::ffi::c_void,
@@ -261,7 +261,7 @@ pub fn opt_out_of_power_throttling() {
         const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
         const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentProcess() -> isize;
             fn SetProcessInformation(
                 process: isize,
@@ -295,7 +295,7 @@ pub fn lower_current_thread_priority() {
     {
         const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentThread() -> isize;
             fn SetThreadPriority(thread: isize, priority: i32) -> i32;
         }
@@ -313,7 +313,7 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
     {
         use std::os::windows::ffi::OsStrExt;
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetDiskFreeSpaceExW(
                 directory: *const u16,
                 free_to_caller: *mut u64,

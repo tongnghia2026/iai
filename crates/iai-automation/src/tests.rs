@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use iai_engine::{Engine, Policy, Source};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::gate::{Gate, Roots};
 use crate::host::LocalHost;
@@ -79,10 +79,12 @@ fn a_client_connects_and_lists_the_tools_it_may_use() {
     );
     assert_eq!(init["protocolVersion"], "2025-03-26");
     assert_eq!(init["serverInfo"]["name"], "iai");
-    assert!(init["instructions"]
-        .as_str()
-        .unwrap()
-        .contains("analyze.region"));
+    assert!(
+        init["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("analyze.region")
+    );
     let unknown = rpc(
         &mut server,
         "initialize",
@@ -164,9 +166,11 @@ fn an_agent_makes_a_page_checks_it_by_numbers_and_writes_a_pdf() {
 
     let pdf = tool(&mut server, "iai_export_pdf", json!({"path": "page.pdf"}));
     assert_eq!(pdf["result"]["pages"], json!(1));
-    assert!(std::fs::read(output.0.join("page.pdf"))
-        .unwrap()
-        .starts_with(b"%PDF"));
+    assert!(
+        std::fs::read(output.0.join("page.pdf"))
+            .unwrap()
+            .starts_with(b"%PDF")
+    );
 
     // Outside the folders: refused, nothing written.
     let e = tool_error(
@@ -205,10 +209,12 @@ fn an_agent_makes_a_page_checks_it_by_numbers_and_writes_a_pdf() {
         "resources/read",
         json!({"uri": format!("iai://doc/{doc}")}),
     );
-    assert!(res["contents"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("layers"));
+    assert!(
+        res["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("layers")
+    );
 }
 
 #[test]
@@ -248,19 +254,36 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
     assert_eq!(
         ids,
         [
+            "layer.align",
+            "layer.clip",
             "layer.delete",
+            "layer.distribute",
             "layer.duplicate",
             "layer.flatten",
+            "layer.from_background",
+            "layer.group",
+            "layer.invert",
             "layer.mask",
+            "layer.merge",
             "layer.merge_down",
             "layer.move",
             "layer.new",
             "layer.place",
+            "layer.rasterize",
             "layer.set",
+            "layer.step_copy",
+            "layer.transform",
+            "layer.ungroup",
             "layer.via_copy"
         ]
     );
-    assert!(list["commands"][0]["paramsSchema"]["properties"]["layer"].is_object());
+    let delete = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "layer.delete")
+        .unwrap();
+    assert!(delete["paramsSchema"]["properties"]["layer"].is_object());
 
     // Unknown job.
     let e = tool_error(&mut server, "iai_job_status", json!({"job": 77}));
@@ -388,10 +411,12 @@ fn an_agents_task_is_kept_as_a_skill_and_the_next_agent_runs_it_instead() {
             "initialize",
             json!({"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-code", "version": "2.1"}}),
         );
-        assert!(init["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("iai_task_begin"));
+        assert!(
+            init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("iai_task_begin")
+        );
         let begun = tool(&mut server, "iai_task_begin", json!({"request": request}));
         assert_eq!(begun["skills"], json!([]));
         // The agent works step by step.
@@ -515,4 +540,125 @@ fn an_agents_task_is_kept_as_a_skill_and_the_next_agent_runs_it_instead() {
     server.end_session();
     assert_eq!(store.load(name).unwrap().meta.uses, 2);
     assert_eq!(store.list().len(), 2);
+}
+
+/// The window as the agent's host: commands run on an engine of its own;
+/// what the agent tells it is kept, and it grants one folder.
+struct Window {
+    inner: LocalHost,
+    told: Vec<String>,
+    granted: PathBuf,
+}
+
+impl crate::host::Host for Window {
+    fn commands(&mut self) -> Result<Vec<iai_engine::CommandInfo>, iai_engine::CmdError> {
+        self.inner.commands()
+    }
+    fn execute(
+        &mut self,
+        call: iai_engine::CommandCall,
+    ) -> Result<iai_engine::Reply, iai_engine::CmdError> {
+        self.inner.execute(call)
+    }
+    fn batch(
+        &mut self,
+        calls: Vec<iai_engine::CommandCall>,
+        atomic: bool,
+    ) -> Result<iai_engine::BatchReply, iai_engine::CmdError> {
+        self.inner.batch(calls, atomic)
+    }
+    fn job(
+        &mut self,
+        job: iai_engine::JobId,
+        wait: std::time::Duration,
+    ) -> Result<Option<iai_engine::JobState>, iai_engine::CmdError> {
+        self.inner.job(job, wait)
+    }
+    fn cancel(&mut self, job: iai_engine::JobId) -> Result<bool, iai_engine::CmdError> {
+        self.inner.cancel(job)
+    }
+    fn task_begin(&mut self, request: &str) {
+        self.told.push(format!("begin {request}"));
+    }
+    fn task_end(&mut self, status: &str, title: &str) {
+        self.told.push(format!("end {status} {title}"));
+    }
+    fn grants(&mut self) -> crate::host::Grants {
+        crate::host::Grants {
+            read: Vec::new(),
+            write: vec![self.granted.clone()],
+        }
+    }
+}
+
+#[test]
+fn the_window_hears_of_the_task_and_the_folder_it_granted_opens_to_the_agent() {
+    use crate::host::Host;
+    use crate::skills::Store;
+
+    let (own, errand, other, lib) = (
+        Dir::new("w-own"),
+        Dir::new("w-errand"),
+        Dir::new("w-other"),
+        Dir::new("w-lib"),
+    );
+    let mut window = Window {
+        inner: host(),
+        told: Vec::new(),
+        granted: errand.0.clone(),
+    };
+    for dir in [&errand, &other] {
+        window
+            .inner
+            .execute(iai_engine::CommandCall::new(
+                "file.new",
+                json!({"widthPx": 12, "heightPx": 9}),
+            ))
+            .unwrap();
+        window
+            .inner
+            .execute(iai_engine::CommandCall::new(
+                "file.export",
+                json!({"path": dir.0.join("a.png").display().to_string()}),
+            ))
+            .unwrap();
+    }
+    {
+        let gate = Gate::new(Policy::agent(), Roots::new(&[], &[own.0.clone()]).unwrap());
+        let mut server = Server::new(&mut window, gate, "test")
+            .unwrap()
+            .with_skills(Store::new(&lib.0));
+        tool(
+            &mut server,
+            "iai_task_begin",
+            json!({"request": "In căn cước"}),
+        );
+        // The errand's folder, granted in the window, opens.
+        let path = errand.0.join("a.png").display().to_string();
+        let opened = tool(&mut server, "iai_file_open", json!({"path": path}));
+        assert!(opened["result"]["doc"].is_number(), "{opened}");
+        // A folder nobody granted stays shut.
+        let path = other.0.join("a.png").display().to_string();
+        let e = tool_error(&mut server, "iai_file_open", json!({"path": path}));
+        assert_eq!(e["code"], "permission_denied", "{e}");
+        tool(
+            &mut server,
+            "iai_task_end",
+            json!({"status": "failed", "title": "Căn cước"}),
+        );
+    }
+    assert_eq!(window.told, ["begin In căn cước", "end failed Căn cước"]);
+
+    // What an agent app is told to let run: every tool, the skill ones too.
+    let names = crate::mcp::tool_names(&host().commands().unwrap());
+    for name in [
+        "iai_file_open",
+        "iai_command_run",
+        "iai_task_begin",
+        "iai_skill_run",
+    ] {
+        assert!(names.iter().any(|n| n == name), "{name}");
+    }
+    let unique: std::collections::BTreeSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), names.len());
 }

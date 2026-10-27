@@ -1112,10 +1112,10 @@ pub(crate) fn pdf_import_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                         .hint_text("e.g. 1-3,5")
                         .desired_width(190.0),
                 );
-                if resp.changed() {
-                    if let Some(mask) = parse_page_ranges(&range_text, count) {
-                        selection = mask;
-                    }
+                if resp.changed()
+                    && let Some(mask) = parse_page_ranges(&range_text, count)
+                {
+                    selection = mask;
                 }
             });
 

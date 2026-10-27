@@ -211,10 +211,11 @@ fn rings_to_path(rings: Vec<Ring>) -> PathData {
 /// as cusps; on any failure (or a fit that would not reduce the node count) the
 /// raw sharp polygon is kept — the boolean *topology* is never affected.
 fn fit_ring_to_contour(r: Ring) -> Contour {
-    if let Some(contour) = crate::vector::fit::fit_closed_ring(&r, BOOL_FIT_TOL) {
-        if contour.nodes.len() >= 3 && contour.nodes.len() <= r.len() {
-            return contour;
-        }
+    if let Some(contour) = crate::vector::fit::fit_closed_ring(&r, BOOL_FIT_TOL)
+        && contour.nodes.len() >= 3
+        && contour.nodes.len() <= r.len()
+    {
+        return contour;
     }
     let nodes = r.into_iter().map(Node::sharp).collect();
     Contour::new(nodes, true)

@@ -264,8 +264,9 @@ mod platform {
 
     // K32GetProcessMemoryInfo is exported by kernel32 (Win7+), so no extra
     // import library or crate feature is required.
+    #[allow(unsafe_code)] // Win32 functions declared for the unsafe calls below.
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetCurrentProcess() -> isize;
         fn K32GetProcessMemoryInfo(
             process: isize,

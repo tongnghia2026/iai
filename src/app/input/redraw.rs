@@ -125,6 +125,8 @@ impl App {
         }
 
         self.poll_agent_link();
+        self.poll_errands();
+        self.poll_quick_tasks();
         self.poll_engine();
         self.poll_repair_ai();
         if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
@@ -189,8 +191,6 @@ impl App {
                 && !self.win.pending_view_change
                 && !self.win.interactive_recompose_pending
                 && self.edit.transform_state.is_none()
-                && self.edit.pending_fill.is_none()
-                && self.edit.pending_stroke.is_none()
                 && !self.dev.develop_gpu_preview_dirty
                 && self.shell.adjustment_preview_pending.is_none()
                 && !self.jobs.select_subject.is_busy()
@@ -285,16 +285,6 @@ impl App {
 
                 if self.docs.active().canvas.selection.active {
                     self.push_selection_uniforms();
-                }
-
-                if let Some(fill_color) = self.edit.pending_fill.take() {
-                    self.docs.active_mut().canvas.fill_solid_color(fill_color);
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
-                }
-
-                if let Some(stroke) = self.edit.pending_stroke.take() {
-                    self.docs.active_mut().canvas.stroke_selection(stroke);
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
                 }
 
                 self.flush_canvas();

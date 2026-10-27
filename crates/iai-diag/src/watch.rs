@@ -11,32 +11,31 @@
 //! and stack; the walk runs afterwards, on the copy. dbghelp never runs while
 //! a thread of the app is suspended, so nothing it does can leave one that way.
 
-use super::{date_of, index_line, time_of, Phase, CLEAN_END, MAGIC};
+use super::{CLEAN_END, MAGIC, Phase, date_of, index_line, time_of};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{c_void, OsString};
+use std::ffi::{OsString, c_void};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
-use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0,
+    CloseHandle, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LocalFree, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddrModeFlat, GetThreadContext, ReadProcessMemory, StackWalk64, SymCleanup, SymFromAddr,
+    ADDRESS64, AddrModeFlat, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_INTEGER_AMD64,
+    GetThreadContext, IMAGEHLP_LINE64, IMAGEHLP_MODULEW64, ReadProcessMemory, STACKFRAME64,
+    SYMBOL_INFO, SYMOPT_DEFERRED_LOADS, SYMOPT_FAIL_CRITICAL_ERRORS, SYMOPT_LOAD_LINES,
+    SYMOPT_NO_PROMPTS, SYMOPT_UNDNAME, StackWalk64, SymCleanup, SymFromAddr,
     SymFunctionTableAccess64, SymGetLineFromAddr64, SymGetModuleBase64, SymGetModuleInfoW64,
-    SymInitializeW, SymRefreshModuleList, SymSetOptions, ADDRESS64, CONTEXT, CONTEXT_CONTROL_AMD64,
-    CONTEXT_INTEGER_AMD64, IMAGEHLP_LINE64, IMAGEHLP_MODULEW64, STACKFRAME64, SYMBOL_INFO,
-    SYMOPT_DEFERRED_LOADS, SYMOPT_FAIL_CRITICAL_ERRORS, SYMOPT_LOAD_LINES, SYMOPT_NO_PROMPTS,
-    SYMOPT_UNDNAME,
+    SymInitializeW, SymRefreshModuleList, SymSetOptions,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
-use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION};
+use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQueryEx};
 use windows_sys::Win32::System::ProcessStatus::{
     K32GetModuleBaseNameW, K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     PROCESS_MEMORY_COUNTERS_EX,
@@ -46,13 +45,15 @@ use windows_sys::Win32::System::SystemInformation::{
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentThread, GetExitCodeProcess, GetProcessTimes, GetSystemTimes, GetThreadDescription,
-    OpenProcess, OpenThread, ResumeThread, SetThreadPriority, SuspendThread, WaitForSingleObject,
-    PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ, THREAD_GET_CONTEXT,
+    OpenProcess, OpenThread, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ,
+    ResumeThread, SetThreadPriority, SuspendThread, THREAD_GET_CONTEXT,
     THREAD_PRIORITY_ABOVE_NORMAL, THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumThreadWindows, SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_NULL,
+    EnumThreadWindows, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
 };
+use windows_sys::core::BOOL;
 
 /// A handler running this long is a stall worth sampling.
 const STALL: Duration = Duration::from_millis(45);
@@ -951,10 +952,10 @@ impl Watcher {
         for _ in 0..threads.len() {
             let thread = &threads[*next % threads.len()];
             *next = (*next + 1) % threads.len();
-            if let Some(pcs) = self.stack_of(thread.handle, OTHER_STACK_BYTES) {
-                if !pcs.is_empty() {
-                    round.push((thread.tid, pcs));
-                }
+            if let Some(pcs) = self.stack_of(thread.handle, OTHER_STACK_BYTES)
+                && !pcs.is_empty()
+            {
+                round.push((thread.tid, pcs));
             }
             if since.elapsed() >= budget {
                 break;
@@ -1102,14 +1103,13 @@ impl Watcher {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let line = index_line(at, kind, span, about, &session);
-        if let Some(root) = self.dir.parent() {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
+        if let Some(root) = self.dir.parent()
+            && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(root.join("INDEX.log"))
-            {
-                let _ = file.write_all(line.as_bytes());
-            }
+        {
+            let _ = file.write_all(line.as_bytes());
         }
     }
 
@@ -1486,10 +1486,9 @@ impl Watcher {
                     now.duration_since(last_stall_end) >= QUIET
                         || now.duration_since(open.began) >= INCIDENT_MAX
                 })
+                && let Some(done) = incident.take()
             {
-                if let Some(done) = incident.take() {
-                    self.close_incident(done, None);
-                }
+                self.close_incident(done, None);
             }
 
             if shared.exiting != 0 && !exit_hang_reported {

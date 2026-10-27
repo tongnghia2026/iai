@@ -10,7 +10,7 @@
 //! settings and moving a slider never wipes a stroke.
 
 use super::smart_brush::{self, LabColours};
-use iai_doc::selection::{refine_edge_stamp, EdgeCache, RefineBrushMode, Selection};
+use iai_doc::selection::{EdgeCache, RefineBrushMode, Selection, refine_edge_stamp};
 pub use iai_raster::box_filter::box_blur;
 use iai_raster::box_filter::{box_cols, box_rows};
 use rayon::prelude::*;

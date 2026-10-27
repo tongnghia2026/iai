@@ -110,16 +110,9 @@ pub struct DocumentIntent {
     pub zoom_in: bool,
     pub zoom_out: bool,
     pub zoom_100: bool,
-    pub flip_horizontal: bool,
-    pub flip_vertical: bool,
-    pub rotate_cw: bool,
-    pub rotate_ccw: bool,
     pub copy: bool,
     pub cut: bool,
     pub paste: bool,
-    /// Edit → Fill: flood the active selection (or whole layer) with the foreground color.
-    pub fill_foreground: bool,
-    pub fill_background: bool,
     pub new_canvas: bool,
     pub open_file: bool,
     /// Welcome screen: open this recent file (Track B library).
@@ -137,8 +130,6 @@ pub struct DocumentIntent {
     pub undo: bool,
     pub redo: bool,
     pub jump_history: Option<usize>,
-    pub canvas_resize: Option<(u32, u32, i32, i32)>,
-    pub image_resize: Option<(u32, u32, f32)>,
     /// "Xếp ảnh in": lay the active photo out on a print sheet.
     #[cfg(feature = "pro")]
     pub impose_sheet: Option<(
@@ -154,14 +145,6 @@ pub struct DocumentIntent {
         crate::core::imposition::SheetOptions,
     )>,
     pub set_canvas_unit: Option<Unit>,
-    /// Page ▸ Bleed: set the default page bleed of the active document, in mm
-    /// (one undoable step). Drawn by the artboard sheet overlay.
-    pub set_page_bleed_mm: Option<f32>,
-    /// Page ▸ Safe margin: set the default page safe-margin, in mm.
-    pub set_page_margin_mm: Option<f32>,
-    /// Page ▸ Add Artboard: append a new artboard (same size as the last) to the
-    /// right, growing the canvas — one undoable step.
-    pub add_artboard: bool,
     /// Page-tab bar: focus this artboard index (frame it in the view).
     pub set_active_artboard: Option<usize>,
     /// Page-tab context menu: open the rename dialog for this page index.
@@ -170,20 +153,14 @@ pub struct DocumentIntent {
     pub page_rename_text: Option<String>,
     pub page_rename_commit: bool,
     pub page_rename_cancel: bool,
-    /// Page-tab context menu / drag: reorder page `from` to position `to`.
+    /// An opened PDF's page bar: reorder page `from` to position `to`. (A
+    /// document's own pages run `page.move` / `page.delete`.)
     pub move_page: Option<(usize, usize)>,
-    /// Page-tab context menu: delete this page index (keeps at least one page).
+    /// An opened PDF's page bar: delete this page (keeps at least one).
     pub delete_page: Option<usize>,
     /// PDF page manager: insert at an ordinal boundary in `0..=page_count`.
     pub insert_pdf_blank: Option<usize>,
     pub insert_pdf_files: Option<usize>,
-    /// Page ▸ Master: create the shared master page (if none) and check it out for
-    /// editing; when already editing, finish and return to the active page.
-    pub toggle_master_edit: bool,
-    /// Page ▸ Master: delete the shared master page.
-    pub delete_master: bool,
-    /// Page-tab context menu: set whether page `index` shows the master beneath it.
-    pub set_page_use_master: Option<(usize, bool)>,
     /// Unified "Xuất PDF" dialog: open it / edit its controls / run the export.
     pub show_pdf_export_dialog: Option<bool>,
     pub set_pdf_export_scope: Option<PdfExportScope>,
@@ -207,7 +184,6 @@ pub struct DocumentIntent {
     /// New canvas: `(name, w, h, dpi, background, unit, cmyk)`. `cmyk` starts the
     /// document in CMYK (Generic naive) instead of RGB.
     pub new_canvas_confirmed: Option<(String, u32, u32, f32, u8, Unit, bool)>,
-    pub rename_confirmed: Option<(usize, String)>,
     pub export_confirmed: Option<(ExportFormat, String)>,
     /// Request the Save dialog (rfd) to pick an export path. MUST be handled in
     /// apply_ui_actions (outside the egui frame) — calling rfd in-frame deadlocks.
@@ -220,13 +196,6 @@ pub struct DocumentIntent {
     pub set_export_output_sharpen: Option<u8>,
     /// PDF export press marks (crop / registration / bleed).
     pub set_export_pdf_marks: Option<crate::core::print::PrintMarks>,
-    /// Image ▸ Assign Profile: re-interpret the document as this profile and bake
-    /// into the sRGB working space.
-    pub assign_profile: Option<crate::core::cms::WorkingProfile>,
-    /// Image ▸ Color Profile ▸ Convert to Profile: transform pixels into this profile.
-    pub convert_profile: Option<crate::core::cms::WorkingProfile>,
-    /// Image ▸ Mode ▸ Grayscale: desaturate the whole document to luminance.
-    pub convert_grayscale: bool,
     /// Image ▸ Mode ▸ CMYK Color…: open/close the convert dialog.
     pub show_cmyk_convert_dialog: Option<bool>,
     /// CMYK convert dialog: browse for a `.icc` (deferred rfd pick).
@@ -235,11 +204,6 @@ pub struct DocumentIntent {
     pub set_cmyk_convert_use_icc: Option<bool>,
     /// CMYK convert dialog OK: run the conversion with the dialog's choice.
     pub convert_cmyk: bool,
-    /// Image ▸ Mode ▸ RGB Color (only meaningful on a CMYK document): drop the
-    /// ink planes and return to RGB editing.
-    pub convert_rgb_mode: bool,
-    /// Image ▸ Mode: set bit depth (true = 16 bits/channel, false = 8).
-    pub set_bit_depth: Option<bool>,
     pub new_w_input: Option<f32>,
     pub new_h_input: Option<f32>,
     pub new_dpi: Option<f32>,
@@ -257,73 +221,21 @@ pub struct DocumentIntent {
 /// Layer panel commands.
 #[derive(Default, PartialEq)]
 pub struct LayerIntent {
-    pub align_layers: Option<LayerAlign>,
-    pub distribute_layers: Option<LayerDistribute>,
     pub duplicate_selected_step: bool,
     pub repeat_duplicate_step: bool,
-    pub add_layer: bool,
     pub add_adjustment_layer: Option<AdjustmentType>,
-    pub duplicate_layer: Option<usize>,
-    pub layer_via_copy: bool,
-    pub remove_layer: Option<usize>,
-    /// Bake a vector Path layer (this index) down to a plain raster layer.
-    pub rasterize_layer: Option<usize>,
-    /// Convert the Shape layer (this index) into an editable vector Path layer.
-    pub convert_to_curves: Option<usize>,
-    /// Convert the Text layer (this index) into editable vector Path layer(s).
-    pub text_to_curves: Option<usize>,
-    /// Weld/Trim/Intersect/Simplify the selected vector layers.
-    pub boolean_op: Option<crate::core::vector::boolean::BooleanOp>,
-    /// PowerClip: place the selected content inside the selected vector frame.
-    pub powerclip_place: bool,
-    /// PowerClip: extract the selected content from its frame.
-    pub powerclip_release: bool,
-    /// PowerClip: position / scale the selected content inside its frame
-    /// (Center / Fit / Fill / Stretch).
-    pub powerclip_arrange: Option<crate::app::powerclip_ops::PowerClipFit>,
     /// PowerClip: toggle editing the frame's contents in place (unclip / re-clip).
     pub powerclip_edit_contents: bool,
     /// PowerClip: cancel editing contents — revert the session's edits and re-clip.
     pub powerclip_cancel_editing: bool,
-    /// Clipping mask (Ctrl+Alt+G): clip the active layer to the one below, or
-    /// release it. Photoshop-style; shares the PowerClip clip engine.
-    pub toggle_clipping_mask: bool,
     pub select_layer: Option<(usize, bool, bool)>,
-    /// Ctrl+click a layer's thumbnail → load that layer's alpha as a selection.
-    pub load_layer_selection: Option<usize>,
-    pub toggle_visible: Option<usize>,
-    pub toggle_lock: Option<usize>,
-    pub toggle_lock_alpha: Option<usize>,
-    pub unlock_background_layer: Option<usize>,
     pub set_opacity: Option<(usize, f32)>,
     /// True on the frame the user RELEASES the mouse (or types a value) on the opacity
     /// slider → push a single undo entry for the whole drag, not one per frame.
     pub set_opacity_commit: bool,
-    pub set_blend_mode: Option<(usize, BlendMode)>,
-    pub move_layer_up: Option<usize>,
-    pub move_layer_down: Option<usize>,
     pub move_layer_to: Option<(usize, usize)>,
-    pub merge_down: Option<usize>,
-    pub merge_selected: bool,
-    pub merge_all: bool,
-    /// Merge a folder (header at this index) into one raster layer.
-    pub merge_group: Option<usize>,
-    /// Merge Visible (Ctrl+Shift+E): flatten eye-on layers into one.
-    pub merge_visible: bool,
-    /// Group the selected (or active) layers into a new folder (Ctrl+G).
-    pub group_selected: bool,
-    /// Ungroup the folder at this index (Ctrl+Shift+G when active is a group).
-    pub ungroup: Option<usize>,
     /// Toggle a group folder's expanded/collapsed state (panel triangle).
     pub toggle_group_expanded: Option<usize>,
-    pub add_mask_white: Option<usize>,
-    pub add_mask_black: Option<usize>,
-    pub delete_mask: Option<usize>,
-    pub apply_mask: Option<usize>,
-    pub toggle_mask_enabled: Option<usize>,
-    pub toggle_mask_link: Option<usize>,
-    /// Invert (Ctrl+I): the mask if editing a mask, otherwise the layer's pixels.
-    pub invert_active: Option<usize>,
     pub set_paint_target: Option<(usize, PaintTarget)>,
 }
 /// Tool selection, options-bar edits, transform/crop/text session commands.
@@ -545,7 +457,6 @@ pub enum PdfBatchOperation {
 
 #[derive(Default, PartialEq)]
 pub struct SelectionIntent {
-    pub clear_selection_pixels: bool,
     /// Multi-page PDF: open the page-count dialog for the current rectangular
     /// clear operation without materializing each page in memory.
     pub clear_selection_all_pdf_pages: bool,
@@ -561,21 +472,10 @@ pub struct SelectionIntent {
     pub cancel_pdf_batch: bool,
     pub undo_pdf_global_clear: bool,
     pub redo_pdf_global_clear: bool,
-    /// Select menu actions (functionality already exists via keyboard shortcuts).
-    pub select_all: bool,
-    pub deselect: bool,
-    pub invert_selection: bool,
     pub show_feather_dialog: Option<bool>,
     /// Open (Some(true)) / close (Some(false)) the Stroke Selection dialog.
     pub show_stroke_dialog: Option<bool>,
-    /// Apply a stroke to the active selection with these params.
-    pub apply_stroke: Option<StrokeParams>,
     pub set_selection_mode: Option<crate::core::selection::SelectionMode>,
-    pub selection_feather: Option<f32>,
-    pub selection_grow: Option<u32>,
-    pub selection_shrink: Option<u32>,
-    pub selection_smooth: Option<f32>,
-    pub selection_border: Option<u32>,
     /// Select ▸ Modify: open the shared modify dialog for this operation.
     pub open_modify_dialog: Option<SelectionModifyKind>,
     /// Close the Select ▸ Modify dialog.
@@ -586,8 +486,6 @@ pub struct SelectionIntent {
     pub set_color_range_color: Option<[u8; 4]>,
     /// Color Range dialog: set the fuzziness (0..=200).
     pub set_color_range_fuzziness: Option<u8>,
-    /// Color Range dialog: apply the current colour + fuzziness as a selection.
-    pub apply_color_range: bool,
     pub trigger_select_subject: bool,
     pub open_refine_panel: bool,
     /// New Refine Selection slider settings (rendered live when quick).
@@ -649,6 +547,16 @@ pub struct DevelopIntent {
     /// "Auto" clicked: fit Exposure to the fixed target brightness (D4 v1).
     pub develop_auto: bool,
 }
+/// The pages Print sends, as Corel's print range has them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PrintPages {
+    /// The page in front.
+    #[default]
+    Current,
+    /// These pages, 0 being the first, in order.
+    Pages(Vec<usize>),
+}
+
 /// Print/proof commands.
 #[derive(Default, PartialEq)]
 pub struct PrintIntent {
@@ -682,8 +590,8 @@ pub struct PrintIntent {
     pub export_cmyk_separations: bool,
     /// File ▸ Export ▸ SVG (Vector)… — write the document as an SVG.
     pub export_svg: bool,
-    /// Print dialog: send the current page to the default printer.
-    pub print_send: bool,
+    /// Print dialog: send these pages to the printer chosen.
+    pub print_send: Option<PrintPages>,
     /// Print dialog: stop waiting for the print on its way.
     pub print_stop: bool,
     /// Print dialog: save the print-ready PDF (deferred rfd save).
@@ -767,8 +675,6 @@ pub struct DialogIntent {
     /// (so the app can shrink the brush ring cursor to a small circle there).
     pub paint_dialog_hovered: bool,
     pub open_adjustment_dialog: Option<AdjustmentType>,
-    pub apply_direct_adjustment: Option<AdjustmentType>,
-    pub auto_levels: bool,
     /// Double-click an adjustment layer (idx) → open the params editor.
     pub edit_adjustment_layer: Option<usize>,
     pub set_adjustment_dialog: Option<AdjustmentType>,
@@ -944,6 +850,10 @@ pub struct ChromeIntent {
     pub open_skills_folder: bool,
     /// Take this skill out of the library (it is kept aside, not deleted).
     pub remove_skill: Option<String>,
+    /// "Nhờ AI làm": what the person did in its window.
+    pub errand: Option<ErrandIntent>,
+    /// "Việc nhanh": what the person did in its window.
+    pub quick: Option<QuickIntent>,
     pub cursor_left: bool,
     pub cursor_entered: bool,
     pub window_minimize: bool,
@@ -953,6 +863,41 @@ pub struct ChromeIntent {
     /// `None` leaves the legacy cosmic-text editor as the visible implementation.
     pub document_webview_rect: Option<egui::Rect>,
 }
+/// What the person does in "Nhờ AI làm".
+#[derive(Clone, Debug, PartialEq)]
+pub enum ErrandIntent {
+    Open,
+    /// Open with this job chosen.
+    OpenFor(crate::ui::ErrandJob),
+    Close,
+    /// Set Antigravity up to take errands from iAi.
+    Connect,
+    /// Choose the folder of photos.
+    PickFolder,
+    /// Send this job, on the folder chosen, to Gemini.
+    Send(crate::ui::ErrandForm),
+    /// Stop the agent: its next calls are refused.
+    Stop,
+    /// Show the results' folder.
+    OpenResults,
+}
+
+/// What the person does in "Việc nhanh".
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuickIntent {
+    Open,
+    /// Open with this job chosen.
+    OpenFor(crate::ui::QuickTask),
+    Close,
+    /// Choose the folder of photos.
+    PickFolder,
+    /// Do this job on the folder chosen.
+    Start(crate::ui::QuickForm),
+    Stop,
+    /// Show the results' folder.
+    OpenResults,
+}
+
 /// How a Library grid click changes the selection.
 #[derive(Clone, Copy, PartialEq)]
 pub enum LibrarySelect {
@@ -987,14 +932,6 @@ pub struct LibraryIntent {
 pub struct ChannelsIntent {
     /// Channels panel row click: target view + additive (Ctrl/Shift held).
     pub select_channel_row: Option<(crate::core::channels::ChannelView, bool)>,
-    /// Channels panel alpha ops (all undoable except load-as-selection,
-    /// which pushes a SelectionCommand).
-    pub save_selection_as_channel: bool,
-    pub load_channel_as_selection: Option<(usize, crate::core::selection::MaskCombine)>,
-    pub new_alpha_channel: bool,
-    pub delete_alpha_channel: Option<usize>,
-    pub rename_alpha_channel: Option<(usize, String)>,
-    pub duplicate_alpha_channel: Option<usize>,
 }
 /// A tab of the "AI" window (see `ui/ai_window.rs`).
 #[derive(
@@ -1048,6 +985,9 @@ pub struct SettingsIntent {
 
 #[derive(Default)]
 pub struct UiActions {
+    /// Engine commands to run, in order: what the menus and panels ask that
+    /// is a command, run as an agent's is (`App::execute_command`).
+    pub commands: Vec<iai_engine::CommandCall>,
     /// File/document commands: open/save/export, undo/redo, resize, tabs,
     pub doc: DocumentIntent,
     /// Layer panel commands.
@@ -1073,6 +1013,46 @@ pub struct UiActions {
     pub ai: AiIntent,
     /// Preferences edits, applied + persisted by the app.
     pub settings: SettingsIntent,
+}
+
+/// A colour as the commands take it: "#RRGGBBAA".
+pub fn color_hex(c: [u8; 4]) -> String {
+    format!("#{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3])
+}
+
+impl UiActions {
+    /// Ask for engine command `id` with `args`.
+    pub fn run(&mut self, id: &str, args: serde_json::Value) {
+        self.commands.push(iai_engine::CommandCall::new(id, args));
+    }
+
+    /// Select ▸ Modify: change the selection's edge by `amount` pixels
+    /// (`change` is feather, grow, shrink, smooth or border); nothing for 0.
+    pub fn modify_selection(&mut self, change: &str, amount: f32) {
+        if amount > 0.0 {
+            self.run(
+                "select.modify",
+                serde_json::json!({"change": change, "amount": amount.min(500.0)}),
+            );
+        }
+    }
+
+    /// Ask for engine command `id` on the layer at `idx` of `ids` (the
+    /// Layers panel's rows, top of the stack last), `args` with its `layer`.
+    pub fn run_on_layer(&mut self, ids: &[u32], idx: usize, id: &str, mut args: serde_json::Value) {
+        let Some(layer) = ids.get(idx) else {
+            return;
+        };
+        if let Some(fields) = args.as_object_mut() {
+            fields.insert("layer".to_string(), (*layer).into());
+        }
+        self.run(id, args);
+    }
+
+    /// Whether engine command `id` is asked for.
+    pub fn runs(&self, id: &str) -> bool {
+        self.commands.iter().any(|c| c.command == id)
+    }
 }
 
 #[cfg(test)]

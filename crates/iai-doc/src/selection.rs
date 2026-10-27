@@ -1228,11 +1228,7 @@ fn brush_falloff(dist: f32, radius: f32, hardness: f32) -> f32 {
     let t = (dist / radius).clamp(0.0, 1.0);
     let soft_edge = 1.0 - hardness;
     if soft_edge < 0.01 {
-        if t < 1.0 {
-            1.0
-        } else {
-            0.0
-        }
+        if t < 1.0 { 1.0 } else { 0.0 }
     } else {
         let fade_start = 1.0 - soft_edge;
         if t <= fade_start {

@@ -20,10 +20,10 @@
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
-use super::cache::{geometry_fingerprint, ByteLru};
+use super::cache::{ByteLru, geometry_fingerprint};
 use super::mesh::tessellate;
 use super::renderer::{
-    CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer, VECTOR_SAMPLE_COUNT,
+    CanvasView, GpuMesh, GpuPaint, VECTOR_SAMPLE_COUNT, VectorDraw, VectorRenderer,
 };
 use iai_doc::layer::LayerMask;
 use iai_doc::vector::object::VectorObjectData;
@@ -297,10 +297,11 @@ impl VectorCompositeStage {
     fn ensure_size(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
-        if let Some(s) = &self.sized {
-            if s.width == width && s.height == height {
-                return;
-            }
+        if let Some(s) = &self.sized
+            && s.width == width
+            && s.height == height
+        {
+            return;
         }
         let extent = wgpu::Extent3d {
             width,

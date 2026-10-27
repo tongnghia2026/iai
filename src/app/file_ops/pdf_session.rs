@@ -176,25 +176,25 @@ impl App {
         }
         // The active page lives in doc.canvas; include it when it has edits. The
         // live `is_modified` catches edits not yet folded into active_page_modified.
-        if pdf.active_page_modified || doc.canvas.is_dirty() {
-            if let Some(reference) = doc.pdf_page.as_ref() {
-                // Only the tab in front has its view in `edit.view`.
-                let view = if idx == self.docs.active_doc_idx {
-                    (
-                        self.edit.view.zoom,
-                        self.edit.view.offset_x,
-                        self.edit.view.offset_y,
-                    )
-                } else {
-                    (doc.saved_zoom, doc.saved_offset_x, doc.saved_offset_y)
-                };
-                pages.push(PdfProjectPageSnapshot {
-                    index: pdf.active_page,
-                    base_pristine: reference.base_is_pristine(&doc.canvas),
-                    view,
-                    canvas: crate::app::autosave::detached_canvas(&doc.canvas),
-                });
-            }
+        if (pdf.active_page_modified || doc.canvas.is_dirty())
+            && let Some(reference) = doc.pdf_page.as_ref()
+        {
+            // Only the tab in front has its view in `edit.view`.
+            let view = if idx == self.docs.active_doc_idx {
+                (
+                    self.edit.view.zoom,
+                    self.edit.view.offset_x,
+                    self.edit.view.offset_y,
+                )
+            } else {
+                (doc.saved_zoom, doc.saved_offset_x, doc.saved_offset_y)
+            };
+            pages.push(PdfProjectPageSnapshot {
+                index: pdf.active_page,
+                base_pristine: reference.base_is_pristine(&doc.canvas),
+                view,
+                canvas: crate::app::autosave::detached_canvas(&doc.canvas),
+            });
         }
         pages.sort_by_key(|page| page.index);
 
@@ -442,14 +442,14 @@ impl App {
         let parent = crate::file_io::dialog_parent(window);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            if let Some(paths) = crate::file_io::dialog_insert_pdf_pages(parent) {
-                if !paths.is_empty() {
-                    let _ = tx.send(crate::file_io::FileDialogResult::InsertPdfPages {
-                        document_id,
-                        position,
-                        paths,
-                    });
-                }
+            if let Some(paths) = crate::file_io::dialog_insert_pdf_pages(parent)
+                && !paths.is_empty()
+            {
+                let _ = tx.send(crate::file_io::FileDialogResult::InsertPdfPages {
+                    document_id,
+                    position,
+                    paths,
+                });
             }
         });
         self.jobs.pending_file_dialog = Some(rx);
@@ -729,10 +729,9 @@ impl App {
                         );
                         if let Some((doc_id, source_index)) =
                             self.jobs.pending_pdf_page_delete.take()
+                            && doc_id == result.document_id
                         {
-                            if doc_id == result.document_id {
-                                self.finish_pdf_page_delete(doc_id, source_index);
-                            }
+                            self.finish_pdf_page_delete(doc_id, source_index);
                         }
                     }
                     Err(error) => {

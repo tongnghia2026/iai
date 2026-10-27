@@ -18,14 +18,14 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iai_raw_abi() -> u32 {
     ffi::ABI
 }
 
 /// # Safety
 /// `path_len` readable bytes lie at `path`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iai_raw_decode_file(path: *const u8, path_len: usize) -> *const Frame {
     // SAFETY: the caller vouches for `path_len` bytes at `path`.
     let decoded = match std::str::from_utf8(unsafe { bytes(path, path_len) }) {
@@ -37,7 +37,7 @@ pub unsafe extern "C" fn iai_raw_decode_file(path: *const u8, path_len: usize) -
 
 /// # Safety
 /// `frame` is a pointer [`iai_raw_decode_file`] returned, given back once.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iai_raw_free(frame: *const Frame) {
     // SAFETY: the caller hands back, once, a frame this library returned.
     unsafe { ffi::take_back(frame) }
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn iai_raw_free(frame: *const Frame) {
 
 /// # Safety
 /// `file_len` readable bytes lie at `file`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iai_raw_orientation(file: *const u8, file_len: usize) -> u32 {
     // SAFETY: the caller vouches for `file_len` bytes at `file`.
     u32::from(crate::orientation(unsafe { bytes(file, file_len) }).exif())

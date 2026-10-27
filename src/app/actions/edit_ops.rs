@@ -4,9 +4,9 @@
 use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 use crate::core::document::GuideOrientation;
-use crate::core::snapping::{snap_1d, SnapKind, SNAP_THRESHOLD_PX};
+use crate::core::snapping::{SNAP_THRESHOLD_PX, SnapKind, snap_1d};
 use crate::core::vector::object::VectorGeometry;
-use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
+use crate::ui::MoveTransformAction;
 
 /// The canvas map of a Move-tool rotate/flip of the union box `[ux0,uy0]`
 /// sized `union_w × union_h` — exactly the map [`transformed_layer_placement`]
@@ -118,39 +118,49 @@ impl App {
             gpu.compositor.crop_preview_background = None;
         }
         let began = std::time::Instant::now();
-        {
-            let mut ctx = crate::extension::tool::ToolCtx::new(
-                self.docs.active_mut(),
-                self.edit.fg_color,
-                self.edit.bg_color,
-                self.edit.view.zoom,
-                self.edit.view.offset_x,
-                self.edit.view.offset_y,
-            );
-            self.edit.tools.active_on_confirm(&mut ctx);
+        // The frame as an `image.crop` call: the crop an agent would make,
+        // through the same door. A PNG with alpha has no Background layer, so
+        // what the crop adds there stays clear instead of taking the
+        // toolbar's background colour.
+        let call = {
+            let canvas = &self.docs.active().canvas;
+            let background = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .any(|layer| layer.is_background)
+                .then_some(self.edit.bg_color);
+            self.edit
+                .tools
+                .crop()
+                .engine_call(canvas.width, canvas.height, background)
+        };
+        match call {
+            Some(args) => {
+                if self.run_with("image.crop", args).is_err() {
+                    // Refused (the status line says why): the frame stays.
+                    return false;
+                }
+                self.edit.tools.crop_mut().cancel();
+            }
+            None => {
+                self.edit.tools.crop_mut().cancel();
+                return false;
+            }
         }
-        let pixels = began.elapsed();
-        // ALL canvas-size bookkeeping (GPU texture resize, compositor
-        // invalidation, re-fit, recomposite) lives in apply_canvas_event now —
-        // the SAME path undo/redo take. The old inline copy here pre-called
-        // resize_canvas_texture, which defeated that path's size-change
-        // detection, so a straight crop that kept the same window size left
-        // the compositor "initialized" and the screen stale until a tool
-        // switch (the "2nd crop onward doesn't update" bug).
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.apply_canvas_event(CanvasEvent::SelectionChanged);
-        // The crop resamples on this thread; a commit by Enter runs inside
-        // the key handler, where no frame timing sees it. Keep what it cost.
+        // The command's events did the canvas-size bookkeeping (GPU texture
+        // resize, compositor invalidation, re-fit, recomposite) through
+        // apply_canvas_event, the SAME path undo/redo take. The crop
+        // resamples on this thread; a commit by Enter runs inside the key
+        // handler, where no frame timing sees it. Keep what it cost.
         let total = began.elapsed();
         if total.as_millis() >= 30 {
             let canvas = &self.docs.active().canvas;
             crate::diag::note(
                 "perf",
                 &format!(
-                    "crop committed in {} ms (pixels {} ms, screen {} ms) to {}x{}",
+                    "crop committed in {} ms (pixels and screen) to {}x{}",
                     total.as_millis(),
-                    pixels.as_millis(),
-                    (total - pixels).as_millis(),
                     canvas.width,
                     canvas.height
                 ),
@@ -257,412 +267,25 @@ impl App {
         true
     }
 
-    pub(super) fn align_selected_layers_to_canvas(&mut self, align: LayerAlign) -> bool {
-        use crate::core::layer::LayerType;
-
-        let moved_count = {
-            let canvas = &mut self.docs.active_mut().canvas;
-            let is_alignable_leaf = |layer: &crate::core::layer::Layer| {
-                !layer.locked
-                    && !layer.is_background
-                    && matches!(
-                        layer.layer_type,
-                        LayerType::Raster
-                            | LayerType::Text(_)
-                            | LayerType::Vector(_)
-                            | LayerType::SmartObject
-                    )
-            };
-            // Union of the given members' content bounds, in canvas coordinates.
-            let member_bounds = |stack: &crate::core::layer::LayerStack,
-                                 members: &[usize]|
-             -> Option<(i32, i32, i32, i32)> {
-                let mut u = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-                let mut has = false;
-                for &m in members {
-                    let ml = &stack.layers[m];
-                    if let Some((x0, y0, x1, y1)) = ml.tiles.content_bounds() {
-                        u.0 = u.0.min(x0 + ml.offset.0);
-                        u.1 = u.1.min(y0 + ml.offset.1);
-                        u.2 = u.2.max(x1 + ml.offset.0);
-                        u.3 = u.3.max(y1 + ml.offset.1);
-                        has = true;
-                    }
-                }
-                has.then_some(u)
-            };
-
-            // Build align targets. A selected group folds all its members into a
-            // single target moved together (its whole contents shift as one); a
-            // selected leaf is its own target. Members of a selected group are
-            // never aligned a second time on their own.
-            let n = canvas.layer_stack.layers.len();
-            let mut consumed = vec![false; n];
-            // (x0, y0, x1, y1, member indices to move together)
-            let mut targets: Vec<(i32, i32, i32, i32, Vec<usize>)> = Vec::new();
-
-            // Outermost group first (a header sits above its members, so higher
-            // index = more enclosing): an outer group consumes all descendants,
-            // and an inner selected group is then skipped rather than moved twice.
-            for idx in (0..n).rev() {
-                if consumed[idx] {
-                    continue;
-                }
-                let is_selected_group = {
-                    let l = &canvas.layer_stack.layers[idx];
-                    l.is_group() && l.selected
-                };
-                if !is_selected_group {
-                    continue;
-                }
-                let members: Vec<usize> = canvas.layer_stack.group_member_range(idx).collect();
-                for &m in &members {
-                    consumed[m] = true;
-                }
-                consumed[idx] = true;
-                if !members.is_empty() {
-                    if let Some((x0, y0, x1, y1)) = member_bounds(&canvas.layer_stack, &members) {
-                        targets.push((x0, y0, x1, y1, members));
-                    }
-                }
-            }
-
-            for idx in 0..n {
-                if consumed[idx] {
-                    continue;
-                }
-                let layer = &canvas.layer_stack.layers[idx];
-                if layer.selected && is_alignable_leaf(layer) {
-                    if let Some((x0, y0, x1, y1)) = layer.tiles.content_bounds() {
-                        targets.push((
-                            x0 + layer.offset.0,
-                            y0 + layer.offset.1,
-                            x1 + layer.offset.0,
-                            y1 + layer.offset.1,
-                            vec![idx],
-                        ));
-                    }
-                }
-            }
-
-            // Nothing selected → align the active object (its group, or the leaf).
-            if targets.is_empty() {
-                let idx = canvas.layer_stack.active_idx;
-                let is_group = canvas
-                    .layer_stack
-                    .layers
-                    .get(idx)
-                    .is_some_and(|l| l.is_group());
-                if is_group {
-                    let members: Vec<usize> = canvas.layer_stack.group_member_range(idx).collect();
-                    if !members.is_empty() {
-                        if let Some((x0, y0, x1, y1)) = member_bounds(&canvas.layer_stack, &members)
-                        {
-                            targets.push((x0, y0, x1, y1, members));
-                        }
-                    }
-                } else if canvas
-                    .layer_stack
-                    .layers
-                    .get(idx)
-                    .is_some_and(is_alignable_leaf)
-                {
-                    let layer = &canvas.layer_stack.layers[idx];
-                    if let Some((x0, y0, x1, y1)) = layer.tiles.content_bounds() {
-                        targets.push((
-                            x0 + layer.offset.0,
-                            y0 + layer.offset.1,
-                            x1 + layer.offset.0,
-                            y1 + layer.offset.1,
-                            vec![idx],
-                        ));
-                    }
-                }
-            }
-
-            if targets.is_empty() {
-                0
-            } else {
-                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-                    "Align Layers",
-                    &canvas.layer_stack,
-                    canvas.width,
-                    canvas.height,
-                );
-
-                let reference = if targets.len() > 1 {
-                    targets.iter().fold(
-                        (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
-                        |(rx0, ry0, rx1, ry1), &(x0, y0, x1, y1, _)| {
-                            (rx0.min(x0), ry0.min(y0), rx1.max(x1), ry1.max(y1))
-                        },
-                    )
-                } else {
-                    (0, 0, canvas.width as i32, canvas.height as i32)
-                };
-                let (rx0, ry0, rx1, ry1) = reference;
-                let mut moved = 0usize;
-                let mut moved_members: Vec<usize> = Vec::new();
-
-                for (x0, y0, x1, y1, members) in &targets {
-                    let (dx, dy) = match align {
-                        LayerAlign::Left => (rx0 - x0, 0),
-                        LayerAlign::HorizontalCenter => {
-                            let ref_center = (rx0 + rx1) as f32 * 0.5;
-                            let obj_center = (x0 + x1) as f32 * 0.5;
-                            ((ref_center - obj_center).round() as i32, 0)
-                        }
-                        LayerAlign::Right => (rx1 - x1, 0),
-                        LayerAlign::Top => (0, ry0 - y0),
-                        LayerAlign::VerticalCenter => {
-                            let ref_center = (ry0 + ry1) as f32 * 0.5;
-                            let obj_center = (y0 + y1) as f32 * 0.5;
-                            (0, (ref_center - obj_center).round() as i32)
-                        }
-                        LayerAlign::Bottom => (0, ry1 - y1),
-                    };
-
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    for &m in members {
-                        let layer = &mut canvas.layer_stack.layers[m];
-                        layer.offset.0 += dx;
-                        layer.offset.1 += dy;
-                        moved_members.push(m);
-                    }
-                    moved += 1;
-                }
-
-                if moved > 0 {
-                    // Path position belongs to its affine model; Layer::offset is
-                    // only the derived raster origin. Fold alignment deltas back
-                    // into the model (separate pass to avoid overlapping &mut
-                    // borrows) so save/reload and later transforms keep placement.
-                    for &m in &moved_members {
-                        if matches!(
-                            canvas.layer_stack.layers[m].layer_type,
-                            LayerType::Vector(VectorGeometry::Path(_))
-                        ) {
-                            crate::core::command_vector::fold_offset_into_model(
-                                &mut canvas.layer_stack.layers[m],
-                            );
-                        }
-                    }
-                    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-                    canvas.record(Box::new(cmd));
-                }
-                moved
-            }
-        };
-
-        if moved_count == 0 {
-            self.shell.status_msg = "No movable layer content to align".to_string();
-            return false;
-        }
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = if moved_count == 1 {
-            "Aligned 1 layer".to_string()
-        } else {
-            format!("Aligned {moved_count} layers")
-        };
-        true
-    }
-
-    /// Evenly distribute the centres of three or more selected movable objects.
-    /// The outermost two objects stay fixed; interior objects are translated to
-    /// equal centre-to-centre intervals. One structural command makes the whole
-    /// operation a single undo step.
-    pub(super) fn distribute_selected_layers(&mut self, mode: LayerDistribute) -> bool {
-        use crate::core::layer::LayerType;
-
-        let moved_count = {
-            let canvas = &mut self.docs.active_mut().canvas;
-            let can_move = |layer: &crate::core::layer::Layer| {
-                layer.selected
-                    && !layer.locked
-                    && !layer.is_background
-                    && matches!(
-                        layer.layer_type,
-                        LayerType::Raster
-                            | LayerType::Text(_)
-                            | LayerType::Vector(_)
-                            | LayerType::SmartObject
-                    )
-            };
-            let mut objects: Vec<(usize, f32)> = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_, layer)| can_move(layer))
-                .filter_map(|(idx, layer)| {
-                    layer.tiles.content_bounds().map(|(x0, y0, x1, y1)| {
-                        let center = match mode {
-                            LayerDistribute::HorizontalCenters => {
-                                layer.offset.0 as f32 + (x0 + x1) as f32 * 0.5
-                            }
-                            LayerDistribute::VerticalCenters => {
-                                layer.offset.1 as f32 + (y0 + y1) as f32 * 0.5
-                            }
-                        };
-                        (idx, center)
-                    })
-                })
-                .collect();
-            objects.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
-            if objects.len() < 3 {
-                0
-            } else {
-                let first = objects.first().unwrap().1;
-                let last = objects.last().unwrap().1;
-                let step = (last - first) / (objects.len() - 1) as f32;
-                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-                    "Distribute Layers",
-                    &canvas.layer_stack,
-                    canvas.width,
-                    canvas.height,
-                );
-                let mut moved = 0usize;
-                for (order, &(idx, current)) in
-                    objects.iter().enumerate().skip(1).take(objects.len() - 2)
-                {
-                    let delta = (first + step * order as f32 - current).round() as i32;
-                    if delta == 0 {
-                        continue;
-                    }
-                    let layer = &mut canvas.layer_stack.layers[idx];
-                    match mode {
-                        LayerDistribute::HorizontalCenters => layer.offset.0 += delta,
-                        LayerDistribute::VerticalCenters => layer.offset.1 += delta,
-                    }
-                    if matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_))) {
-                        crate::core::command_vector::fold_offset_into_model(layer);
-                    }
-                    moved += 1;
-                }
-                if moved > 0 {
-                    cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-                    canvas.record(Box::new(cmd));
-                }
-                moved
-            }
-        };
-
-        if moved_count == 0 {
-            self.shell.status_msg = "Select at least 3 movable objects to distribute".to_string();
-            return false;
-        }
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = format!("Distributed {moved_count} objects");
-        true
-    }
-
-    /// Duplicate the selected movable objects and apply the CANVAS-space affine
-    /// `m` to each copy. The copies become the new selection, so repeated calls
-    /// build a step-and-repeat chain (row / ring / spiral). Path copies transform
-    /// their editable affine model exactly (`new = M ∘ orig`); other layer types
-    /// follow only the displacement of their centre under `m` — their pixels are
-    /// not rotated (decision #2 for the Repeat feature). Records ONE history
-    /// snapshot and stores `m` as the repeatable step.
+    /// Duplicate the selected movable objects and carry each copy by the
+    /// CANVAS-space affine `m` (`layer.step_copy`). The copies become the
+    /// selection, so repeated calls build a step-and-repeat chain (row / ring /
+    /// spiral); `m` is kept as the step the Repeat button replays.
     pub(in crate::app) fn duplicate_selected_with_transform(
         &mut self,
         m: crate::core::vector::affine::AffineTransform,
     ) -> bool {
-        use crate::core::geometry::Point;
-        use crate::core::layer::LayerType;
-
         if !m.is_finite() {
             return false;
         }
-        let duplicated = {
-            let canvas = &mut self.docs.active_mut().canvas;
-            let indices: Vec<usize> = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_, layer)| {
-                    layer.selected
-                        && !layer.locked
-                        && !layer.is_background
-                        && !layer.is_group()
-                        && matches!(
-                            layer.layer_type,
-                            LayerType::Raster
-                                | LayerType::Text(_)
-                                | LayerType::Vector(_)
-                                | LayerType::SmartObject
-                        )
-                })
-                .map(|(idx, _)| idx)
-                .collect();
-            if indices.is_empty() {
-                0
-            } else {
-                let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-                    "Repeat",
-                    &canvas.layer_stack,
-                    canvas.width,
-                    canvas.height,
-                );
-                for layer in &mut canvas.layer_stack.layers {
-                    layer.selected = false;
-                }
-                let mut new_ids = Vec::with_capacity(indices.len());
-                for &idx in indices.iter().rev() {
-                    let new_idx = canvas.layer_stack.duplicate_layer(idx);
-                    let layer = &mut canvas.layer_stack.layers[new_idx];
-                    match &layer.layer_type {
-                        // Vector Path: transform the editable affine model exactly.
-                        LayerType::Vector(VectorGeometry::Path(obj)) => {
-                            let mut o = obj.clone();
-                            o.transform = m.then(&obj.transform);
-                            if o.transform.is_finite() {
-                                crate::core::command_vector::apply_object_to_layer(layer, o);
-                            }
-                        }
-                        // Raster/Text/Shape/Smart: move the copy so its centre lands
-                        // where `m` maps it; the pixels themselves are not rotated.
-                        _ => {
-                            let cx = layer.offset.0 as f32 + layer.width as f32 * 0.5;
-                            let cy = layer.offset.1 as f32 + layer.height as f32 * 0.5;
-                            let p = m.apply_point(Point::new(cx, cy));
-                            layer.offset.0 += (p.x - cx).round() as i32;
-                            layer.offset.1 += (p.y - cy).round() as i32;
-                        }
-                    }
-                    layer.selected = true;
-                    new_ids.push(layer.id);
-                }
-                if let Some(active) = new_ids.first().and_then(|id| {
-                    canvas
-                        .layer_stack
-                        .layers
-                        .iter()
-                        .position(|layer| layer.id == *id)
-                }) {
-                    canvas.layer_stack.active_idx = active;
-                }
-                cmd.capture_after(&canvas.layer_stack, canvas.width, canvas.height);
-                canvas.record(Box::new(cmd));
-                indices.len()
-            }
-        };
-
-        if duplicated == 0 {
-            self.shell.status_msg = "No movable objects selected".to_string();
-            return false;
+        let matrix = [m.a, m.b, m.c, m.d, m.e, m.f];
+        let ok = self
+            .run_with("layer.step_copy", serde_json::json!({ "matrix": matrix }))
+            .is_ok();
+        if ok {
+            self.edit.last_repeat_transform = Some(m);
         }
-        self.edit.last_repeat_transform = Some(m);
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = format!(
-            "Duplicated {duplicated} object{}",
-            if duplicated == 1 { "" } else { "s" }
-        );
-        true
+        ok
     }
 
     /// Duplicate the selection translated by `delta` — the Duplicate button and
@@ -972,132 +595,43 @@ impl App {
     /// Ctrl+I — invert. Inverts the mask if editing a mask, otherwise the RGB
     /// pixels of the (unlocked) raster layer. Undoable.
     pub fn do_invert_active(&mut self, idx: usize) {
-        use crate::core::layer::PaintTarget;
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
-        let layers = &self.docs.active().canvas.layer_stack.layers;
-        let Some(layer) = layers.get(idx) else {
-            return;
-        };
-
-        let invert_mask = layer.paint_target == PaintTarget::Mask && layer.mask.is_some();
-        if !invert_mask && (!layer.is_raster() || layer.locked) {
-            self.shell.status_msg =
-                "Invert cần layer raster (không khoá) hoặc một mask".to_string();
-            return;
-        }
-        // Pixel invert edits the RGB mirror only and would orphan the ink
-        // ground truth. Masks carry no ink, so mask invert stays available.
-        if !invert_mask && self.docs.active().canvas.is_cmyk() {
-            self.shell.status_msg =
-                "Invert chưa hỗ trợ ở chế độ CMYK (dùng Curves đảo từng kênh mực)".to_string();
-            return;
-        }
-
-        let label = if invert_mask { "Invert Mask" } else { "Invert" };
-        let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-            label,
-            &self.docs.active().canvas.layer_stack,
-            cw,
-            ch,
-        );
-        {
-            let layer = &mut self.docs.active_mut().canvas.layer_stack.layers[idx];
-            if invert_mask {
-                if let Some(mask) = layer.mask.as_mut() {
-                    mask.invert_tiles();
-                }
-            } else {
-                layer.invert_pixels();
-            }
-        }
-        cmd.capture_after(&self.docs.active().canvas.layer_stack, cw, ch);
-        self.docs.active_mut().canvas.record(Box::new(cmd));
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = format!("{label} {}", egui_phosphor::regular::CHECK);
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-    }
-
-    /// Ctrl+G — wrap the selected (or active) layers in a new group folder.
-    /// Undoable. No-op (with a status hint) when only the background qualifies.
-    pub fn do_group_selected(&mut self) {
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
-        let can_group = {
-            let ls = &self.docs.active().canvas.layer_stack;
-            ls.layers.iter().any(|l| l.selected && !l.is_background)
-                || ls
-                    .layers
-                    .get(ls.active_idx)
-                    .is_some_and(|l| !l.is_background)
-        };
-        if !can_group {
-            self.shell.status_msg = "Không có layer nào để nhóm".to_string();
-            return;
-        }
-
-        let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-            "Group Layers",
-            &self.docs.active().canvas.layer_stack,
-            cw,
-            ch,
-        );
-        self.docs
-            .active_mut()
-            .canvas
-            .layer_stack
-            .create_group_from_selected(cw, ch);
-        cmd.capture_after(&self.docs.active().canvas.layer_stack, cw, ch);
-        self.docs.active_mut().canvas.record(Box::new(cmd));
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Grouped layers".to_string();
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-    }
-
-    /// Ctrl+Shift+G — dissolve the group at `idx` (children rise to the group's
-    /// parent level). Undoable. No-op when `idx` is not a group.
-    pub fn do_ungroup(&mut self, idx: usize) {
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
-        let is_grp = self
+        // The command Ctrl+I is: the mask when it is painted on, else the
+        // pixels.
+        let id = self
             .docs
             .active()
             .canvas
             .layer_stack
             .layers
             .get(idx)
-            .is_some_and(|l| l.is_group());
-        if !is_grp {
-            self.shell.status_msg = "Layer hiện tại không phải nhóm".to_string();
-            return;
+            .map(|l| l.id);
+        if let Some(id) = id {
+            let _ = self.run_with("layer.invert", serde_json::json!({"layer": id}));
         }
+    }
 
-        let mut cmd = crate::core::command::LayerStructureCommand::capture_before(
-            "Ungroup",
-            &self.docs.active().canvas.layer_stack,
-            cw,
-            ch,
-        );
-        self.docs.active_mut().canvas.layer_stack.ungroup(idx);
-        cmd.capture_after(&self.docs.active().canvas.layer_stack, cw, ch);
-        self.docs.active_mut().canvas.record(Box::new(cmd));
+    /// Ctrl+G — wrap the selected (or active) layers in a new group folder.
+    /// Undoable. No-op (with a status hint) when only the background qualifies.
+    pub fn do_group_selected(&mut self) {
+        let _ = self.run_now("layer.group");
+    }
 
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Ungrouped".to_string();
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
+    /// Ctrl+Shift+G — dissolve the group at `idx` (children rise to the group's
+    /// parent level). Undoable. No-op when `idx` is not a group.
+    pub fn do_ungroup(&mut self, idx: usize) {
+        let id = self
+            .docs
+            .active()
+            .canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .map(|l| l.id);
+        match id {
+            Some(id) => {
+                let _ = self.run_with("layer.ungroup", serde_json::json!({"layer": id}));
+            }
+            None => self.shell.status_msg = "Layer hiện tại không phải nhóm".to_string(),
         }
     }
 }
@@ -1110,6 +644,86 @@ mod tests {
     use crate::core::tile::TileMap;
     use crate::core::vector::object::VectorGeometry;
     use crate::ui::{LayerAlign, LayerDistribute, MoveTransformAction};
+
+    /// The Crop tool's frame committed by the window (through `image.crop`)
+    /// and by the tool straight on the canvas: the same page, pixel for
+    /// pixel — straight, turned with the picture moved, to a print size, and
+    /// past the edge onto a Background.
+    #[test]
+    fn the_crop_tool_through_the_command_crops_as_the_tool_itself_did() {
+        use crate::core::units::Unit;
+        use crate::tools::crop::{CropMode, CropTool};
+        let (w, h) = (300u32, 200u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [
+                    (x * 255 / w) as u8,
+                    (y * 255 / h) as u8,
+                    ((x ^ y) & 0xFF) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        type Setup = fn(&mut CropTool);
+        let cases: [(&str, Setup); 4] = [
+            ("straight", |t| {
+                t.mode = CropMode::Free;
+                (t.crop_x0, t.crop_y0, t.crop_x1, t.crop_y1) = (20.4, 10.6, 180.2, 150.0);
+            }),
+            ("turned and moved", |t| {
+                t.mode = CropMode::Free;
+                (t.crop_x0, t.crop_y0, t.crop_x1, t.crop_y1) = (40.0, 30.0, 220.5, 170.25);
+                (t.rotation, t.image_tx, t.image_ty) = (0.2137, 7.5, -3.25);
+            }),
+            ("to a print size", |t| {
+                t.mode = CropMode::FixedSize;
+                (t.fixed_w, t.fixed_h, t.unit, t.dpi) = (2.0, 3.0, Unit::Centimeters, 300.0);
+                (t.crop_x0, t.crop_y0, t.crop_x1, t.crop_y1) = (50.0, 20.0, 150.0, 170.0);
+            }),
+            ("past the edge", |t| {
+                t.mode = CropMode::Free;
+                (t.crop_x0, t.crop_y0, t.crop_x1, t.crop_y1) = (-30.0, -20.0, 260.0, 230.0);
+            }),
+        ];
+        for (name, setup) in cases {
+            let mut app = App::new();
+            app.shell.ui.show_welcome = false;
+            app.docs.documents[0].canvas = Canvas::from_rgba(rgba.clone(), w, h);
+            app.edit.bg_color = [12, 200, 90, 255];
+            app.edit.tools.select(crate::tools::ToolId::Crop);
+            setup(app.edit.tools.crop_mut());
+
+            let mut by_hand = Canvas::from_rgba(rgba.clone(), w, h);
+            let mut tool = CropTool::default();
+            setup(&mut tool);
+            tool.commit(&mut by_hand, Some(app.edit.bg_color));
+
+            assert!(app.commit_active_crop(), "{name}");
+            let by_window = &app.docs.documents[0].canvas;
+            assert_eq!(
+                (by_window.width, by_window.height),
+                (by_hand.width, by_hand.height),
+                "{name}"
+            );
+            assert_eq!(
+                by_window.metadata.resolution_ppi, by_hand.metadata.resolution_ppi,
+                "{name}"
+            );
+            let pixels = |c: &Canvas| -> Vec<Vec<u8>> {
+                c.layer_stack
+                    .layers
+                    .iter()
+                    .map(|l| l.flatten_tiles())
+                    .collect()
+            };
+            assert!(
+                pixels(by_window) == pixels(&by_hand),
+                "{name}: pixels differ"
+            );
+            assert!(!app.edit.tools.crop().has_selection(), "{name}: frame left");
+        }
+    }
 
     #[test]
     fn crop_preview_uses_commit_background_only_for_background_documents() {
@@ -1389,7 +1003,13 @@ mod tests {
         let middle = add_selected_box(&mut app, 50, 20);
         let right = add_selected_box(&mut app, 170, 20);
 
-        assert!(app.distribute_selected_layers(LayerDistribute::HorizontalCenters));
+        assert!(
+            app.run_with(
+                "layer.distribute",
+                LayerDistribute::HorizontalCenters.args()
+            )
+            .is_ok()
+        );
         assert_eq!(find_layer(&app, left).offset.0, 10);
         assert_eq!(find_layer(&app, middle).offset.0, 90);
         assert_eq!(find_layer(&app, right).offset.0, 170);
@@ -1435,7 +1055,7 @@ mod tests {
         app.docs.documents[0].canvas.mark_saved();
         let before_undo = app.docs.documents[0].canvas.undo_count();
 
-        assert!(app.align_selected_layers_to_canvas(LayerAlign::Left));
+        assert!(app.run_with("layer.align", LayerAlign::Left.args()).is_ok());
         let layer = find_layer(&app, id);
         let aligned = match &layer.layer_type {
             LayerType::Vector(VectorGeometry::Path(object)) => object.transform,
@@ -1500,7 +1120,7 @@ mod tests {
             (id_a, id_b)
         };
 
-        assert!(app.align_selected_layers_to_canvas(LayerAlign::Left));
+        assert!(app.run_with("layer.align", LayerAlign::Left.args()).is_ok());
 
         // The union's left edge (min content x = 60) snaps to canvas x=0, so both
         // members shift by -60 and keep their relative placement and their y.
@@ -1556,17 +1176,19 @@ mod tests {
         assert_eq!(origins[2].0 - origins[1].0, 25);
         assert_eq!(origins[1].1 - origins[0].1, 10);
         assert_eq!(origins[2].1 - origins[1].1, 10);
-        assert!(app.docs.documents[0]
-            .canvas
-            .layer_stack
-            .layers
-            .iter()
-            .filter(|layer| {
-                matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
-            })
-            .all(|layer| {
-                matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
-            }));
+        assert!(
+            app.docs.documents[0]
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .filter(|layer| {
+                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+                })
+                .all(|layer| {
+                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
+                })
+        );
 
         app.docs.documents[0]
             .canvas
@@ -1618,7 +1240,7 @@ mod tests {
     #[test]
     fn move_rotate_and_flip_turn_the_text_model_with_its_pixels() {
         use crate::core::layer::LayerType;
-        use crate::core::text::{rasterize_placed, TextData, TextFontFamily};
+        use crate::core::text::{TextData, TextFontFamily, rasterize_placed};
 
         let mut app = App::new();
         app.docs.documents[0].canvas = Canvas::new(400, 300);

@@ -157,10 +157,10 @@ impl<'a> Checker<'a> {
         {
             for (name, prop) in props {
                 let prop = self.resolve(prop);
-                if let Some(c) = prop.get("const") {
-                    if fields.get(name) != Some(c) {
-                        return false;
-                    }
+                if let Some(c) = prop.get("const")
+                    && fields.get(name) != Some(c)
+                {
+                    return false;
                 }
             }
         }

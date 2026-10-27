@@ -64,11 +64,12 @@ impl App {
             && self.shell.ui.adj_eyedropper.is_some()
             && button == MouseButton::Left
         {
-            if pressed && !self.edit.input.is_over_ui {
-                if let Some(kind) = self.shell.ui.adj_eyedropper {
-                    let ev = self.tool_event();
-                    self.apply_adjustment_eyedropper_at(kind, ev.canvas_x, ev.canvas_y);
-                }
+            if pressed
+                && !self.edit.input.is_over_ui
+                && let Some(kind) = self.shell.ui.adj_eyedropper
+            {
+                let ev = self.tool_event();
+                self.apply_adjustment_eyedropper_at(kind, ev.canvas_x, ev.canvas_y);
             }
             return;
         }
@@ -101,13 +102,13 @@ impl App {
                     } else if !pressed {
                         // Warp the (hidden) OS cursor back to the start so the
                         // ring resumes exactly where it was pinned.
-                        if self.edit.input.warp_resizing {
-                            if let Some(win) = &self.win.window {
-                                let _ = win.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                                    self.edit.input.alt_drag_start_x as f64,
-                                    self.edit.input.alt_drag_start_y as f64,
-                                ));
-                            }
+                        if self.edit.input.warp_resizing
+                            && let Some(win) = &self.win.window
+                        {
+                            let _ = win.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                                self.edit.input.alt_drag_start_x as f64,
+                                self.edit.input.alt_drag_start_y as f64,
+                            ));
                         }
                         self.edit.input.warp_resizing = false;
                     }
@@ -145,13 +146,14 @@ impl App {
         // Borderless-window edge resize: a left-press in the outer resize
         // border hands off to the system resize loop (no OS title bar to do
         // it for us). Only fires when restored (not maximized) and near an edge.
-        if pressed && button == MouseButton::Left {
-            if let Some(dir) = self.resize_direction() {
-                if let Some(win) = &self.win.window {
-                    let _ = win.drag_resize_window(dir);
-                }
-                return;
+        if pressed
+            && button == MouseButton::Left
+            && let Some(dir) = self.resize_direction()
+        {
+            if let Some(win) = &self.win.window {
+                let _ = win.drag_resize_window(dir);
             }
+            return;
         }
         match button {
             MouseButton::Middle => {
@@ -306,31 +308,30 @@ impl App {
                             // delete. The guide is picked too: Delete removes it.
                             if self.edit.tools.active_id() == ToolId::Move
                                 && self.edit.transform_state.is_none()
+                                && let Some(gi) = self.guide_at_screen()
                             {
-                                if let Some(gi) = self.guide_at_screen() {
-                                    self.edit.selected_guide = Some((self.docs.active().id, gi));
-                                    self.shell.status_msg =
-                                        "Đã chọn đường gióng — bấm Delete để xóa".to_string();
-                                    let g = self.docs.active().guides[gi];
-                                    let ev = self.tool_event();
-                                    let pos = match g.orientation {
-                                        crate::core::document::GuideOrientation::Horizontal => {
-                                            ev.canvas_y
-                                        }
-                                        crate::core::document::GuideOrientation::Vertical => {
-                                            ev.canvas_x
-                                        }
-                                    };
-                                    self.edit.guide_op = Some(crate::app::state::GuideOp::Move {
-                                        idx: gi,
-                                        orientation: g.orientation,
-                                        pos,
-                                    });
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
+                                self.edit.selected_guide = Some((self.docs.active().id, gi));
+                                self.shell.status_msg =
+                                    "Đã chọn đường gióng — bấm Delete để xóa".to_string();
+                                let g = self.docs.active().guides[gi];
+                                let ev = self.tool_event();
+                                let pos = match g.orientation {
+                                    crate::core::document::GuideOrientation::Horizontal => {
+                                        ev.canvas_y
                                     }
-                                    return;
+                                    crate::core::document::GuideOrientation::Vertical => {
+                                        ev.canvas_x
+                                    }
+                                };
+                                self.edit.guide_op = Some(crate::app::state::GuideOp::Move {
+                                    idx: gi,
+                                    orientation: g.orientation,
+                                    pos,
+                                });
+                                if let Some(w) = &self.win.window {
+                                    w.request_redraw();
                                 }
+                                return;
                             }
 
                             let is_double_click = self
@@ -513,27 +514,25 @@ impl App {
                                     .last_left_release_time
                                     .map(|t| t.elapsed().as_millis() < 400)
                                     .unwrap_or(false);
-                                if is_double_click {
-                                    if let Some(crate::app::node_ops::NodeHit::Node(ci, ni)) =
+                                if is_double_click
+                                    && let Some(crate::app::node_ops::NodeHit::Node(ci, ni)) =
                                         self.node_hit_at_screen(msx, msy)
-                                    {
-                                        if self.node_toggle_kind(ci, ni) {
-                                            self.edit.input.last_left_release_time = None;
-                                            self.edit.input.painting = true;
-                                            return;
-                                        }
-                                    }
+                                    && self.node_toggle_kind(ci, ni)
+                                {
+                                    self.edit.input.last_left_release_time = None;
+                                    self.edit.input.painting = true;
+                                    return;
                                 }
                                 let ev = self.tool_event();
                                 if let Some(hit) = self.node_hit_at_screen(msx, msy) {
                                     // Shift+click an anchor toggles it in the
                                     // multi-selection instead of starting a drag.
-                                    if self.edit.input.shift_held {
-                                        if let crate::app::node_ops::NodeHit::Node(ci, ni) = hit {
-                                            self.node_shift_toggle(ci, ni);
-                                            self.edit.input.painting = true;
-                                            return;
-                                        }
+                                    if self.edit.input.shift_held
+                                        && let crate::app::node_ops::NodeHit::Node(ci, ni) = hit
+                                    {
+                                        self.node_shift_toggle(ci, ni);
+                                        self.edit.input.painting = true;
+                                        return;
                                     }
                                     if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
                                         self.edit.input.painting = true;
@@ -688,10 +687,8 @@ impl App {
                                     self.push_selection_uniforms();
                                     request_redraw = true;
                                 }
-                                if request_redraw {
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
-                                    }
+                                if request_redraw && let Some(w) = &self.win.window {
+                                    w.request_redraw();
                                 }
                             }
                         }
@@ -1103,16 +1100,15 @@ impl App {
             && !self.edit.input.space_dragging
             && self.edit.guide_op.is_none()
             && self.edit.transform_state.is_none()
+            && let Some(dir) = self.resize_direction()
         {
-            if let Some(dir) = self.resize_direction() {
-                if let Some(w) = &self.win.window {
-                    w.set_cursor_visible(true);
-                    w.set_cursor(Self::resize_cursor(dir));
-                }
-                self.edit.input.last_mouse_x = position.x;
-                self.edit.input.last_mouse_y = position.y;
-                return;
+            if let Some(w) = &self.win.window {
+                w.set_cursor_visible(true);
+                w.set_cursor(Self::resize_cursor(dir));
             }
+            self.edit.input.last_mouse_x = position.x;
+            self.edit.input.last_mouse_y = position.y;
+            return;
         }
 
         // Live-drag an existing guide (Move tool grabbed it on press).

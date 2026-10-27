@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::*;
 
@@ -207,6 +207,390 @@ fn a_selection_is_made_combined_inverted_and_cleared() {
 }
 
 #[test]
+fn an_ellipse_and_a_polygon_are_selected_and_the_page_cuts_them() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 100, "heightPx": 80, "background": "#FFFFFF"}),
+    );
+    let sel = t.run(
+        "select.ellipse",
+        json!({"rect": {"x": 10, "y": 10, "w": 40, "h": 20}}),
+    );
+    assert_eq!(sel["bounds"], json!({"x": 10, "y": 10, "w": 40, "h": 20}));
+    // Filled: its middle is red, the box's corner is not.
+    t.run("edit.fill", json!({"color": "#FF0000"}));
+    assert_eq!(t.mean(json!({"x": 28, "y": 18, "w": 4, "h": 4})), "#FF0000");
+    assert_eq!(t.mean(json!({"x": 10, "y": 10, "w": 3, "h": 3})), "#FFFFFF");
+    // A circle the page's corner cuts: a quarter of it.
+    let sel = t.run(
+        "select.ellipse",
+        json!({"rect": {"x": -30, "y": -30, "w": 60, "h": 60}}),
+    );
+    let b = &sel["bounds"];
+    assert_eq!((b["x"].as_i64(), b["y"].as_i64()), (Some(0), Some(0)));
+    assert!((29..=31).contains(&b["w"].as_i64().unwrap()), "{b}");
+
+    // A triangle added to it, then filled blue.
+    t.run("select.none", json!({}));
+    let sel = t.run(
+        "select.polygon",
+        json!({"points": [[50, 40], [90, 40], [50, 78]], "mode": "add"}),
+    );
+    let b = &sel["bounds"];
+    assert_eq!((b["x"].as_i64(), b["y"].as_i64()), (Some(50), Some(40)));
+    t.run("edit.fill", json!({"color": "#0000FF"}));
+    assert_eq!(t.mean(json!({"x": 52, "y": 42, "w": 4, "h": 4})), "#0000FF");
+    assert_eq!(t.mean(json!({"x": 84, "y": 72, "w": 4, "h": 4})), "#FFFFFF");
+    // One undo step each.
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.mean(json!({"x": 52, "y": 42, "w": 4, "h": 4})), "#FFFFFF");
+
+    let e = t
+        .try_run(
+            "select.polygon",
+            json!({"points": [[200, 0], [300, 0], [250, 50]]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run("select.polygon", json!({"points": [[0, 0], [10, 0]]}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn a_layer_is_scaled_turned_and_moved_as_free_transform_does() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 120, "heightPx": 100, "background": "#FFFFFF"}),
+    );
+    // A red bar 20 × 10 at (10, 20), on a layer of its own.
+    let layer = t.run("layer.new", json!({}))["layer"].as_u64().unwrap();
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 10, "y": 20, "w": 20, "h": 10}}),
+    );
+    t.run("edit.fill", json!({"color": "#FF0000"}));
+    t.run("select.none", json!({}));
+
+    // Twice as large round its middle (20, 25): 40 × 20 from (0, 15).
+    t.run("layer.transform", json!({"layer": layer, "scale": 2}));
+    assert_eq!(
+        t.mean(json!({"x": 2, "y": 17, "w": 36, "h": 16})),
+        "#FF0000"
+    );
+    assert_eq!(t.mean(json!({"x": 2, "y": 37, "w": 36, "h": 4})), "#FFFFFF");
+    // A quarter turn: 20 wide, 40 high, round the same middle.
+    t.run("layer.transform", json!({"layer": layer, "angle": 90}));
+    assert_eq!(
+        t.mean(json!({"x": 12, "y": 7, "w": 16, "h": 36})),
+        "#FF0000"
+    );
+    assert_eq!(
+        t.mean(json!({"x": 32, "y": 20, "w": 6, "h": 10})),
+        "#FFFFFF"
+    );
+    // A move alone shifts it, nothing resampled.
+    t.run(
+        "layer.transform",
+        json!({"layer": layer, "dx": 50, "dy": 10}),
+    );
+    assert_eq!(
+        t.mean(json!({"x": 62, "y": 17, "w": 16, "h": 36})),
+        "#FF0000"
+    );
+    // Each was one undo step.
+    t.run("edit.undo", json!({}));
+    t.run("edit.undo", json!({}));
+    assert_eq!(
+        t.mean(json!({"x": 2, "y": 17, "w": 36, "h": 16})),
+        "#FF0000"
+    );
+
+    // Nothing to do, both kinds of scale, the Background: refused.
+    let e = t
+        .try_run("layer.transform", json!({"layer": layer, "scale": 1}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "layer.transform",
+            json!({"layer": layer, "scale": 2, "scaleX": 3}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let background = t.inspect()["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_u64() != Some(layer))
+        .and_then(|l| l["id"].as_u64())
+        .unwrap();
+    let e = t
+        .try_run("layer.transform", json!({"layer": background, "angle": 3}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+}
+
+/// The layer ids of the shown page, bottom first.
+fn layer_ids(t: &mut Setup) -> Vec<u64> {
+    let mut ids: Vec<u64> = t.inspect()["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].as_u64().unwrap())
+        .collect();
+    // doc.inspect lists the top first.
+    ids.reverse();
+    ids
+}
+
+#[test]
+fn layers_are_grouped_merged_masked_inverted_and_clipped_as_the_panel_does() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 40, "heightPx": 30, "background": "#FFFFFF"}),
+    );
+    let a = t.run("layer.new", json!({}))["layer"].as_u64().unwrap();
+    let b = t.run("layer.new", json!({}))["layer"].as_u64().unwrap();
+    // Group the two, then dissolve the folder.
+    let grouped = t.run("layer.group", json!({"layers": [a, b]}));
+    let kinds: Vec<String> = grouped["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["kind"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(kinds.iter().any(|k| k == "group"), "{kinds:?}");
+    let group = grouped["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == json!("group"))
+        .and_then(|l| l["id"].as_u64())
+        .unwrap();
+    t.run("layer.ungroup", json!({"layer": group}));
+    assert_eq!(layer_ids(&mut t).len(), 3);
+    let e = t.try_run("layer.ungroup", json!({"layer": a})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+
+    // A mask: off and on, linked, inverted, applied.
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 0, "y": 0, "w": 10, "h": 10}}),
+    );
+    t.run("edit.fill", json!({"layer": b, "color": "#FF0000"}));
+    t.run("select.none", json!({}));
+    t.run("layer.mask", json!({"layer": b, "op": "hide_all"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FFFFFF");
+    t.run("layer.mask", json!({"layer": b, "op": "disable"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+    t.run("layer.mask", json!({"layer": b, "op": "enable"}));
+    t.run("layer.mask", json!({"layer": b, "op": "invert"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+    t.run("layer.mask", json!({"layer": b, "op": "unlink"}));
+    t.run("layer.mask", json!({"layer": b, "op": "apply"}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+
+    // Invert the red into cyan; one step back.
+    t.run("layer.invert", json!({"layer": b}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#00FFFF");
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+
+    // The red's pixels as a selection.
+    let sel = t.run("select.from_layer", json!({"layer": b}));
+    assert_eq!(sel["bounds"], json!({"x": 0, "y": 0, "w": 10, "h": 10}));
+    t.run("select.none", json!({}));
+
+    // Clip `b` to `a` below it (empty): nothing of it shows; released, it does.
+    t.run("layer.clip", json!({"layer": b}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FFFFFF");
+    t.run("layer.clip", json!({"layer": b}));
+    assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");
+
+    // Stamp the visible ones into a new layer, merge the picked, and the
+    // Background becomes a plain layer.
+    let before = layer_ids(&mut t).len();
+    t.run("layer.merge", json!({"what": "visible"}));
+    assert_eq!(layer_ids(&mut t).len(), before + 1);
+    let ids = layer_ids(&mut t);
+    t.run("layer.group", json!({"layers": [ids[1], ids[2]]}));
+    let folder = layer_ids(&mut t)
+        .into_iter()
+        .find(|id| {
+            t.inspect()["layers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["id"].as_u64() == Some(*id) && l["kind"] == json!("group"))
+        })
+        .unwrap();
+    t.run("layer.merge", json!({"what": "group", "layer": folder}));
+    assert!(
+        !t.inspect()["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["kind"] == json!("group"))
+    );
+    let background = layer_ids(&mut t)[0];
+    t.run("layer.from_background", json!({"layer": background}));
+    let info = t.inspect();
+    assert!(
+        info["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["isBackground"] == json!(false))
+    );
+
+    // A copy, and an adjustment layer.
+    // With one layer picked, one copy; with two, two.
+    let n = layer_ids(&mut t).len();
+    t.run("layer.set", json!({"layer": background, "activate": true}));
+    t.run("layer.duplicate", json!({"picked": true}));
+    assert_eq!(layer_ids(&mut t).len(), n + 1);
+    let n = layer_ids(&mut t).len();
+    let adj = t.run(
+        "layer.new",
+        json!({"kind": "adjustment", "adjustment": {"kind": "invert"}}),
+    );
+    assert_eq!(layer_ids(&mut t).len(), n + 1);
+    assert!(adj["layer"].is_u64());
+    let e = t
+        .try_run("layer.new", json!({"kind": "adjustment"}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn the_mode_and_the_profile_change_and_come_back_with_undo() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 20, "heightPx": 10, "background": "#3366CC"}),
+    );
+    let m = t.run("image.mode", json!({"bits": 16}));
+    assert_eq!(
+        (m["bits"].clone(), m["color"].clone()),
+        (json!(16), json!("rgb"))
+    );
+    let m = t.run("image.mode", json!({"color": "cmyk"}));
+    assert_eq!(m["color"], json!("cmyk"));
+    let m = t.run("image.mode", json!({"color": "rgb"}));
+    assert_eq!(m["color"], json!("rgb"));
+    t.run(
+        "image.profile",
+        json!({"action": "convert", "profile": "adobe_rgb"}),
+    );
+    t.run(
+        "image.profile",
+        json!({"action": "assign", "profile": "srgb"}),
+    );
+    let e = t.try_run("image.mode", json!({"bits": 12})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "image.mode",
+            json!({"color": "rgb", "icc": {"path": "x.icc"}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn a_selection_is_kept_as_a_channel_and_loaded_back() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 40, "heightPx": 30}));
+    let e = t
+        .try_run("channel.edit", json!({"op": "save_selection"}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 5, "y": 5, "w": 10, "h": 8}}),
+    );
+    let kept = t.run("channel.edit", json!({"op": "save_selection"}));
+    assert_eq!(kept["channels"].as_array().unwrap().len(), 1);
+    t.run("channel.edit", json!({"op": "duplicate", "channel": 0}));
+    let named = t.run(
+        "channel.edit",
+        json!({"op": "rename", "channel": 1, "name": "Áo"}),
+    );
+    assert_eq!(named["channels"][1], json!("Áo"));
+    t.run("channel.edit", json!({"op": "new"}));
+    t.run("channel.edit", json!({"op": "delete", "channel": 2}));
+    // Loaded back: the same box; added to another, the two.
+    t.run("select.none", json!({}));
+    let sel = t.run("select.from_channel", json!({"channel": 0}));
+    assert_eq!(sel["bounds"], json!({"x": 5, "y": 5, "w": 10, "h": 8}));
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 30, "y": 20, "w": 5, "h": 5}}),
+    );
+    let sel = t.run("select.from_channel", json!({"channel": 1, "mode": "add"}));
+    assert_eq!(sel["bounds"], json!({"x": 5, "y": 5, "w": 30, "h": 20}));
+    let e = t
+        .try_run("select.from_channel", json!({"channel": 7}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn a_turned_frame_is_cropped_to_a_print_size_and_the_edge_filled() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 200, "heightPx": 100, "background": "#3366CC"}),
+    );
+    // Turned a little and scaled to 2×3 cm at 300 dpi: 236×354 px.
+    let out = t.run(
+        "image.crop",
+        json!({"frame": {"x": 100, "y": 50, "w": 60, "h": 90, "angle": 5,
+                         "outW": 236, "outH": 354}, "dpi": 300}),
+    );
+    assert_eq!(
+        (
+            out["widthPx"].clone(),
+            out["heightPx"].clone(),
+            out["dpi"].clone()
+        ),
+        (json!(236), json!(354), json!(300.0))
+    );
+    // Past the edge: what the crop adds takes the fill.
+    t.run("edit.undo", json!({}));
+    let out = t.run(
+        "image.crop",
+        json!({"rect": {"x": -20, "y": 0, "w": 60, "h": 20}, "fill": "#FFFFFF"}),
+    );
+    assert_eq!(out["widthPx"], json!(60));
+    assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 15, "h": 20})), "#FFFFFF");
+    assert_eq!(
+        t.mean(json!({"x": 25, "y": 0, "w": 30, "h": 20})),
+        "#3366CC"
+    );
+    let e = t
+        .try_run(
+            "image.crop",
+            json!({"rect": {"x": 0, "y": 0, "w": 5, "h": 5},
+                   "frame": {"x": 5, "y": 5, "w": 5, "h": 5}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "image.crop",
+            json!({"frame": {"x": 5, "y": 5, "w": 0.5, "h": 5}}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
 fn the_page_is_cropped_resized_rotated_and_flipped() {
     let mut t = Setup::new();
     t.run(
@@ -323,6 +707,70 @@ fn pages_are_added_and_shown() {
 }
 
 #[test]
+fn pages_are_renamed_moved_deleted_and_share_a_master() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 40, "heightPx": 30}));
+    t.run("page.add", json!({}));
+    t.run("layer.new", json!({"kind": "fill", "fill": "#00FF00"}));
+    t.run("page.add", json!({}));
+    let names = |t: &mut Setup| -> Vec<String> {
+        t.inspect()["pageList"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    t.run("page.rename", json!({"page": 1, "name": "Bìa"}));
+    assert_eq!(names(&mut t), ["Trang 1", "Bìa", "Trang 3"]);
+    // The page keeps what it holds when it moves.
+    t.run("page.move", json!({"from": 1, "to": 0}));
+    assert_eq!(names(&mut t)[0], "Bìa");
+    t.run("page.select", json!({"page": 0}));
+    assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 40, "h": 30})), "#00FF00");
+    t.run("page.rename", json!({"page": 0, "name": ""}));
+    assert_eq!(names(&mut t)[0], "Trang 1");
+
+    let p = t.run("page.delete", json!({"page": 2}));
+    assert_eq!(p["pages"], json!(2));
+    let e = t.try_run("page.delete", json!({"page": 5})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotFound);
+    t.run("page.delete", json!({"page": 1}));
+    let e = t.try_run("page.delete", json!({"page": 0})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+
+    // The master drawn beneath a page that shows it.
+    t.run("page.add", json!({}));
+    t.run("page.master", json!({"op": "edit"}));
+    t.run("layer.new", json!({"kind": "fill", "fill": "#FF0000"}));
+    t.run("page.master", json!({"op": "done"}));
+    t.run("page.select", json!({"page": 1}));
+    let shows_master = |t: &Setup| {
+        use crate::Workspace;
+        t.ws.documents()[0].active_master_backdrop().is_some()
+    };
+    t.run("page.master", json!({"op": "show", "page": 1}));
+    assert!(shows_master(&t));
+    t.run("page.master", json!({"op": "hide", "page": 1}));
+    assert!(!shows_master(&t));
+    t.run("page.master", json!({"op": "delete"}));
+    let e = t
+        .try_run("page.master", json!({"op": "delete"}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    let e = t.try_run("page.master", json!({"op": "show"})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+
+    t.engine.take_events();
+    t.run("page.setup", json!({"bleedMm": 3, "marginMm": 5}));
+    let said = t.engine.take_events().into_iter().find_map(|e| match e {
+        crate::EngineEvent::Notice { vi, .. } => Some(vi),
+        _ => None,
+    });
+    assert_eq!(said.as_deref(), Some("Trang: bleed 3mm · lề an toàn 5mm"));
+}
+
+#[test]
 fn shapes_paths_and_text_become_editable_layers() {
     let mut t = Setup::new();
     t.run("file.new", json!({"widthPx": 300, "heightPx": 200}));
@@ -365,6 +813,142 @@ fn shapes_paths_and_text_become_editable_layers() {
         )
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+/// Where a layer's pixels lie: `x, y, w, h`.
+fn bounds_of(t: &mut Setup, id: &Value) -> [i64; 4] {
+    let layers = t.inspect()["layers"].clone();
+    let b = layers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == *id)
+        .unwrap()["bounds"]
+        .clone();
+    ["x", "y", "w", "h"].map(|k| b[k].as_i64().unwrap())
+}
+
+#[test]
+fn shapes_are_aligned_spread_copied_by_steps_and_welded() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 300, "heightPx": 120}));
+    let rect = |t: &mut Setup, x: i64, y: i64, fill: &str| {
+        t.run(
+            "vector.add_shape",
+            json!({"shape": "rectangle", "rect": {"x": x, "y": y, "w": 20, "h": 20}, "fill": fill}),
+        )["layer"]
+            .clone()
+    };
+    let a = rect(&mut t, 10, 10, "#FF0000");
+    let b = rect(&mut t, 50, 60, "#00FF00");
+    let c = rect(&mut t, 200, 30, "#0000FF");
+
+    // Several line up with the box round them all: the tops with the top-most.
+    t.run("layer.align", json!({"layers": [a, b, c], "align": "top"}));
+    let tops: Vec<i64> = [&a, &b, &c].map(|id| bounds_of(&mut t, id)[1]).to_vec();
+    assert!(tops.iter().all(|&y| y == tops[0]), "{tops:?}");
+    // The middle one halfway between the outer two.
+    t.run(
+        "layer.distribute",
+        json!({"layers": [a, b, c], "axis": "horizontal"}),
+    );
+    let mid = |b: [i64; 4]| b[0] * 2 + b[2];
+    let (ba, bb, bc) = (
+        bounds_of(&mut t, &a),
+        bounds_of(&mut t, &b),
+        bounds_of(&mut t, &c),
+    );
+    assert!(
+        (mid(ba) + mid(bc) - 2 * mid(bb)).abs() <= 2,
+        "{ba:?} {bb:?} {bc:?}"
+    );
+    let e = t
+        .try_run(
+            "layer.distribute",
+            json!({"layers": [a, b], "axis": "vertical"}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+
+    // A copy a step to the right; again, from the copy.
+    let before = layer_ids(&mut t).len();
+    let one = t.run("layer.step_copy", json!({"layers": [a], "dx": 30}))["layer"].clone();
+    assert_eq!(bounds_of(&mut t, &one)[0], ba[0] + 30);
+    let two = t.run("layer.step_copy", json!({"dx": 30}))["layer"].clone();
+    assert_eq!(bounds_of(&mut t, &two)[0], ba[0] + 60);
+    assert_eq!(layer_ids(&mut t).len(), before + 2);
+    t.run("edit.undo", json!({}));
+    assert_eq!(layer_ids(&mut t).len(), before + 1);
+    let e = t
+        .try_run(
+            "layer.step_copy",
+            json!({"dx": 5, "matrix": [1, 0, 0, 1, 5, 0]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let bg = layer_ids(&mut t)[0];
+    let e = t
+        .try_run("layer.step_copy", json!({"layers": [bg], "dx": 5}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+
+    // A shape becomes curves once; welded with another, one is left.
+    t.run("vector.to_curves", json!({"layer": b}));
+    let e = t
+        .try_run("vector.to_curves", json!({"layer": b}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    let before = layer_ids(&mut t).len();
+    t.run("vector.shaping", json!({"op": "weld", "layers": [a, c]}));
+    assert_eq!(layer_ids(&mut t).len(), before - 1);
+}
+
+#[test]
+fn a_picture_is_put_in_a_frame_arranged_and_taken_out() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 100, "heightPx": 50}));
+    let frame = t.run(
+        "vector.add_shape",
+        json!({"shape": "rectangle", "rect": {"x": 0, "y": 0, "w": 50, "h": 50}, "fill": "#0000FF"}),
+    )["layer"]
+        .clone();
+    let photo = t.run("layer.new", json!({"kind": "fill", "fill": "#FF0000"}))["layer"].clone();
+    let left = json!({"x": 10, "y": 20, "w": 30, "h": 10});
+    let right = json!({"x": 60, "y": 20, "w": 30, "h": 10});
+
+    let e = t
+        .try_run("vector.powerclip", json!({"op": "fit", "layers": [photo]}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    // In the frame: the photo shows only inside it.
+    t.run(
+        "vector.powerclip",
+        json!({"op": "place", "layers": [photo, frame]}),
+    );
+    assert_eq!(t.mean(left.clone()), "#FF0000");
+    assert_eq!(t.mean(right.clone()), "#FFFFFF");
+    // Fit: 100×50 into 50×50 is 50×25, centred; the frame shows above it.
+    t.run("vector.powerclip", json!({"op": "fit", "layers": [photo]}));
+    assert_eq!(t.mean(json!({"x": 10, "y": 2, "w": 30, "h": 6})), "#0000FF");
+    assert_eq!(
+        t.mean(json!({"x": 10, "y": 20, "w": 30, "h": 8})),
+        "#FF0000"
+    );
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.mean(json!({"x": 10, "y": 2, "w": 30, "h": 6})), "#FF0000");
+    // Out again: all of it shows.
+    t.run(
+        "vector.powerclip",
+        json!({"op": "extract", "layers": [photo]}),
+    );
+    assert_eq!(t.mean(right), "#FF0000");
+    let e = t
+        .try_run(
+            "vector.powerclip",
+            json!({"op": "place", "layers": [photo]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
 }
 
 #[test]
@@ -1172,7 +1756,14 @@ fn a_selection_becomes_a_layer_and_a_mask_hides_and_is_applied() {
     assert_eq!(layers.len(), 2);
     let id = layers[0]["id"].clone();
     assert_eq!(copied["layer"], id);
-    t.run("select.none", json!({}));
+    // As Ctrl+J: the selection is dropped once copied.
+    assert_eq!(t.inspect()["selection"]["active"], json!(false));
+    // One undo step takes the copy and the drop back together.
+    t.run("edit.undo", json!({}));
+    let info = t.inspect();
+    assert_eq!(info["layers"].as_array().unwrap().len(), 1);
+    assert_eq!(info["selection"]["active"], json!(true));
+    t.run("layer.via_copy", json!({}));
     // Hide all of it: the grey below shows; apply: its pixels are gone.
     t.run("edit.fill", json!({"layer": id, "color": "#FF0000"}));
     assert_eq!(t.mean(json!({"x": 2, "y": 2, "w": 6, "h": 6})), "#FF0000");

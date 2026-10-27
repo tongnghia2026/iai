@@ -113,56 +113,7 @@ impl App {
     /// mask are kept. One structural undo restores the Shape. Returns true when it
     /// converted.
     pub fn convert_shape_to_path(&mut self, idx: usize) -> bool {
-        use crate::core::vector::affine::AffineTransform;
-        use crate::core::vector::from_shape;
-        use crate::core::vector::object::VectorObjectData;
-
-        let (data, offset) = match self.shape_at(idx) {
-            Some(v) => v,
-            None => return false,
-        };
-        let (x0, y0, x1, y1) = data.canvas_span(offset);
-        // Shape geometry is layer-local; convert to canvas space so the Path lands
-        // in the same place (its transform is then identity — delta-0 invariant).
-        let path = match data.kind {
-            ShapeKind::Rectangle => {
-                let radius = data.effective_radius();
-                from_shape::rect_path_corners(x0, y0, x1, y1, [radius; 4], [data.corner_type; 4])
-            }
-            ShapeKind::Ellipse => from_shape::ellipse_path(x0, y0, x1, y1),
-            ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
-            ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, data.sides),
-            ShapeKind::Star => from_shape::star_path(x0, y0, x1, y1, data.sides, data.star_inner),
-        };
-        let object = VectorObjectData::new(path, data.style, AffineTransform::IDENTITY);
-
-        let (cw, ch) = {
-            let d = self.docs.active();
-            (d.canvas.width, d.canvas.height)
-        };
-        let canvas = &mut self.docs.active_mut().canvas;
-        let before =
-            LayerStructureCommand::capture_before("Convert to Curves", &canvas.layer_stack, cw, ch);
-        {
-            let Some(layer) = canvas.layer_stack.layers.get_mut(idx) else {
-                return false;
-            };
-            crate::core::command_vector::apply_object_to_layer(layer, object);
-        }
-        // CMYK: re-derive ink planes for the new Path raster from its RGB mirror.
-        canvas.reconcile_path_ink();
-        canvas.layer_revision += 1;
-
-        let mut cmd = before;
-        cmd.capture_after(&canvas.layer_stack, cw, ch);
-        canvas.record(Box::new(cmd));
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Converted the shape to curves (Path)".to_string();
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-        true
+        self.layer_to_curves(idx)
     }
 
     /// On-canvas editing overlay for the active Shape layer: the bounding-box
@@ -408,17 +359,17 @@ impl App {
         self.jobs.shape_bake = None;
         if let Some((layer_id, secs)) = cost {
             let now = std::time::Instant::now();
-            if let Some(d) = self.edit.shape_drag.as_mut() {
-                if d.layer_id == layer_id {
-                    d.bake_cost_secs = secs;
-                    d.last_bake = Some(now);
-                }
+            if let Some(d) = self.edit.shape_drag.as_mut()
+                && d.layer_id == layer_id
+            {
+                d.bake_cost_secs = secs;
+                d.last_bake = Some(now);
             }
-            if let Some(p) = self.edit.shape_style_pending.as_mut() {
-                if p.layer_id == layer_id {
-                    p.bake_cost_secs = secs;
-                    p.last_bake = Some(now);
-                }
+            if let Some(p) = self.edit.shape_style_pending.as_mut()
+                && p.layer_id == layer_id
+            {
+                p.bake_cost_secs = secs;
+                p.last_bake = Some(now);
             }
         }
         self.chain_next_shape_bake();
@@ -904,7 +855,7 @@ mod tests {
 
     #[test]
     fn convert_rectangle_preserves_every_corner_style_geometry() {
-        use crate::core::vector::from_shape::{rect_path_corners, RectCorner};
+        use crate::core::vector::from_shape::{RectCorner, rect_path_corners};
 
         for corner in [RectCorner::Round, RectCorner::Scallop, RectCorner::Chamfer] {
             let (mut app, idx) = app_with_shape(ShapeKind::Rectangle, 10.0);

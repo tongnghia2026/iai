@@ -6,15 +6,15 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-    REG_OPTION_NON_VOLATILE, REG_SZ,
+    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegSetValueExW,
 };
 use windows_sys::Win32::UI::Shell::{
-    SHChangeNotify, SHGetFolderPathW, CSIDL_DESKTOPDIRECTORY, SHCNE_ASSOCCHANGED, SHCNF_FLUSH,
-    SHCNF_IDLIST,
+    CSIDL_DESKTOPDIRECTORY, SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST, SHChangeNotify,
+    SHGetFolderPathW,
 };
 
-const FILE_ICON: &[u8] = include_bytes!("../assets/iai.ico");
+const FILE_ICON: &[u8] = include_bytes!("../../../assets/iai.ico");
 
 fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
@@ -26,6 +26,7 @@ pub fn desktop_dir() -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     // MAX_PATH characters, as the call requires.
     let mut path = [0u16; 260];
+    // SAFETY: `path` holds MAX_PATH writable UTF-16 units, as the call needs.
     let found = unsafe {
         SHGetFolderPathW(
             std::ptr::null_mut(),
@@ -43,6 +44,8 @@ fn set_default_value(subkey: &str, value: &OsStr) -> bool {
     let subkey = wide(OsStr::new(subkey));
     let value = wide(value);
     let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `subkey` is NUL-terminated UTF-16 that outlives the call; `key`
+    // is a live HKEY slot the call writes the opened key into.
     let created = unsafe {
         RegCreateKeyExW(
             HKEY_CURRENT_USER,
@@ -59,6 +62,8 @@ fn set_default_value(subkey: &str, value: &OsStr) -> bool {
     if !created {
         return false;
     }
+    // SAFETY: `key` was opened just above; the data pointer and its length
+    // in bytes describe `value`, which outlives the call.
     let written = unsafe {
         RegSetValueExW(
             key,
@@ -69,6 +74,7 @@ fn set_default_value(subkey: &str, value: &OsStr) -> bool {
             (value.len() * std::mem::size_of::<u16>()) as u32,
         )
     } == 0;
+    // SAFETY: `key` was opened above and is closed once, here.
     unsafe {
         RegCloseKey(key);
     }
@@ -108,6 +114,7 @@ pub fn register_iai_file_type() {
         );
 
     if changed {
+        // SAFETY: SHCNE_ASSOCCHANGED takes no items: both pointers are null.
         unsafe {
             SHChangeNotify(
                 SHCNE_ASSOCCHANGED as i32,

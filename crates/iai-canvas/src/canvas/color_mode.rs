@@ -223,11 +223,7 @@ impl Canvas {
             return None;
         }
         let flat = self.layer_stack.flatten16(self.width, self.height);
-        if flat.is_empty() {
-            None
-        } else {
-            Some(flat)
-        }
+        if flat.is_empty() { None } else { Some(flat) }
     }
 
     /// Same as [`Self::export_flat16_samples`] but packed to big-endian bytes

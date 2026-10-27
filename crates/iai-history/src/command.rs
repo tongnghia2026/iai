@@ -963,19 +963,19 @@ impl CommandHistory {
             return;
         }
         self.group_depth -= 1;
-        if self.group_depth == 0 {
-            if let Some((label, commands)) = self.pending_group.take() {
-                match commands.len() {
-                    0 => {}
-                    1 => {
-                        let mut cmds = commands;
-                        self.push_to_stack(cmds.remove(0));
-                    }
-                    _ => {
-                        let mut compound = CompoundCommand::new(&label);
-                        compound.commands = commands;
-                        self.push_to_stack(Box::new(compound));
-                    }
+        if self.group_depth == 0
+            && let Some((label, commands)) = self.pending_group.take()
+        {
+            match commands.len() {
+                0 => {}
+                1 => {
+                    let mut cmds = commands;
+                    self.push_to_stack(cmds.remove(0));
+                }
+                _ => {
+                    let mut compound = CompoundCommand::new(&label);
+                    compound.commands = commands;
+                    self.push_to_stack(Box::new(compound));
                 }
             }
         }
@@ -1008,23 +1008,24 @@ impl CommandHistory {
     /// A command that fails to undo is put back untouched, so a failed step
     /// never leaves the document half-reverted.
     pub fn undo(&mut self, ctx: &mut EditContext) -> bool {
-        if let Some(mut entry) = self.undo_stack.pop_back() {
-            let mem = entry.cmd.memory_bytes();
-            self.total_memory_bytes = self.total_memory_bytes.saturating_sub(mem);
-            match entry.cmd.undo(ctx) {
-                Ok(()) => {
-                    self.redo_stack.push(entry);
-                    self.revision += 1;
-                    true
-                }
-                Err(_) => {
-                    self.total_memory_bytes += mem;
-                    self.undo_stack.push_back(entry);
-                    false
+        match self.undo_stack.pop_back() {
+            Some(mut entry) => {
+                let mem = entry.cmd.memory_bytes();
+                self.total_memory_bytes = self.total_memory_bytes.saturating_sub(mem);
+                match entry.cmd.undo(ctx) {
+                    Ok(()) => {
+                        self.redo_stack.push(entry);
+                        self.revision += 1;
+                        true
+                    }
+                    Err(_) => {
+                        self.total_memory_bytes += mem;
+                        self.undo_stack.push_back(entry);
+                        false
+                    }
                 }
             }
-        } else {
-            false
+            _ => false,
         }
     }
 
@@ -1033,8 +1034,8 @@ impl CommandHistory {
     /// The entry keeps its original [`EditId`], so redoing back onto a saved
     /// checkpoint reports clean again.
     pub fn redo(&mut self, ctx: &mut EditContext) -> bool {
-        if let Some(mut entry) = self.redo_stack.pop() {
-            match entry.cmd.execute(ctx) {
+        match self.redo_stack.pop() {
+            Some(mut entry) => match entry.cmd.execute(ctx) {
                 Ok(()) => {
                     let mem = entry.cmd.memory_bytes();
                     self.undo_stack.push_back(entry);
@@ -1047,9 +1048,8 @@ impl CommandHistory {
                     self.redo_stack.push(entry);
                     false
                 }
-            }
-        } else {
-            false
+            },
+            _ => false,
         }
     }
 
@@ -1171,10 +1171,10 @@ impl CommandHistory {
                 && (self.redo_stack.len() > mark.redo_len
                     || self.redo_stack.last().map(|e| e.id) != mark.redo_top)
             {
-                if let Some(entry) = self.redo_stack.pop() {
-                    if self.saved_point == SavedPoint::At(Some(entry.id)) {
-                        self.saved_point = SavedPoint::Unreachable;
-                    }
+                if let Some(entry) = self.redo_stack.pop()
+                    && self.saved_point == SavedPoint::At(Some(entry.id))
+                {
+                    self.saved_point = SavedPoint::Unreachable;
                 }
             }
         }
@@ -2135,9 +2135,11 @@ mod tests {
 
         // Without a channels context the command must refuse, not panic.
         let mut ctx = EditContext::new(&mut stack, &mut width, &mut height, None);
-        assert!(AlphaChannelCommand::remove("x", 0)
-            .execute(&mut ctx)
-            .is_err());
+        assert!(
+            AlphaChannelCommand::remove("x", 0)
+                .execute(&mut ctx)
+                .is_err()
+        );
     }
 
     #[test]

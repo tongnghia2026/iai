@@ -11,7 +11,7 @@ use iai_history::command::LayerStructureCommand;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{not_enabled, parse_color, Bounds, RectPx};
+use super::common::{Bounds, RectPx, not_enabled, parse_color};
 use crate::{CmdError, Command, CommandMeta, Effect, EngineEvent, Plan, Session, Validate};
 
 /// The fill and outline colours of a shape or path: at least one.
@@ -378,5 +378,279 @@ impl Command for AddPath {
         canvas.layer_revision = canvas.layer_revision.saturating_add(1);
         canvas.flatten_full();
         drawn(s, doc, idx).map(Plan::Done)
+    }
+}
+
+// ---- curves and shaping ---------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CurvesParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// A shape or text layer (see `doc.inspect`); the active layer when omitted.
+    pub layer: Option<u32>,
+}
+impl Validate for CurvesParams {}
+
+static CURVES: CommandMeta = CommandMeta {
+    id: "vector.to_curves",
+    label_vi: "Chuyển thành đường cong",
+    label_en: "Convert to Curves",
+    doc: "Turn a shape or a text layer into editable Bézier paths (Convert to Curves): a shape \
+          in its place, a text as one path per colour, where the letters were. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct ToCurves;
+
+impl Command for ToCurves {
+    type Params = CurvesParams;
+    type Output = super::layer::LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &CURVES
+    }
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: CurvesParams,
+    ) -> Result<Plan<super::layer::LayerChanged>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let idx = crate::layer_index(canvas, p.layer)?;
+        let said = match canvas.layer_stack.layers.get(idx).map(|l| &l.layer_type) {
+            Some(iai_doc::layer::LayerType::Text(_)) => {
+                iai_canvas::shaping::text_to_curves(canvas, idx)
+            }
+            Some(iai_doc::layer::LayerType::Vector(
+                iai_doc::vector::object::VectorGeometry::Primitive(_),
+            )) => iai_canvas::shaping::shape_to_curves(canvas, idx),
+            _ => {
+                return Err(not_enabled(
+                    "only a shape or a text layer turns into curves",
+                    "Chỉ layer hình hoặc chữ mới chuyển được thành đường cong",
+                ));
+            }
+        }
+        .map_err(|e| not_enabled(e.clone(), e))?;
+        let id = {
+            let stack = &canvas.layer_stack;
+            stack.layers.get(stack.active_idx).map(|l| l.id)
+        };
+        s.emit(EngineEvent::Structure { doc });
+        s.notice(said.clone(), said);
+        super::layer::answer(s, doc, id).map(Plan::Done)
+    }
+}
+
+/// The four shaping operations, in CorelDRAW's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapingOp {
+    /// One shape of them all (the sources go).
+    Weld,
+    /// The bottom one, less the ones above it (they stay).
+    Trim,
+    /// Their overlap, as a new shape on top (they stay).
+    Intersect,
+    /// Each loses what the ones above it hide.
+    Simplify,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ShapingParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    pub op: ShapingOp,
+    /// The vector layers (two or more); the ones picked in the Layers panel
+    /// when omitted.
+    #[schemars(length(min = 2, max = 1000))]
+    pub layers: Option<Vec<u32>>,
+}
+impl Validate for ShapingParams {}
+
+static SHAPING: CommandMeta = CommandMeta {
+    id: "vector.shaping",
+    label_vi: "Ghép / cắt hình",
+    label_en: "Shaping",
+    doc: "Weld, Trim, Intersect or Simplify two or more vector layers (Object ▸ Shaping), the \
+          bottom one the target. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct Shaping;
+
+impl Command for Shaping {
+    type Params = ShapingParams;
+    type Output = super::layer::LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &SHAPING
+    }
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: ShapingParams,
+    ) -> Result<Plan<super::layer::LayerChanged>, CmdError> {
+        use iai_vector::vector::boolean::BooleanOp;
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        if let Some(ids) = &p.layers {
+            let rows: Vec<usize> = ids
+                .iter()
+                .map(|id| crate::layer_index(canvas, Some(*id)))
+                .collect::<Result<_, _>>()?;
+            for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                l.selected = rows.contains(&i);
+            }
+        }
+        let op = match p.op {
+            ShapingOp::Weld => BooleanOp::Union,
+            ShapingOp::Trim => BooleanOp::Difference,
+            ShapingOp::Intersect => BooleanOp::Intersect,
+            ShapingOp::Simplify => BooleanOp::Exclude,
+        };
+        let said = iai_canvas::shaping::boolean_selected(canvas, op)
+            .map_err(|e| not_enabled(e.clone(), e))?;
+        let id = {
+            let stack = &canvas.layer_stack;
+            stack.layers.get(stack.active_idx).map(|l| l.id)
+        };
+        s.emit(EngineEvent::Structure { doc });
+        s.emit(EngineEvent::Selection { doc });
+        s.notice(said.clone(), said);
+        super::layer::answer(s, doc, id).map(Plan::Done)
+    }
+}
+
+// ---- PowerClip ------------------------------------------------------------
+
+/// What `vector.powerclip` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerClipOp {
+    /// Put the picked layers inside the top-most picked vector layer (the
+    /// frame): they show only within its shape.
+    Place,
+    /// Take the picked content out of its frame, free again.
+    Extract,
+    /// Centre the picked content in its frame, its size kept.
+    Center,
+    /// Scale it to fit wholly inside the frame, centred.
+    Fit,
+    /// Scale it to cover the frame (what spills over is clipped), centred.
+    Fill,
+    /// Stretch it to exactly fill the frame.
+    Stretch,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PowerClipParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    pub op: PowerClipOp,
+    /// The layers (for `place`, the frame and what goes in it); the ones
+    /// picked in the Layers panel when omitted.
+    #[schemars(length(min = 1, max = 1000))]
+    pub layers: Option<Vec<u32>>,
+}
+impl Validate for PowerClipParams {}
+
+static POWERCLIP: CommandMeta = CommandMeta {
+    id: "vector.powerclip",
+    label_vi: "PowerClip (đặt vào khung)",
+    label_en: "PowerClip",
+    doc: "Place layers inside a vector frame so they show only within its shape (`place`: the \
+          top-most picked vector layer is the frame), take them out again (`extract`), or \
+          arrange the content in its frame (`center`, `fit`, `fill`, `stretch`). The clip \
+          follows when the frame or the content moves. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct PowerClip;
+
+impl Command for PowerClip {
+    type Params = PowerClipParams;
+    type Output = super::layer::LayerChanged;
+    fn meta(&self) -> &'static CommandMeta {
+        &POWERCLIP
+    }
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: PowerClipParams,
+    ) -> Result<Plan<super::layer::LayerChanged>, CmdError> {
+        use iai_canvas::powerclip::{self, Fit};
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        if let Some(ids) = &p.layers {
+            let rows: Vec<usize> = ids
+                .iter()
+                .map(|id| crate::layer_index(canvas, Some(*id)))
+                .collect::<Result<_, _>>()?;
+            for (i, l) in canvas.layer_stack.layers.iter_mut().enumerate() {
+                l.selected = rows.contains(&i);
+            }
+        }
+        let no_content = || {
+            not_enabled(
+                "no picked layer is PowerClip content",
+                "No PowerClip content selected",
+            )
+        };
+        let said = match p.op {
+            PowerClipOp::Place => {
+                let n = super::layer::structural(canvas, "PowerClip", |canvas| {
+                    powerclip::place(canvas).ok_or_else(|| {
+                        not_enabled(
+                            "pick a vector layer for the frame and a layer to put in it",
+                            "Select content and a vector shape to use as the frame",
+                        )
+                    })
+                })?;
+                format!("Placed {n} object(s) into the PowerClip frame")
+            }
+            PowerClipOp::Extract => {
+                let n = super::layer::structural(canvas, "Extract PowerClip", |canvas| {
+                    match powerclip::extract(canvas) {
+                        0 => Err(no_content()),
+                        n => Ok(n),
+                    }
+                })?;
+                format!("Extracted {n} object(s) from the frame")
+            }
+            op => {
+                let (fit, line) = match op {
+                    PowerClipOp::Center => (Fit::Center, "Centred content in the frame"),
+                    PowerClipOp::Fit => (Fit::Fit, "Fit content inside the frame"),
+                    PowerClipOp::Fill => (Fit::Fill, "Filled the frame with the content"),
+                    _ => (Fit::Stretch, "Stretched content to fill the frame"),
+                };
+                if !powerclip::has_selected_content(&canvas.layer_stack) {
+                    return Err(no_content());
+                }
+                super::layer::structural(canvas, "Arrange PowerClip", |canvas| {
+                    match powerclip::arrange(canvas, fit) {
+                        0 => Err(not_enabled(
+                            "the frame or the content has nothing drawn",
+                            "Nothing to arrange: the frame or the content is empty",
+                        )),
+                        _ => Ok(()),
+                    }
+                })?;
+                line.to_string()
+            }
+        };
+        let id = {
+            let stack = &canvas.layer_stack;
+            stack.layers.get(stack.active_idx).map(|l| l.id)
+        };
+        s.emit(EngineEvent::Selection { doc });
+        s.notice(said.clone(), said);
+        super::layer::answer(s, doc, id).map(Plan::Done)
     }
 }

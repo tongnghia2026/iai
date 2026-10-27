@@ -686,6 +686,8 @@ impl App {
                 std::sync::Arc::new(layers.iter().map(|l| l.name.clone()).collect());
             self.shell.ui_data_cache.layer_visibles =
                 std::sync::Arc::new(layers.iter().map(|l| l.visible).collect());
+            self.shell.ui_data_cache.layer_ids =
+                std::sync::Arc::new(layers.iter().map(|l| l.id).collect());
             self.shell.ui_data_cache.layer_opacities =
                 std::sync::Arc::new(layers.iter().map(|l| l.opacity).collect());
             self.shell.ui_data_cache.layer_blend_modes =
@@ -1084,6 +1086,16 @@ impl App {
                     .collect(),
             ),
             doc_ai_busy,
+            doc_attention: {
+                let away = self.id_photo_made_away();
+                std::sync::Arc::new(
+                    self.docs
+                        .documents
+                        .iter()
+                        .map(|doc| away.contains(&doc.id))
+                        .collect(),
+                )
+            },
             doc_thumbs,
             doc_dims,
         }
@@ -1096,6 +1108,7 @@ impl App {
             active_layer_idx: self.docs.active().canvas.layer_stack.active_idx,
             layer_names: self.shell.ui_data_cache.layer_names.clone(),
             layer_visibles: self.shell.ui_data_cache.layer_visibles.clone(),
+            layer_ids: self.shell.ui_data_cache.layer_ids.clone(),
             layer_opacities: self.shell.ui_data_cache.layer_opacities.clone(),
             layer_blend_modes: self.shell.ui_data_cache.layer_blend_modes.clone(),
             layer_locked: self.shell.ui_data_cache.layer_locked.clone(),
@@ -1775,6 +1788,7 @@ impl App {
             portrait_brush_redo: false,
             portrait_overlay: None,
             portrait_reopened: false,
+            portrait_resumable: false,
             portrait_restore_settings: None,
             portrait_restore_faces: None,
             id_photo_status: Default::default(),
@@ -2043,6 +2057,8 @@ impl App {
             news: crate::author_news::current(),
             mail: self.mail_view(),
             agent: self.agent_view(),
+            errand: self.errand_view(),
+            quick: self.quick_view(),
             #[cfg(feature = "pro")]
             pro: self.pro_view(),
         }
@@ -2097,10 +2113,10 @@ fn cached_thumbnail(
     key: u64,
     build: impl FnOnce() -> Vec<u8>,
 ) -> (u64, std::sync::Arc<Vec<u8>>) {
-    if let Some((cached_key, thumb)) = cache.get(&id) {
-        if *cached_key == key {
-            return (key, thumb.clone());
-        }
+    if let Some((cached_key, thumb)) = cache.get(&id)
+        && *cached_key == key
+    {
+        return (key, thumb.clone());
     }
     let thumb = std::sync::Arc::new(build());
     cache.insert(id, (key, thumb.clone()));

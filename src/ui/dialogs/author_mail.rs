@@ -3,7 +3,7 @@
 //! its form and its outcome; `crate::author_mail` sends what is written.
 
 use super::*;
-use crate::author_mail::{Kind, Outgoing, Status, AUTHOR_EMAIL, MAX_TEXT};
+use crate::author_mail::{AUTHOR_EMAIL, Kind, MAX_TEXT, Outgoing, Status};
 
 const MAIL_DIALOG_WIDTH: f32 = 460.0;
 /// The colour of a reason something did not go through.
@@ -256,8 +256,8 @@ pub(crate) fn author_mail_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::dialogs::stage::Stage;
     use crate::ui::SupportDialog;
+    use crate::ui::dialogs::stage::Stage;
     use std::path::PathBuf;
 
     fn staged(kind: Kind, status: Status) -> Stage {

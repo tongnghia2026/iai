@@ -82,11 +82,7 @@ impl PatchTool {
     /// Live freehand trace, for the App to draw as a preview path (reuses the
     /// Lasso preview rendering).
     pub fn preview_points(&self) -> &[(f32, f32)] {
-        if self.drawing {
-            &self.points
-        } else {
-            &[]
-        }
+        if self.drawing { &self.points } else { &[] }
     }
 
     /// Drain a finished patch gesture; the App applies it after `on_release`.

@@ -23,12 +23,12 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use iai::formats::Importer;
 use iai::formats::raw::RawImporter;
 use iai::formats::raw::{
-    probe_sensor_metadata, BlackLevelSource, RawSensorMetadata, SensorCorrectionReason,
-    SensorMetadataAvailability, WhiteLevelSource,
+    BlackLevelSource, RawSensorMetadata, SensorCorrectionReason, SensorMetadataAvailability,
+    WhiteLevelSource, probe_sensor_metadata,
 };
-use iai::formats::Importer;
 
 fn corpus_dir() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var("IAI_RAW_CORPUS").ok()?);
@@ -111,12 +111,21 @@ fn raw_sensor_metadata_audit() {
                     "  {:<40} {:<9} {:<20} {}x{} cpp{} cfa={}({}) active={:?} black={:?}({}) white_eff={:?} src=[{},{},{},{}] blackareas={} defect={} green={}",
                     name.chars().take(40).collect::<String>(),
                     format!("{:?}", meta.backend),
-                    format!("{} {}", meta.make, meta.model).chars().take(20).collect::<String>(),
+                    format!("{} {}", meta.make, meta.model)
+                        .chars()
+                        .take(20)
+                        .collect::<String>(),
                     meta.width,
                     meta.height,
                     meta.cpp,
                     meta.cfa_name,
-                    if meta.is_mono { "mono" } else if meta.cfa_valid { "bayer" } else { "?" },
+                    if meta.is_mono {
+                        "mono"
+                    } else if meta.cfa_valid {
+                        "bayer"
+                    } else {
+                        "?"
+                    },
                     meta.active_area,
                     meta.black_levels.map(|v| v as i32),
                     black_source_tag(meta.black_level_source),

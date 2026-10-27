@@ -677,7 +677,7 @@ impl Default for ToolManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolId, ToolManager, SHAPE_GROUP};
+    use super::{SHAPE_GROUP, ToolId, ToolManager};
 
     #[test]
     fn shape_group_keeps_arrow_as_the_preferred_tool() {

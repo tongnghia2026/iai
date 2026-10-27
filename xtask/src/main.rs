@@ -5,10 +5,17 @@
 //! - `lints [--update] [cargo args…]`: clippy over the workspace, failing on
 //!   any warning, except the crash lints each crate is allowed a number of in
 //!   `xtask/lint-budget.txt`; those may go down, never up.
+//! - `intents [--list] [--update]`: the asks of the window that are not
+//!   engine commands yet (fields of `UiActions`), within
+//!   `xtask/intent-budget.txt`; the numbers only go down.
 //! - `panic-hunt`: every command called with params made from its JSON Schema
 //!   to probe its edges (`iai_engine::hunt`); fails on a panic or a hang.
+//! - `export-public [--sync] <folder>`: the public tree, HEAD less the Pro
+//!   part (`export_public.rs` says how).
 #![forbid(unsafe_code)]
 
+mod export_public;
+mod intents;
 mod layers;
 mod lints;
 
@@ -17,14 +24,18 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: cargo xtask layers
        cargo xtask lints [--update] [arguments for cargo clippy, e.g. --features iai/canvas-editor-webview]
-       cargo xtask panic-hunt";
+       cargo xtask intents [--list] [--update]
+       cargo xtask panic-hunt
+       cargo xtask export-public [--sync] <folder outside the repository>";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("layers") => layers::run(),
         Some("lints") => lints::run(args.collect()),
+        Some("intents") => intents::run(args.collect()),
         Some("panic-hunt") => panic_hunt(),
+        Some("export-public") => export_public::run(args.collect()),
         _ => Err(USAGE.to_owned()),
     };
     match result {

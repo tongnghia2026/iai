@@ -124,7 +124,7 @@ impl FillTool {
 
             while let Some((x, y)) = queue.pop_front() {
                 macro_rules! try_neighbor {
-                    ($nx:expr, $ny:expr) => {
+                    ($nx:expr_2021, $ny:expr_2021) => {
                         let vi = ($ny * w + $nx) as usize;
                         if !mask[vi]
                             && Self::color_diff(target_color, get_px($nx, $ny)) <= tolerance

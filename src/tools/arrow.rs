@@ -4,7 +4,7 @@ use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::geometry::Point;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
-use crate::core::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+use crate::core::vector::from_shape::{ConnectorRoute, elbow_connector_path};
 use crate::core::vector::object::VectorObjectData;
 use crate::core::vector::style::{ArrowHead, ArrowStyle, Paint, VectorStyle};
 
@@ -83,11 +83,11 @@ impl ArrowTool {
             self.snap_marker = None;
             return raw;
         }
-        if self.snap_enabled {
-            if let Some(hit) = ctx.snap_vector_point(raw, None, SNAP_PX) {
-                self.snap_marker = Some(hit.point);
-                return hit.point;
-            }
+        if self.snap_enabled
+            && let Some(hit) = ctx.snap_vector_point(raw, None, SNAP_PX)
+        {
+            self.snap_marker = Some(hit.point);
+            return hit.point;
         }
         self.snap_marker = None;
         self.constrained_end(raw, shift)

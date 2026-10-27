@@ -72,6 +72,9 @@ pub struct DocumentViewModel {
     pub doc_titles: std::sync::Arc<Vec<String>>,
     pub doc_modified: std::sync::Arc<Vec<bool>>,
     pub doc_ai_busy: std::sync::Arc<Vec<Option<DocAiBusy>>>,
+    /// Tabs whose work ended while they were not in front (an ID photo
+    /// made): they blink until shown.
+    pub doc_attention: std::sync::Arc<Vec<bool>>,
     /// Hover preview texture per tab, once rendered.
     pub doc_thumbs: std::sync::Arc<Vec<Option<(egui::TextureId, egui::Vec2)>>>,
     /// Pixel size per tab; None for documents without a pixel preview.
@@ -101,6 +104,8 @@ pub struct LayerViewModel {
     pub active_layer_idx: usize,
     pub layer_names: std::sync::Arc<Vec<String>>,
     pub layer_visibles: std::sync::Arc<Vec<bool>>,
+    /// Each layer's id: what a command names it by.
+    pub layer_ids: std::sync::Arc<Vec<u32>>,
     pub layer_opacities: std::sync::Arc<Vec<f32>>,
     pub layer_blend_modes: std::sync::Arc<Vec<BlendMode>>,
     pub layer_locked: std::sync::Arc<Vec<bool>>,
@@ -508,6 +513,9 @@ pub struct DialogViewModel {
     /// A "Chân dung" layer is reopened; its saved sliders and faces, until
     /// the dialog takes them.
     pub portrait_reopened: bool,
+    /// The photo in front has a "Chân dung" layer that reopens as it is:
+    /// its sliders come live as soon as the pointer comes into the window.
+    pub portrait_resumable: bool,
     pub portrait_restore_settings: Option<crate::core::portrait_recipe::PortraitSettings>,
     pub portrait_restore_faces: Option<Vec<bool>>,
     /// The Ảnh thẻ side: its status line, whether that line is an error,
@@ -678,6 +686,10 @@ pub struct ChromeViewModel {
     pub mail: MailView,
     /// AI agents' access to the window.
     pub agent: AgentView,
+    /// "Nhờ AI làm": an errand for Gemini in Antigravity.
+    pub errand: ErrandView,
+    /// "Việc nhanh": jobs iAi does on a folder by itself, no AI.
+    pub quick: QuickView,
     /// Pro on this machine, as its dialogs and the Help menu show it.
     #[cfg(feature = "pro")]
     pub pro: ProView,
@@ -742,6 +754,262 @@ pub struct AgentView {
     /// is open).
     pub skills_dir: String,
     pub skills: Vec<SkillRow>,
+}
+
+/// The jobs "Nhờ AI làm" offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ErrandJob {
+    /// ID cards shot at a slant, laid flat four to an A4 page (Pro).
+    #[default]
+    IdCards,
+    /// An ID photo of each person, so many each, on photo paper (Pro).
+    IdPhotos,
+    /// The ID photo open in the window, dressed anew or its missing
+    /// shoulders filled by online AI; its face, hair and backdrop stay the
+    /// photo's (Pro).
+    DressIdPhoto,
+    /// Photos of papers made clean and white for printing.
+    ScanCleanup,
+    /// The photo open in the window, drawn anew by online AI as asked; the
+    /// result comes back as a new layer of it.
+    EditPhoto,
+    /// What the person writes.
+    Other,
+}
+
+impl ErrandJob {
+    pub const ALL: [ErrandJob; 6] = [
+        ErrandJob::IdCards,
+        ErrandJob::IdPhotos,
+        ErrandJob::DressIdPhoto,
+        ErrandJob::EditPhoto,
+        ErrandJob::ScanCleanup,
+        ErrandJob::Other,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ErrandJob::IdCards => "In căn cước lên A4",
+            ErrandJob::IdPhotos => "Ảnh thẻ cho nhiều người",
+            ErrandJob::DressIdPhoto => "Thay áo, lấp vai ảnh thẻ đang mở (AI online)",
+            ErrandJob::EditPhoto => "Sửa ảnh đang mở (AI online)",
+            ErrandJob::ScanCleanup => "Làm sạch ảnh chụp giấy tờ",
+            ErrandJob::Other => "Việc khác (tự viết)",
+        }
+    }
+
+    /// It works on the photo open in the window, not on a folder.
+    pub fn on_open_photo(self) -> bool {
+        matches!(self, ErrandJob::EditPhoto | ErrandJob::DressIdPhoto)
+    }
+
+    /// It needs Pro's commands.
+    pub fn pro(self) -> bool {
+        matches!(
+            self,
+            ErrandJob::IdCards | ErrandJob::IdPhotos | ErrandJob::DressIdPhoto
+        )
+    }
+
+    /// Online AI (a model that draws the picture anew) may be offered for
+    /// its hard cases; never for ID cards.
+    pub fn online_ok(self) -> bool {
+        matches!(self, ErrandJob::IdPhotos | ErrandJob::Other)
+    }
+}
+
+/// What an ID photo is dressed in when online AI may change it.
+pub const ERRAND_SHIRTS: [(&str, &str); 4] = [
+    ("", "Giữ nguyên áo"),
+    ("white_shirt", "Sơ mi trắng"),
+    ("vest", "Vest đen, sơ mi trắng"),
+    ("ao_dai", "Áo dài trắng"),
+];
+
+/// What the person filled in "Nhờ AI làm" (the folder is the app's).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ErrandForm {
+    pub job: ErrandJob,
+    /// What else the person says; the whole ask for [`ErrandJob::Other`].
+    pub note: String,
+    /// ID photos: "3x4", "2x3", "4x6".
+    pub size: String,
+    /// ID photos: "white", "blue".
+    pub backdrop: String,
+    /// ID photos: "10x15", "13x18".
+    pub paper: String,
+    /// ID photos: copies of each person, unless the note says otherwise.
+    pub copies: u32,
+    /// Hard cases may go to online AI (it draws the picture anew); off,
+    /// iAi's own tools do everything.
+    pub online: bool,
+    /// ID photos with online AI: the clothes to put on (see
+    /// [`ERRAND_SHIRTS`]); empty keeps them.
+    pub shirt: String,
+}
+
+impl Default for ErrandForm {
+    fn default() -> Self {
+        Self {
+            job: ErrandJob::default(),
+            note: String::new(),
+            size: "3x4".to_string(),
+            backdrop: "white".to_string(),
+            paper: "10x15".to_string(),
+            copies: 4,
+            online: false,
+            shirt: String::new(),
+        }
+    }
+}
+
+/// Antigravity on this machine, as "Nhờ AI làm" sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AntigravityState {
+    /// Not installed (or never opened).
+    #[default]
+    Absent,
+    /// There, not yet set up to take errands from iAi.
+    NotConnected,
+    Ready,
+}
+
+/// The errand under way, as "Nhờ AI làm" shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ErrandRunView {
+    pub title: String,
+    /// Where it stands, in the person's words.
+    pub stage: String,
+    /// Commands the agent has run on the window.
+    pub steps: u32,
+    /// What it did last.
+    pub last: String,
+    /// Still going ("Dừng" is offered).
+    pub running: bool,
+    pub failed: bool,
+    /// The results' folder, once it is there.
+    pub results: Option<String>,
+}
+
+/// "Nhờ AI làm" as its window shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ErrandView {
+    pub open: bool,
+    pub antigravity: AntigravityState,
+    /// What "Nối với Antigravity" came to.
+    pub connect_note: Option<String>,
+    /// The folder of photos chosen.
+    pub folder: String,
+    /// The photo open in the window (its tab's title), for "Sửa ảnh đang mở".
+    pub photo: Option<String>,
+    /// Pro is open on this machine.
+    pub pro: bool,
+    pub run: Option<ErrandRunView>,
+    /// A job to show chosen, asked for elsewhere (the ID photo's "Thay áo"),
+    /// counted so that the window takes it once.
+    pub preset: Option<(u64, ErrandJob)>,
+}
+
+/// What "Việc nhanh" does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum QuickTask {
+    /// Every photo of a paper in the folder made clean and white.
+    #[default]
+    ScanCleanup,
+    /// Every portrait in the folder an ID photo, so many each, on photo
+    /// paper (Pro).
+    IdPhotos,
+    /// A saved skill that runs on a folder (its name).
+    Skill(String),
+}
+
+impl QuickTask {
+    pub fn pro(&self) -> bool {
+        matches!(self, QuickTask::IdPhotos)
+    }
+}
+
+/// A value a saved skill takes, as its form holds it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuickValue {
+    Text(String),
+    Number(f64),
+    Bool(bool),
+}
+
+/// One field of a saved skill's form (its folders are the one chosen).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuickField {
+    pub name: String,
+    pub label: String,
+    pub value: QuickValue,
+}
+
+/// A saved skill "Việc nhanh" offers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuickSkill {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    /// "tự lưu", "đã dùng 3 lần"…
+    pub status: String,
+    pub fields: Vec<QuickField>,
+}
+
+/// What the person filled in "Việc nhanh" (the folder is the app's).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuickForm {
+    pub task: QuickTask,
+    /// Papers: "grayscale" or "bilevel".
+    pub look: String,
+    /// ID photos, as in [`ErrandForm`].
+    pub size: String,
+    pub backdrop: String,
+    pub paper: String,
+    pub copies: u32,
+    /// A saved skill's values, by param.
+    pub fields: Vec<QuickField>,
+}
+
+impl Default for QuickForm {
+    fn default() -> Self {
+        let errand = ErrandForm::default();
+        Self {
+            task: QuickTask::default(),
+            look: "grayscale".to_string(),
+            size: errand.size,
+            backdrop: errand.backdrop,
+            paper: errand.paper,
+            copies: errand.copies,
+            fields: Vec::new(),
+        }
+    }
+}
+
+/// The job under way, or the last one, as "Việc nhanh" shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuickRunView {
+    pub title: String,
+    pub stage: String,
+    pub running: bool,
+    pub failed: bool,
+    /// The results' folder, once it is there.
+    pub results: Option<String>,
+}
+
+/// "Việc nhanh" as its window shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuickView {
+    pub open: bool,
+    /// The folder of photos chosen (the one "Nhờ AI làm" uses).
+    pub folder: String,
+    /// Pro is open on this machine.
+    pub pro: bool,
+    pub skills: Vec<QuickSkill>,
+    pub run: Option<QuickRunView>,
+    /// A job to show chosen, asked for elsewhere, counted so that the
+    /// window takes it once.
+    pub preset: Option<(u64, QuickTask)>,
 }
 
 /// One saved skill as the agent dialog lists it.
@@ -933,6 +1201,7 @@ impl Default for UiData {
                 doc_titles: std::sync::Arc::new(vec!["Untitled".to_string()]),
                 doc_modified: std::sync::Arc::new(vec![false]),
                 doc_ai_busy: std::sync::Arc::new(vec![None]),
+                doc_attention: std::sync::Arc::new(vec![false]),
                 doc_thumbs: std::sync::Arc::new(vec![None]),
                 doc_dims: std::sync::Arc::new(vec![None]),
                 has_doc: false,
@@ -950,6 +1219,7 @@ impl Default for UiData {
                 active_layer_idx: 0,
                 layer_names: std::sync::Arc::new(vec!["Background".to_string()]),
                 layer_visibles: std::sync::Arc::new(vec![true]),
+                layer_ids: std::sync::Arc::new(vec![1]),
                 layer_opacities: std::sync::Arc::new(vec![1.0]),
                 layer_blend_modes: std::sync::Arc::new(vec![BlendMode::Normal]),
                 layer_locked: std::sync::Arc::new(vec![false]),
@@ -1219,6 +1489,7 @@ impl Default for UiData {
                 portrait_brush_redo: false,
                 portrait_overlay: None,
                 portrait_reopened: false,
+                portrait_resumable: false,
                 id_photo_status: String::new(),
                 id_photo_error: false,
                 id_photo_busy: false,
@@ -1340,6 +1611,8 @@ impl Default for UiData {
                 news: Default::default(),
                 mail: Default::default(),
                 agent: AgentView::default(),
+                errand: ErrandView::default(),
+                quick: QuickView::default(),
                 #[cfg(feature = "pro")]
                 pro: ProView::default(),
             },

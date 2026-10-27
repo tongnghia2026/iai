@@ -4,14 +4,14 @@
 use super::{file_name, normalized_path_key};
 use crate::app::state::App;
 use crate::core::canvas::Canvas;
-use crate::core::document::{file_modified_at, DocumentId};
+use crate::core::document::{DocumentId, file_modified_at};
 use crate::core::raw_spill::RawSpill;
 use crate::file_io;
 use crate::formats::raw::RAW_DECODE_CANCELLED;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Multi-RAW sessions present the embedded camera JPEG immediately, then swap
@@ -78,7 +78,7 @@ mod raw_transition_tests {
 
     use crate::app::state::App;
     use crate::core::canvas::Canvas;
-    use crate::core::develop_scene::{f32_to_f16_bits, SceneSource};
+    use crate::core::develop_scene::{SceneSource, f32_to_f16_bits};
     use crate::core::document::{Document, DocumentId};
     use std::sync::Arc;
 
@@ -331,10 +331,10 @@ impl App {
         let parent = file_io::dialog_parent(window);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            if let Some(paths) = file_io::dialog_open_many(parent) {
-                if !paths.is_empty() {
-                    let _ = tx.send(file_io::FileDialogResult::OpenedMany(paths));
-                }
+            if let Some(paths) = file_io::dialog_open_many(parent)
+                && !paths.is_empty()
+            {
+                let _ = tx.send(file_io::FileDialogResult::OpenedMany(paths));
             }
         });
         self.jobs.pending_file_dialog = Some(rx);
@@ -510,10 +510,10 @@ impl App {
                 let (preview_tx, preview_rx) = std::sync::mpsc::sync_channel(2);
                 std::thread::spawn(move || {
                     for path in preview_paths {
-                        if let Some(preview) = crate::formats::raw_preview::extract(&path) {
-                            if preview_tx.send((path, preview)).is_err() {
-                                break;
-                            }
+                        if let Some(preview) = crate::formats::raw_preview::extract(&path)
+                            && preview_tx.send((path, preview)).is_err()
+                        {
+                            break;
                         }
                     }
                 });
@@ -597,12 +597,11 @@ impl App {
                         if let Some((w, h)) = dims {
                             self.record_recent(&path, w, h);
                         }
-                        if is_last {
-                            if let Some(id) = last_attached {
-                                if let Some(idx) = self.docs.index_of(id) {
-                                    self.switch_to_doc(idx);
-                                }
-                            }
+                        if is_last
+                            && let Some(id) = last_attached
+                            && let Some(idx) = self.docs.index_of(id)
+                        {
+                            self.switch_to_doc(idx);
                         }
                     }
                     Ok((path, Err(e), _is_last)) => {
@@ -685,10 +684,10 @@ impl App {
         }) {
             self.ensure_raw_resident(idx);
         }
-        if !self.jobs.pending_loads.is_empty() {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if !self.jobs.pending_loads.is_empty()
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
         }
     }
 
@@ -882,10 +881,10 @@ impl App {
             }
         }
         self.jobs.pending_iai_projects = still_pending;
-        if !self.jobs.pending_iai_projects.is_empty() {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if !self.jobs.pending_iai_projects.is_empty()
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
         }
     }
 
@@ -959,10 +958,10 @@ impl App {
             }
         }
         self.jobs.pending_raw_previews = still_pending;
-        if !self.jobs.pending_raw_previews.is_empty() {
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
+        if !self.jobs.pending_raw_previews.is_empty()
+            && let Some(w) = &self.win.window
+        {
+            w.request_redraw();
         }
     }
 
@@ -1278,14 +1277,14 @@ impl App {
         // A RAW whose fast preview is already showing: swap the full decode into
         // that placeholder tab instead of opening a second one for the same file.
         if pdf_page.is_none() && page.is_none() {
-            if let Some(existing_id) = self.jobs.raw_preview_docs.remove(&path_key) {
-                if let Some(idx) = self.docs.index_of(existing_id) {
-                    self.replace_preview_with_full(idx, canvas);
-                    return Some(existing_id);
-                }
-                // Placeholder was closed before the decode finished — fall through
-                // and attach as a fresh document.
+            if let Some(existing_id) = self.jobs.raw_preview_docs.remove(&path_key)
+                && let Some(idx) = self.docs.index_of(existing_id)
+            {
+                self.replace_preview_with_full(idx, canvas);
+                return Some(existing_id);
             }
+            // Placeholder was closed before the decode finished — fall through
+            // and attach as a fresh document.
             // A cancel + immediate re-open leaves TWO decodes of the same RAW in
             // flight; the first to land filled the placeholder above, so a
             // second result for an already-open path is a duplicate — drop it.
@@ -1406,6 +1405,9 @@ impl App {
                     }
                     file_io::FileDialogResult::PickedPrintFolder(dir) => {
                         self.set_print_folder(dir);
+                    }
+                    file_io::FileDialogResult::PickedErrandFolder(dir) => {
+                        self.shell.errands.folder = Some(dir);
                     }
                     file_io::FileDialogResult::PickedSponsorLogo(path) => {
                         self.set_sponsor_logo(path);
@@ -1670,11 +1672,11 @@ impl App {
             .is_some_and(|spill| !spill.is_failed());
         if !spilled {
             let bytes = full.width as u64 * full.height as u64 * 12;
-            if self.make_raw_spill_room(bytes, &[id]) {
-                if let Some(spill) = RawSpill::spawn(full) {
-                    self.docs.documents[idx].raw_spill = Some(spill);
-                    self.touch_raw_spill(id);
-                }
+            if self.make_raw_spill_room(bytes, &[id])
+                && let Some(spill) = RawSpill::spawn(full)
+            {
+                self.docs.documents[idx].raw_spill = Some(spill);
+                self.touch_raw_spill(id);
             }
         }
         // A later decode of this path swaps the full image back into THIS doc

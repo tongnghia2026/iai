@@ -410,11 +410,7 @@ impl Edges {
                 n += 1;
             }
         }
-        if n == 0 {
-            0.0
-        } else {
-            sum / n as f32
-        }
+        if n == 0 { 0.0 } else { sum / n as f32 }
     }
 }
 
@@ -617,10 +613,10 @@ fn drawn_fourth(
             let corners = [p1, p2, q2, q1];
             let off = (seen_aspect(&corners, centre) / aspect).ln().abs();
             let slot = usize::from(length > across);
-            if let Some(kept) = best.get_mut(slot) {
-                if off < kept.0 {
-                    *kept = (off, Some(corners));
-                }
+            if let Some(kept) = best.get_mut(slot)
+                && off < kept.0
+            {
+                *kept = (off, Some(corners));
             }
         }
         for (off, corners) in best {
@@ -721,10 +717,10 @@ fn fit_sides(photo: &Photo<'_>, rough: [(f32, f32); 4], reach: f32) -> [(f32, f3
     for (k, corner) in corners.iter_mut().enumerate() {
         let before = &sides[(k + 3) % 4];
         let after = &sides[k];
-        if let Some(p) = before.meet(after) {
-            if (p.0 - corner.0).hypot(p.1 - corner.1) <= reach * 3.0 {
-                *corner = p;
-            }
+        if let Some(p) = before.meet(after)
+            && (p.0 - corner.0).hypot(p.1 - corner.1) <= reach * 3.0
+        {
+            *corner = p;
         }
     }
     corners
@@ -810,7 +806,7 @@ fn fit_side(photo: &Photo<'_>, a: (f32, f32), b: (f32, f32), reach: f32) -> FitL
         let next: Vec<(f32, f32)> = keep
             .iter()
             .zip(&off)
-            .filter(|(_, &d)| d <= tolerance)
+            .filter(|&(_, &d)| d <= tolerance)
             .map(|(&p, _)| p)
             .collect();
         if next.len() < samples / 4 {
@@ -880,11 +876,7 @@ fn order(c: [(f32, f32); 4]) -> [(f32, f32); 4] {
     let (one, other) = (mid(long), mid(long + 2));
     let short = len(&c, (long + 1) % 4).min(len(&c, (long + 3) % 4));
     let top = if (one.1 - other.1).abs() > 0.25 * short {
-        if one.1 < other.1 {
-            long
-        } else {
-            long + 2
-        }
+        if one.1 < other.1 { long } else { long + 2 }
     } else if one.0 <= other.0 {
         long
     } else {

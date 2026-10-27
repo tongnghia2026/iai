@@ -184,9 +184,14 @@ pub struct BackgroundJobs {
     /// opening the device, the spooler's StartDoc and the band conversion take
     /// a few hundred milliseconds a sheet, more with copies.
     pub(in crate::app) pending_print: Option<PrintJob>,
+    /// Sheets printed while one was on its way: sent after it, in turn (the
+    /// dialog closes at Print, as Photoshop's does, and work goes on).
+    pub(in crate::app) print_queue: std::collections::VecDeque<PrintTask>,
     /// Why a direct print failed in its worker; the next frame sends the page
     /// through the PDF handler instead.
     pub(in crate::app) print_gdi_failed: Option<String>,
+    /// The document and page that direct print was of, for that PDF route.
+    pub(in crate::app) print_failed_doc: Option<(crate::core::document::DocumentId, usize)>,
     /// Off-thread Shape rasterization in flight. See [`ShapeBakeInFlight`].
     pub(in crate::app) shape_bake: Option<ShapeBakeInFlight>,
     /// Off-thread Path (vector) rasterization in flight — used by the live
@@ -214,9 +219,33 @@ pub struct BackgroundJobs {
     pub(in crate::app) ext: crate::app::ext_bridge::ExtBridge,
 }
 
+/// Everything a print worker needs of a sheet, taken when Print is pressed:
+/// the page's layers (shared, not copied), its size and resolution, and the
+/// print settings then. The page is composited on the worker.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(in crate::app) struct PrintTask {
+    pub(in crate::app) doc_id: crate::core::document::DocumentId,
+    /// Which page of it, 0 being the first.
+    pub(in crate::app) page: usize,
+    pub(in crate::app) doc_name: String,
+    pub(in crate::app) stack: crate::core::layer::LayerStack,
+    pub(in crate::app) width: u32,
+    pub(in crate::app) height: u32,
+    pub(in crate::app) dpi: f32,
+    pub(in crate::app) layout: crate::core::print::PrintLayout,
+    /// The printer's RGB profile, when the app manages colour.
+    pub(in crate::app) profile: Option<Vec<u8>>,
+    pub(in crate::app) printer: String,
+    pub(in crate::app) settings: Option<crate::core::print_gdi::PrinterSettings>,
+    pub(in crate::app) copies: u32,
+}
+
 /// A sheet handed to a print worker (see `BackgroundJobs::pending_print`).
 pub(in crate::app) struct PrintJob {
     pub(in crate::app) printer: String,
+    /// The document and page printed, for the PDF route if the device
+    /// refuses.
+    pub(in crate::app) page_of: (crate::core::document::DocumentId, usize),
     /// `Ok`, or why the device refused.
     pub(in crate::app) rx: std::sync::mpsc::Receiver<Result<(), String>>,
     /// Where the worker is, and how it hears the job is no longer wanted.
@@ -246,6 +275,7 @@ impl PrintJob {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(in crate::app) fn new(
         printer: String,
+        page_of: (crate::core::document::DocumentId, usize),
         rx: std::sync::mpsc::Receiver<Result<(), String>>,
         progress: std::sync::Arc<crate::core::print_gdi::PrintProgress>,
         printer_state: std::sync::Arc<std::sync::OnceLock<crate::core::print_gdi::PrinterState>>,
@@ -253,6 +283,7 @@ impl PrintJob {
         let now = std::time::Instant::now();
         Self {
             printer,
+            page_of,
             rx,
             seen_steps: progress.steps(),
             progress,

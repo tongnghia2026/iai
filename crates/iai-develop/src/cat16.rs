@@ -18,7 +18,7 @@
 //! through the same locus code as the D65 reference, so the gains cancel and a
 //! neutral setting is a true no-op (`is_neutral` semantics).
 
-use crate::develop::{control_to_unit, CONTROL_LIMIT};
+use crate::develop::{CONTROL_LIMIT, control_to_unit};
 
 /// D65 correlated colour temperature (K). The locus is evaluated here for the
 /// reference white so temp = 0 cancels exactly.

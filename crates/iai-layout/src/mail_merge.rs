@@ -136,7 +136,7 @@ fn sniff_delimiter(text: &str) -> u8 {
 
 /// Read the first worksheet of an Excel/ODS workbook into a [`MergeTable`].
 fn read_spreadsheet(path: &Path) -> Result<MergeTable, String> {
-    use calamine::{open_workbook_auto, Reader};
+    use calamine::{Reader, open_workbook_auto};
     let mut workbook =
         open_workbook_auto(path).map_err(|e| format!("Không mở được tệp bảng tính: {e}"))?;
     let range = workbook

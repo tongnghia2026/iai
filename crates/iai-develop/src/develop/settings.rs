@@ -227,11 +227,7 @@ impl LocalMaskShape {
                 // keeps feather=0 a well-defined (near-hard) edge.
                 let inner = (1.0 - feather.clamp(0.0, 1.0)).min(1.0 - 1e-3);
                 let w = 1.0 - smootherstep(inner, 1.0, rho);
-                if invert {
-                    1.0 - w
-                } else {
-                    w
-                }
+                if invert { 1.0 - w } else { w }
             }
         }
     }

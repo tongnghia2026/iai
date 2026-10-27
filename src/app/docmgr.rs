@@ -683,9 +683,11 @@ mod tests {
         assert_eq!(session.active_page, 0);
         assert!(app.is_modified());
         let pixels = app.docs.documents[0].canvas.export_flat();
-        assert!(pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel[0] > 200 && pixel[2] < 20));
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[0] > 200 && pixel[2] < 20)
+        );
     }
 
     #[test]
@@ -735,11 +737,13 @@ mod tests {
             pdf.page_names.get(&2).map(String::as_str),
             Some("Trang trắng")
         );
-        assert!(app.docs.documents[0]
-            .canvas
-            .export_flat()
-            .chunks_exact(4)
-            .all(|pixel| pixel == [255, 255, 255, 255]));
+        assert!(
+            app.docs.documents[0]
+                .canvas
+                .export_flat()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 255, 255, 255])
+        );
         assert!(app.docs.documents[0].is_modified());
     }
 }

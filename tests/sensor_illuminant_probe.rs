@@ -4,14 +4,17 @@
 //! measured SpyderCube neutral faces. This probe validates sensor decoding and
 //! camera-space illuminant recovery; it is not a ColorChecker or camera-to-XYZ
 //! accuracy test.
+// Setting the process environment is unsafe from edition 2024 on (another
+// thread may read it meanwhile); these runs set it before they render.
+#![allow(unsafe_code)]
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use iai::core::develop_scene::render_default_look;
+use iai::formats::Importer;
 use iai::formats::raw::RawImporter;
 use iai::formats::raw_library::{RawImage, RawImageData};
-use iai::formats::Importer;
 
 const REFERENCE_SIZE: [f64; 2] = [2592.0, 1728.0];
 const LEFT_TRIANGLE: [[f64; 2]; 3] = [[2128.0, 1366.0], [2327.0, 1219.0], [2332.0, 1411.0]];
@@ -383,11 +386,13 @@ fn cubepp_sensor_illuminant_baseline() {
     assert!((embedded_error - 2.4337).abs() <= 0.05);
     drop(raw);
 
-    std::env::set_var("IAI_RAW_JPEG_MATCH", "none");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("IAI_RAW_JPEG_MATCH", "none") };
     let canvas = RawImporter
         .import(&path)
         .expect("render Cube++ CR2 through iAi");
-    std::env::remove_var("IAI_RAW_JPEG_MATCH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_RAW_JPEG_MATCH") };
     let scene = canvas
         .develop_source
         .as_ref()

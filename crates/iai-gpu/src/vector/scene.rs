@@ -1,7 +1,7 @@
 use iai_doc::layer::{LayerStack, LayerType};
 use iai_doc::vector::object::VectorGeometry;
 
-use super::eligibility::{layer_eligibility_in_stack, Eligibility};
+use super::eligibility::{Eligibility, layer_eligibility_in_stack};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneRun {

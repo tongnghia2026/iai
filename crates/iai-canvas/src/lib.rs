@@ -7,5 +7,7 @@
 
 pub mod canvas;
 pub mod document;
+pub mod powerclip;
 pub mod print;
 pub mod raw_spill;
+pub mod shaping;

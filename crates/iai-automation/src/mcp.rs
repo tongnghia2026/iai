@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use iai_engine::{CmdError, CommandCall, CommandInfo, Effect, ErrorCode, JobId, JobState, Reply};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::gate::Gate;
 use crate::host::Host;
@@ -42,7 +42,7 @@ read relative to the folders this session was granted (absolute paths must lie i
 picture (to sort a customer's photos at a glance). Cards shot at a slant: \
 `image.perspective_crop` lays one flat, `print.card_sheet` (Pro) lays ID cards out on A4. \
 Tone and colour: `image.auto_levels`, `image.adjust`, `image.filter`, `image.scan_cleanup`; \
-pictures onto a page: `layer.place`. \
+pictures onto a page: `layer.place`; a layer scaled, turned or moved: `layer.transform`. \
 Long commands (AI models, files) answer when done, or with a job id to poll with \
 `iai_job_status`. Every change is one undo step (`edit.undo`). To check work, measure it: \
 `analyze.region` gives the average colour, spread and coverage of a rectangle; \
@@ -232,6 +232,22 @@ fn generic_tools() -> Vec<Tool> {
             kind: Kind::Preview,
         },
     ]
+}
+
+/// The name of every tool a server on `commands` may offer, the skill
+/// library's too: what an agent app is told to let run unasked.
+pub fn tool_names(commands: &[CommandInfo]) -> Vec<String> {
+    let mut names: Vec<String> = commands
+        .iter()
+        .filter(|c| c.featured)
+        .map(|c| tool_name(&c.id))
+        .collect();
+    for t in generic_tools().into_iter().chain(skill_tools()) {
+        if !names.contains(&t.name) {
+            names.push(t.name);
+        }
+    }
+    names
 }
 
 /// The server, on a host, behind a gate.
@@ -561,13 +577,11 @@ impl<'a> Server<'a> {
                     "effects": c.effects, "featured": c.featured, "canDryRun": c.can_dry_run,
                     "granted": self.gate.allows(c),
                 });
-                if schemas {
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert(
-                            "paramsSchema".to_string(),
-                            crate::schema::for_tool(&c.params_schema),
-                        );
-                    }
+                if schemas && let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        "paramsSchema".to_string(),
+                        crate::schema::for_tool(&c.params_schema),
+                    );
                 }
                 v
             })
@@ -575,10 +589,30 @@ impl<'a> Server<'a> {
         json!({"commands": items})
     }
 
+    /// Take in the folders the person granted where the commands run (an
+    /// errand's, in the window); whether any was new.
+    fn widen(&mut self) -> bool {
+        let grants = self.host.grants();
+        self.gate.grant(&grants.read, &grants.write)
+    }
+
+    /// `call` through the gate; a path it refuses is tried once more after
+    /// taking in what the person granted since.
+    fn admit(&mut self, call: &mut CommandCall) -> Result<(), CmdError> {
+        let asked = call.clone();
+        match self.gate.check(call) {
+            Err(e) if e.code == ErrorCode::PermissionDenied && self.widen() => {
+                *call = asked;
+                self.gate.check(call)
+            }
+            other => other,
+        }
+    }
+
     /// Run `call` through the gate; wait for a long one when `wait`. A task
     /// under way records it.
     fn run(&mut self, mut call: CommandCall, wait: bool) -> Result<Value, CmdError> {
-        let checked = self.gate.check(&mut call);
+        let checked = self.admit(&mut call);
         let (command, args, dry_run) = (call.command.clone(), call.args.clone(), call.dry_run);
         let outcome = checked.and_then(|()| self.run_checked(call, wait));
         if !dry_run {
@@ -689,10 +723,10 @@ impl<'a> Server<'a> {
                 let text = serde_json::to_string(&v).unwrap_or_default();
                 let mut out =
                     json!({"content": [{"type": "text", "text": text}], "isError": false});
-                if v.is_object() {
-                    if let Some(o) = out.as_object_mut() {
-                        o.insert("structuredContent".to_string(), v);
-                    }
+                if v.is_object()
+                    && let Some(o) = out.as_object_mut()
+                {
+                    o.insert("structuredContent".to_string(), v);
                 }
                 out
             }
@@ -736,7 +770,14 @@ impl<'a> Server<'a> {
                     true
                 }
                 let mut b: Batch = serde_json::from_value(args).map_err(bad)?;
-                self.gate.check_batch(&mut b.calls)?;
+                let asked = b.calls.clone();
+                match self.gate.check_batch(&mut b.calls) {
+                    Err(e) if e.code == ErrorCode::PermissionDenied && self.widen() => {
+                        b.calls = asked;
+                        self.gate.check_batch(&mut b.calls)?;
+                    }
+                    other => other?,
+                }
                 let asked: Vec<(String, Value, bool)> = b
                     .calls
                     .iter()
@@ -778,14 +819,12 @@ impl<'a> Server<'a> {
                 let state = self.host.job(JobId(job), Duration::from_secs_f64(secs))?;
                 if let (Some(JobState::Done { result, .. }), Some(task)) =
                     (&state, self.task.as_mut())
-                {
-                    if let Some(c) = task
+                    && let Some(c) = task
                         .calls
                         .iter_mut()
                         .find(|c| c.job == Some(job) && c.result.is_none())
-                    {
-                        c.result = Some(result.clone());
-                    }
+                {
+                    c.result = Some(result.clone());
                 }
                 match state {
                     Some(s) => serde_json::to_value(s)
@@ -848,6 +887,8 @@ impl<'a> Server<'a> {
                 if let Some(earlier) = self.task.take() {
                     let _ = self.keep_task(earlier, &Value::Null, true);
                 }
+                self.host.task_begin(&request);
+                self.widen();
                 self.task = Some(Task {
                     request: request.clone(),
                     ..Task::default()
@@ -869,6 +910,7 @@ impl<'a> Server<'a> {
             }
             Kind::TaskEnd => {
                 let status = args.get("status").and_then(Value::as_str).unwrap_or("done");
+                self.host.task_end(status, &text("title"));
                 let Some(task) = self.task.take() else {
                     return Ok(json!({"saved": null, "reason": "nothing was done in this task"}));
                 };
@@ -908,13 +950,13 @@ impl<'a> Server<'a> {
                     "howToRun": recipe.meta.how_to_run,
                     "skillMd": store.skill_md(&name)?,
                 });
-                if args.get("recipe").and_then(Value::as_bool) == Some(true) {
-                    if let Some(o) = out.as_object_mut() {
-                        o.insert(
-                            "recipe".to_string(),
-                            serde_json::to_value(&recipe).unwrap_or(Value::Null),
-                        );
-                    }
+                if args.get("recipe").and_then(Value::as_bool) == Some(true)
+                    && let Some(o) = out.as_object_mut()
+                {
+                    o.insert(
+                        "recipe".to_string(),
+                        serde_json::to_value(&recipe).unwrap_or(Value::Null),
+                    );
                 }
                 Ok(out)
             }
@@ -941,7 +983,12 @@ impl<'a> Server<'a> {
                 .unwrap_or("")
                 .trim();
             let given = args.get("params").cloned().unwrap_or(Value::Null);
-            let (run, plan) = Run::start(store, &self.gate, name, &given)?;
+            let (run, plan) = match Run::start(store, &self.gate, name, &given) {
+                Err(e) if e.code == ErrorCode::PermissionDenied && self.widen() => {
+                    Run::start(store, &self.gate, name, &given)?
+                }
+                other => other?,
+            };
             if args.get("dryRun").and_then(Value::as_bool) == Some(true) {
                 return Ok(json!({"status": "checked", "plan": plan}));
             }

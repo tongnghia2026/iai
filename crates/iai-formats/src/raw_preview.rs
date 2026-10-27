@@ -32,8 +32,8 @@ pub struct RawPreviewStats {
     pub thumbnail_height: u32,
 }
 
-fn preview_luma_cache(
-) -> &'static Mutex<std::collections::HashMap<std::path::PathBuf, RawPreviewStats>> {
+fn preview_luma_cache()
+-> &'static Mutex<std::collections::HashMap<std::path::PathBuf, RawPreviewStats>> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, RawPreviewStats>>> =
         OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -61,10 +61,10 @@ pub fn extract(path: &Path) -> Option<RawPreview> {
     let data = std::fs::read(path).ok()?;
     let mut preview = extract_from_bytes(&data)?;
     preview.exif = crate::raw_exif::exif_summary(&data);
-    if let Some(stats) = preview_stats(&preview) {
-        if let Ok(mut cache) = preview_luma_cache().lock() {
-            cache.insert(path.to_path_buf(), stats);
-        }
+    if let Some(stats) = preview_stats(&preview)
+        && let Ok(mut cache) = preview_luma_cache().lock()
+    {
+        cache.insert(path.to_path_buf(), stats);
     }
     Some(preview)
 }

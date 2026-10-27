@@ -14,7 +14,7 @@
 
 use crate::app::render::CanvasEvent;
 use crate::app::state::{App, NodeDrag, NodeDragTarget};
-use crate::core::geometry::{cubic_bezier, Point};
+use crate::core::geometry::{Point, cubic_bezier};
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::object::VectorGeometry;
@@ -594,19 +594,18 @@ impl App {
 
         // Handles of the SELECTED node win first — they sit on top of the path
         // and are only drawn (hence grabbable) while their node is selected.
-        if let Some((lid, sc, sn)) = self.edit.node_selected {
-            if lid == id {
-                if let Some(node) = path.contours.get(sc).and_then(|c| c.nodes.get(sn)) {
-                    for (side, h) in [
-                        (HandleSide::In, node.in_handle),
-                        (HandleSide::Out, node.out_handle),
-                    ] {
-                        if let Some(hp) = h {
-                            if dist2(to_screen(hp)) <= NODE_HIT_PX * NODE_HIT_PX {
-                                return Some(NodeHit::Handle(sc, sn, side));
-                            }
-                        }
-                    }
+        if let Some((lid, sc, sn)) = self.edit.node_selected
+            && lid == id
+            && let Some(node) = path.contours.get(sc).and_then(|c| c.nodes.get(sn))
+        {
+            for (side, h) in [
+                (HandleSide::In, node.in_handle),
+                (HandleSide::Out, node.out_handle),
+            ] {
+                if let Some(hp) = h
+                    && dist2(to_screen(hp)) <= NODE_HIT_PX * NODE_HIT_PX
+                {
+                    return Some(NodeHit::Handle(sc, sn, side));
                 }
             }
         }
@@ -657,10 +656,10 @@ impl App {
     /// when the press was consumed.
     pub fn node_press(&mut self, hit: NodeHit, cx: f32, cy: f32) -> bool {
         // Alt + click a segment converts it line↔curve instead of inserting.
-        if let NodeHit::Segment(ci, seg, _) = hit {
-            if self.edit.input.alt_held {
-                return self.node_convert_segment(ci, seg);
-            }
+        if let NodeHit::Segment(ci, seg, _) = hit
+            && self.edit.input.alt_held
+        {
+            return self.node_convert_segment(ci, seg);
         }
         let Some((id, t, model_path)) = self.active_node_object() else {
             return false;
@@ -779,13 +778,11 @@ impl App {
                         // Shift keeps the dragged segment axis-aligned so a straight
                         // arrow can't be tilted; the whole selection then rides the
                         // same constrained delta.
-                        if shift {
-                            if let Some(c) = d.pending.contours.get(d.contour) {
-                                let (cdx, cdy) =
-                                    constrain_node_delta(c, d.node, d.base_node.anchor, dx, dy);
-                                dx = cdx;
-                                dy = cdy;
-                            }
+                        if shift && let Some(c) = d.pending.contours.get(d.contour) {
+                            let (cdx, cdy) =
+                                constrain_node_delta(c, d.node, d.base_node.anchor, dx, dy);
+                            dx = cdx;
+                            dy = cdy;
                         }
                         // Primary node follows the (possibly constrained) cursor.
                         let Some(slot) = d
@@ -1585,7 +1582,7 @@ mod tests {
         let (mut app, id) = app_with_path();
         app.edit.node_selected = Some((id, 0, 0)); // local (0,0)
         app.node_shift_toggle(0, 1); // add local (40,0); primary = node 1
-                                     // Drag node 1 (canvas 140,120) by (+10,+5). Both selected nodes shift.
+        // Drag node 1 (canvas 140,120) by (+10,+5). Both selected nodes shift.
         let hit = app.node_hit_at_screen(140.0, 120.0).expect("node 1");
         assert!(matches!(hit, NodeHit::Node(0, 1)));
         app.node_press(hit, 140.0, 120.0);

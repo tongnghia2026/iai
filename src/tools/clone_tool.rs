@@ -1,4 +1,4 @@
-use super::brush::{soft_round_alpha, BrushTool, StrokeBuffer};
+use super::brush::{BrushTool, StrokeBuffer, soft_round_alpha};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
 use crate::core::tile::TileMap;
@@ -506,10 +506,10 @@ impl CloneTool {
                             let mut ink = [plane[i], plane[i + 1], plane[i + 2], plane[i + 3]];
                             for c in 0..4 {
                                 // Plate gate: only clone into enabled ink plates.
-                                if let Some(wm) = channel_wm {
-                                    if !wm[c] {
-                                        continue;
-                                    }
+                                if let Some(wm) = channel_wm
+                                    && !wm[c]
+                                {
+                                    continue;
                                 }
                                 let d = plane[i + c] as f32 / 255.0;
                                 let s = fink[c] as f32 / 255.0;
@@ -1234,13 +1234,12 @@ impl Tool for CloneTool {
             self.walk_residual = residual;
             return ToolResponse::repaint();
         }
-        if self.spot_mode {
-            if let Some((ox, oy)) =
+        if self.spot_mode
+            && let Some((ox, oy)) =
                 self.spot_pick_offset(ctx.canvas(), event.canvas_x, event.canvas_y)
-            {
-                self.offset_x = ox;
-                self.offset_y = oy;
-            }
+        {
+            self.offset_x = ox;
+            self.offset_y = oy;
         }
         self.stamp_segment(
             ctx.canvas_mut(),
@@ -1535,9 +1534,10 @@ mod tests {
             "stroke box {s:?}",
             s = (s.x0, s.w)
         );
-        assert!(doc
-            .canvas
-            .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity));
+        assert!(
+            doc.canvas
+                .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity)
+        );
 
         let px = |doc: &Document, x: u32, y: u32| doc.canvas.active_layer().tiles.get_pixel(x, y);
         for x in (240..290).step_by(7) {
@@ -1617,10 +1617,11 @@ mod tests {
         doc.canvas.layer_stack.layers[0]
             .tiles
             .set_pixel(205, 145, 0, 0, 255, 255);
-        assert!(doc
-            .canvas
-            .spot_heal_finish(work, "Smart Heal (AI)")
-            .is_err());
+        assert!(
+            doc.canvas
+                .spot_heal_finish(work, "Smart Heal (AI)")
+                .is_err()
+        );
         assert_eq!(
             doc.canvas.active_layer().tiles.get_pixel(205, 145),
             (0, 0, 255, 255),

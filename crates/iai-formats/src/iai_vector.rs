@@ -18,17 +18,17 @@
 //! to `None`, so the layer falls back to its baked PNG rather than trusting a
 //! malformed model.
 
-use iai_doc::vector::brush::{BrushStroke, WidthStop, MAX_WIDTH_STOPS};
+use iai_doc::vector::brush::{BrushStroke, MAX_WIDTH_STOPS, WidthStop};
 use iai_doc::vector::color::ColorValue;
 use iai_doc::vector::object::VectorObjectData;
 use iai_doc::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use iai_doc::vector::style::{
     ArrowHead, ArrowStyle, DashPattern, Gradient, GradientKind, GradientStop, LineCap, LineJoin,
-    Paint, StrokeStyle, VectorStyle, MAX_GRADIENT_STOPS,
+    MAX_GRADIENT_STOPS, Paint, StrokeStyle, VectorStyle,
 };
 use iai_geom::geometry::Point;
 use iai_geom::vector::affine::AffineTransform;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Payload schema version (independent of the `.iai` container version). Bumped
 /// only if the Path payload shape itself changes incompatibly.

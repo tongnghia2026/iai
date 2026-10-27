@@ -180,6 +180,28 @@ impl Recipe {
         out
     }
 
+    /// It runs on a folder the person picks, with no agent: iAi's commands
+    /// only, not marked broken, a folder of photos to read, and every other
+    /// param a folder for the results or a value a form takes (no single
+    /// file, no list: those are an agent's to fill).
+    pub fn runs_on_a_folder(&self) -> bool {
+        let fillable = self.params.values().all(|p| {
+            matches!(
+                p.kind,
+                ParamKind::Folder | ParamKind::Text | ParamKind::Number | ParamKind::Bool
+            )
+        });
+        let reads_a_folder = self
+            .params
+            .values()
+            .any(|p| p.kind == ParamKind::Folder && !p.write);
+        self.meta.tier <= 1
+            && self.meta.status != Status::NeedsFix
+            && !self.steps.is_empty()
+            && fillable
+            && reads_a_folder
+    }
+
     /// `name: kind = default` for each param, for a short listing.
     pub fn params_brief(&self) -> Value {
         let mut out = serde_json::Map::new();

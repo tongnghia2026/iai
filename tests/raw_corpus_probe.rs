@@ -23,9 +23,9 @@ use std::time::Instant;
 
 use iai::core::develop::DevelopSettings;
 use iai::core::develop2::{self, ColorModel, InputProvenance};
-use iai::core::mem_report::{mib, process_working_set, MemClass, MemReport};
-use iai::formats::raw::RawImporter;
+use iai::core::mem_report::{MemClass, MemReport, mib, process_working_set};
 use iai::formats::Importer;
+use iai::formats::raw::RawImporter;
 
 fn corpus_dir() -> Option<PathBuf> {
     let raw = std::env::var("IAI_RAW_CORPUS").ok()?;
@@ -289,7 +289,11 @@ fn raw_corpus_memory_baseline() {
             mib(peak.peak_working_set),
             mib(ws_growth),
             mib(logical),
-            if ws_growth > 0 { logical as f64 / ws_growth as f64 * 100.0 } else { 0.0 },
+            if ws_growth > 0 {
+                logical as f64 / ws_growth as f64 * 100.0
+            } else {
+                0.0
+            },
         );
     }
 

@@ -142,11 +142,7 @@ impl App {
                 .dev
                 .develop_view_moved_at
                 .is_some_and(|t| t.elapsed() < crate::app::develop_shell::DEVELOP_VIEW_SETTLE);
-        if dragging {
-            1
-        } else {
-            3
-        }
+        if dragging { 1 } else { 3 }
     }
 
     /// The Develop preview runs on a scene master the GPU can host with a
@@ -254,31 +250,31 @@ impl App {
     pub fn flush_develop_gpu_preview(&mut self) {
         // Mode A zoom/pan is a re-blit only; move the GPU Detail plane along
         // with the view it was planned for.
-        if let Some(planned) = self.dev.develop_detail_view {
-            if self.develop_detail_view_sig() != Some(planned) {
-                self.dev.develop_gpu_preview_dirty = true;
-            }
+        if let Some(planned) = self.dev.develop_detail_view
+            && self.develop_detail_view_sig() != Some(planned)
+        {
+            self.dev.develop_gpu_preview_dirty = true;
         }
         if !self.dev.develop_gpu_preview_dirty {
             return;
         }
 
-        if !self.dev.develop_gpu_preview_immediate {
-            if let Some(last) = self.dev.develop_gpu_recompose_last {
-                let interval = self.dev.develop_gpu_recompose_cost.mul_f32(1.25).clamp(
-                    std::time::Duration::from_millis(24),
-                    std::time::Duration::from_millis(140),
+        if !self.dev.develop_gpu_preview_immediate
+            && let Some(last) = self.dev.develop_gpu_recompose_last
+        {
+            let interval = self.dev.develop_gpu_recompose_cost.mul_f32(1.25).clamp(
+                std::time::Duration::from_millis(24),
+                std::time::Duration::from_millis(140),
+            );
+            let elapsed = last.elapsed();
+            if elapsed < interval {
+                let deadline = std::time::Instant::now() + (interval - elapsed);
+                self.win.egui_repaint_deadline = Some(
+                    self.win
+                        .egui_repaint_deadline
+                        .map_or(deadline, |d| d.min(deadline)),
                 );
-                let elapsed = last.elapsed();
-                if elapsed < interval {
-                    let deadline = std::time::Instant::now() + (interval - elapsed);
-                    self.win.egui_repaint_deadline = Some(
-                        self.win
-                            .egui_repaint_deadline
-                            .map_or(deadline, |d| d.min(deadline)),
-                    );
-                    return;
-                }
+                return;
             }
         }
 
@@ -532,30 +528,31 @@ impl App {
         // coverage, so newly-revealed edges are briefly approximate and the
         // trailing recompose below swaps in the exact bases once the view rests.
         let mut throttle = false;
-        if cache_usable && !cache_exact {
-            if let Some(last) = self.dev.develop_proxy_last {
-                // Generous interval: the stale proxy looks fine while the view is
-                // in motion, so rebuild sparsely mid-gesture and let the trailing
-                // recompose land the exact bases when the view rests.
-                let interval = self.dev.develop_proxy_cost.mul_f32(3.0).clamp(
-                    std::time::Duration::from_millis(48),
-                    std::time::Duration::from_millis(400),
+        if cache_usable
+            && !cache_exact
+            && let Some(last) = self.dev.develop_proxy_last
+        {
+            // Generous interval: the stale proxy looks fine while the view is
+            // in motion, so rebuild sparsely mid-gesture and let the trailing
+            // recompose land the exact bases when the view rests.
+            let interval = self.dev.develop_proxy_cost.mul_f32(3.0).clamp(
+                std::time::Duration::from_millis(48),
+                std::time::Duration::from_millis(400),
+            );
+            let elapsed = last.elapsed();
+            if elapsed < interval {
+                let deadline = std::time::Instant::now() + (interval - elapsed);
+                self.win.egui_repaint_deadline = Some(
+                    self.win
+                        .egui_repaint_deadline
+                        .map_or(deadline, |d| d.min(deadline)),
                 );
-                let elapsed = last.elapsed();
-                if elapsed < interval {
-                    let deadline = std::time::Instant::now() + (interval - elapsed);
-                    self.win.egui_repaint_deadline = Some(
-                        self.win
-                            .egui_repaint_deadline
-                            .map_or(deadline, |d| d.min(deadline)),
-                    );
-                    // A pure view change doesn't re-enter this path on its own
-                    // once the gesture stops — flag the preview dirty so
-                    // `flush_develop_gpu_preview` recomposes after the deadline
-                    // and the stale proxies get replaced.
-                    self.dev.develop_gpu_preview_dirty = true;
-                    throttle = true;
-                }
+                // A pure view change doesn't re-enter this path on its own
+                // once the gesture stops — flag the preview dirty so
+                // `flush_develop_gpu_preview` recomposes after the deadline
+                // and the stale proxies get replaced.
+                self.dev.develop_gpu_preview_dirty = true;
+                throttle = true;
             }
         }
 

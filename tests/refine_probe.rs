@@ -5,7 +5,7 @@
 //! (set `REFINE_PROBE_OUT=<dir>` to also write the photo PNGs).
 
 use iai::core::refine::{RefineParams, RefineSession};
-use iai::core::selection::{compute_sobel, pixels_to_lab, EdgeCache, Selection};
+use iai::core::selection::{EdgeCache, Selection, compute_sobel, pixels_to_lab};
 use std::time::Instant;
 
 fn disc(w: usize, h: usize, cx: f32, cy: f32, r: f32) -> Vec<u8> {

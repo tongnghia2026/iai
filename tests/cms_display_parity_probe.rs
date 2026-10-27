@@ -14,9 +14,9 @@
 //! It is hermetic (lcms only, no GPU, no corpus) and runs in the normal gate.
 
 use iai::core::cms::{
-    adobe_rgb_profile, build_display_lut, convert_rgba8, convert_srgb_to_rgb_profile,
-    display_p3_profile, icc_bytes, identity_lut, srgb_icc_bytes, srgb_profile, DEFAULT_INTENT,
-    PROOF_LUT_SIZE,
+    DEFAULT_INTENT, PROOF_LUT_SIZE, adobe_rgb_profile, build_display_lut, convert_rgba8,
+    convert_srgb_to_rgb_profile, display_p3_profile, icc_bytes, identity_lut, srgb_icc_bytes,
+    srgb_profile,
 };
 
 const N: usize = PROOF_LUT_SIZE; // 17

@@ -3,7 +3,7 @@
 
 use iai::core::develop::{DevelopEngineVersion, DevelopSettings};
 use iai::core::develop_scene::{
-    apply_scene_to_tilemap, eval_scene_pixel_for_scene, render_default_look, SceneSource,
+    SceneSource, apply_scene_to_tilemap, eval_scene_pixel_for_scene, render_default_look,
 };
 use iai::core::layer::{Layer, LayerStack};
 use iai::gpu::compositor::{

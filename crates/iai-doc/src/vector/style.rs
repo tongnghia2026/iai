@@ -519,11 +519,13 @@ mod tests {
 
         let mut bad = gradient;
         bad.stops[1].offset = -0.1;
-        assert!(VectorStyle {
-            fill: Paint::Gradient(bad),
-            ..style
-        }
-        .validate()
-        .is_err());
+        assert!(
+            VectorStyle {
+                fill: Paint::Gradient(bad),
+                ..style
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

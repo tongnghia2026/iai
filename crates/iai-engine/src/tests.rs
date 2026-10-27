@@ -5,7 +5,7 @@ use std::time::Duration;
 use iai_canvas::document::Document;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::*;
 
@@ -357,9 +357,11 @@ fn a_dry_run_reports_and_takes_the_change_back() {
     // The page is drawn again; nothing else is announced.
     let events = engine.take_events();
     assert!(events.contains(&EngineEvent::Structure { doc: 1 }));
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, EngineEvent::Notice { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Notice { .. }))
+    );
     // Back as it was, at the revision it was.
     assert_eq!(engine.session(&mut ws).revision(1), rev);
 }
@@ -500,17 +502,21 @@ fn an_agent_waits_for_a_job_before_changing_its_document() {
     // Reading is fine; the person at the window is left to judge.
     assert_eq!(layers(&mut engine, &mut ws), 1);
     engine.set_source(Source::Gui);
-    assert!(engine
-        .session(&mut ws)
-        .execute(CommandCall::new("t.add_layer", json!({})))
-        .is_ok());
+    assert!(
+        engine
+            .session(&mut ws)
+            .execute(CommandCall::new("t.add_layer", json!({})))
+            .is_ok()
+    );
     assert!(engine.cancel(job));
     engine.session(&mut ws).wait(job, Duration::from_secs(10));
     engine.set_source(Source::Agent);
-    assert!(engine
-        .session(&mut ws)
-        .execute(CommandCall::new("t.add_layer", json!({})))
-        .is_ok());
+    assert!(
+        engine
+            .session(&mut ws)
+            .execute(CommandCall::new("t.add_layer", json!({})))
+            .is_ok()
+    );
 }
 
 #[test]

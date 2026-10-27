@@ -34,31 +34,31 @@ impl App {
                 "Gamut Warning off".to_string()
             };
         }
-        if actions.print.load_proof_profile {
-            if let Some(window) = self.win.window.as_ref() {
-                let parent = crate::file_io::dialog_parent(window);
-                let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
-                if let Some(p) = parent {
-                    dialog = dialog.set_parent(&p);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Custom")
-                                .to_string();
-                            self.shell.proof_target =
-                                crate::core::cms::ProofTarget::Custom { name, icc: bytes };
-                            self.shell.proof_enabled = true;
-                            self.apply_proof_settings();
-                            self.shell.status_msg =
-                                format!("Proof: {}", self.shell.proof_target.label());
-                        }
-                        Err(e) => {
-                            self.shell.status_msg = format!("Couldn't read ICC profile: {e}");
-                        }
+        if actions.print.load_proof_profile
+            && let Some(window) = self.win.window.as_ref()
+        {
+            let parent = crate::file_io::dialog_parent(window);
+            let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
+            if let Some(p) = parent {
+                dialog = dialog.set_parent(&p);
+            }
+            if let Some(path) = dialog.pick_file() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Custom")
+                            .to_string();
+                        self.shell.proof_target =
+                            crate::core::cms::ProofTarget::Custom { name, icc: bytes };
+                        self.shell.proof_enabled = true;
+                        self.apply_proof_settings();
+                        self.shell.status_msg =
+                            format!("Proof: {}", self.shell.proof_target.label());
+                    }
+                    Err(e) => {
+                        self.shell.status_msg = format!("Couldn't read ICC profile: {e}");
                     }
                 }
             }
@@ -83,33 +83,33 @@ impl App {
                 }
             }
         }
-        if actions.print.display_cms_load {
-            if let Some(window) = self.win.window.as_ref() {
-                let parent = crate::file_io::dialog_parent(window);
-                let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
-                if let Some(p) = parent {
-                    dialog = dialog.set_parent(&p);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Display")
-                                .to_string();
-                            self.shell.display_profile = Some(bytes);
-                            self.shell.display_profile_name = name.clone();
-                            self.shell.develop_display_profile = self.shell.display_profile.clone();
-                            self.shell.develop_display_profile_name = name.clone();
-                            self.shell.display_profile_from_system = false;
-                            self.shell.display_cms_enabled = true;
-                            self.apply_proof_settings();
-                            self.shell.status_msg = format!("Display profile: {name}");
-                        }
-                        Err(e) => {
-                            self.shell.status_msg = format!("Couldn't read ICC profile: {e}");
-                        }
+        if actions.print.display_cms_load
+            && let Some(window) = self.win.window.as_ref()
+        {
+            let parent = crate::file_io::dialog_parent(window);
+            let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
+            if let Some(p) = parent {
+                dialog = dialog.set_parent(&p);
+            }
+            if let Some(path) = dialog.pick_file() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Display")
+                            .to_string();
+                        self.shell.display_profile = Some(bytes);
+                        self.shell.display_profile_name = name.clone();
+                        self.shell.develop_display_profile = self.shell.display_profile.clone();
+                        self.shell.develop_display_profile_name = name.clone();
+                        self.shell.display_profile_from_system = false;
+                        self.shell.display_cms_enabled = true;
+                        self.apply_proof_settings();
+                        self.shell.status_msg = format!("Display profile: {name}");
+                    }
+                    Err(e) => {
+                        self.shell.status_msg = format!("Couldn't read ICC profile: {e}");
                     }
                 }
             }
@@ -138,14 +138,14 @@ impl App {
         if actions.print.refresh_printers {
             self.refresh_printer_list();
         }
-        if let Some(printer) = actions.print.set_print_printer.take() {
-            if printer != self.shell.print_selected_printer {
-                self.shell.print_driver_settings = None;
-                self.shell.print_selected_printer = printer;
-                // The cached geometry may be stale (driver defaults changed, or a
-                // slot still carries an earlier app-local paper), so re-read it.
-                self.refresh_selected_printer();
-            }
+        if let Some(printer) = actions.print.set_print_printer.take()
+            && printer != self.shell.print_selected_printer
+        {
+            self.shell.print_driver_settings = None;
+            self.shell.print_selected_printer = printer;
+            // The cached geometry may be stale (driver defaults changed, or a
+            // slot still carries an earlier app-local paper), so re-read it.
+            self.refresh_selected_printer();
         }
         if let Some(copies) = actions.print.set_print_copies.take() {
             self.shell.print_copies = copies.clamp(1, 999);
@@ -165,47 +165,65 @@ impl App {
             self.shell.print_printer_profile_name.clear();
             self.shell.status_msg = "Print color: Printer Manages Colors".to_string();
         }
-        if actions.print.load_print_printer_profile {
-            if let Some(window) = self.win.window.as_ref() {
-                let parent = crate::file_io::dialog_parent(window);
-                let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
-                if let Some(p) = parent {
-                    dialog = dialog.set_parent(&p);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            if crate::core::cms::profile_is_rgb(&bytes) {
-                                let name = path
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("Printer")
-                                    .to_string();
-                                self.shell.print_printer_profile = Some(bytes);
-                                self.shell.print_printer_profile_name = name.clone();
-                                self.shell.status_msg = format!("Print color: convert to {name}");
-                            } else {
-                                self.shell.status_msg =
+        if actions.print.load_print_printer_profile
+            && let Some(window) = self.win.window.as_ref()
+        {
+            let parent = crate::file_io::dialog_parent(window);
+            let mut dialog = rfd::FileDialog::new().add_filter("ICC Profile", &["icc", "icm"]);
+            if let Some(p) = parent {
+                dialog = dialog.set_parent(&p);
+            }
+            if let Some(path) = dialog.pick_file() {
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        if crate::core::cms::profile_is_rgb(&bytes) {
+                            let name = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Printer")
+                                .to_string();
+                            self.shell.print_printer_profile = Some(bytes);
+                            self.shell.print_printer_profile_name = name.clone();
+                            self.shell.status_msg = format!("Print color: convert to {name}");
+                        } else {
+                            self.shell.status_msg =
                                     "CMYK profiles can't print directly yet (needs Phase D) - use Printer Manages Colors".to_string();
-                            }
                         }
-                        Err(e) => self.shell.status_msg = format!("Couldn't read ICC profile: {e}"),
                     }
+                    Err(e) => self.shell.status_msg = format!("Couldn't read ICC profile: {e}"),
                 }
             }
         }
         // A direct print its worker could not make comes back here, a frame
         // later, for the PDF route (see `poll_print_job`).
-        let gdi_failed = self.jobs.print_gdi_failed.take();
+        let mut gdi_failed = self.jobs.print_gdi_failed.take();
+        // The PDF route is for the sheet the device refused: its tab comes to
+        // the front, the person may have gone on to another meanwhile. A tab
+        // that cannot come (closed, or a PDF page still rendering) is not
+        // printed in its place.
+        if let Some(why) = &gdi_failed
+            && let Some((doc, page)) = self.jobs.print_failed_doc.take()
+        {
+            if let Some(idx) = self.docs.index_of(doc)
+                && idx != self.docs.active_doc_idx
+            {
+                self.switch_to_doc(idx);
+            }
+            // And the page of that tab it was.
+            if self.docs.active().id == doc && self.docs.active().active_artboard != page {
+                let _ = self.run_with("page.select", serde_json::json!({ "page": page }));
+            }
+            if self.docs.active().id != doc || self.docs.active().active_artboard != page {
+                self.shell.status_msg =
+                    format!("Không in được tờ vừa gửi ({why}): mở lại tab đó rồi in lại");
+                gdi_failed = None;
+            }
+        }
         if actions.print.print_stop {
             self.stop_print_job();
         }
-        let mut print_send = actions.print.print_send;
-        if print_send && self.jobs.pending_print.is_some() {
-            // One sheet at a time; the dialog's Print button is off meanwhile.
-            self.shell.status_msg = "Still sending the previous print…".to_string();
-            print_send = false;
-        }
+        let print_pages = actions.print.print_send.clone();
+        let print_send = print_pages.is_some();
         if actions.print.print_save_pdf || print_send || gdi_failed.is_some() {
             self.sync_brush_gpu_to_cpu();
             let (cw, ch) = {
@@ -242,95 +260,22 @@ impl App {
                 // of the document is taken here; `poll_print_job` hears how it
                 // went.
                 #[cfg(target_os = "windows")]
-                if print_send && gdi_failed.is_none() {
-                    let doc_name = self.docs.active().title.clone();
-                    let flat = crate::core::canvas::Canvas::fits_flat_buffer(cw, ch)
-                        .then(|| self.docs.active().canvas.export_flat());
-                    let mut stack = if flat.is_none() {
-                        Some(self.docs.active().canvas.layer_stack.clone())
-                    } else {
-                        None
-                    };
-                    let profile = printer_profile.clone();
-                    let intent = layout.intent.to_lcms();
-                    let printer = self.shell.print_selected_printer.clone();
-                    let settings = self.shell.print_driver_settings.clone();
-                    let copies = self.shell.print_copies;
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    // Each stage goes to the journal as the worker enters it:
-                    // the last one written is where a printer that never
-                    // answered left it.
-                    let journal_printer = printer.clone();
-                    let progress = std::sync::Arc::new(
-                        crate::core::print_gdi::PrintProgress::reporting_to(move |stage| {
-                            crate::diag::note(
-                                "print",
-                                &format!("{journal_printer}: {}", stage.label()),
-                            );
-                        }),
-                    );
-                    let printer_state = std::sync::Arc::new(std::sync::OnceLock::new());
-                    self.jobs.pending_print = Some(crate::app::background_jobs::PrintJob::new(
-                        printer.clone(),
-                        rx,
-                        std::sync::Arc::clone(&progress),
-                        std::sync::Arc::clone(&printer_state),
-                    ));
-                    self.shell.status_msg = "Sending to printer…".to_string();
-                    std::thread::spawn(move || {
-                        let _ = progress.enter(crate::core::print_gdi::PrintStage::ReadingState);
-                        if let Some(state) = crate::core::print_gdi::printer_state(&printer) {
-                            crate::diag::note(
-                                "print",
-                                &format!(
-                                    "{printer} on {}: {} job(s) queued, troubles {:?}",
-                                    state.port, state.queued_jobs, state.troubles
-                                ),
-                            );
-                            let _ = printer_state.set(state);
-                        }
-                        let mut flat = flat;
-                        if let (Some(rgba), Some(pp)) = (flat.as_mut(), &profile) {
-                            crate::core::cms::convert_srgb_to_rgb_profile(rgba, pp, intent);
-                        }
-                        let result = crate::core::print_gdi::print_bands(
-                            &printer,
-                            settings.as_ref(),
-                            &doc_name,
-                            cw,
-                            ch,
-                            dpi,
-                            &layout,
-                            copies,
-                            &progress,
-                            move |y, rows| {
-                                if let Some(flat) = &flat {
-                                    let start = (y as usize) * (cw as usize) * 4;
-                                    let len = (rows as usize) * (cw as usize) * 4;
-                                    Ok(flat[start..start + len].to_vec())
-                                } else {
-                                    let stack = stack.as_mut().expect("streamed path has a stack");
-                                    let mut band = stack.flatten_band(cw, ch, y, rows);
-                                    if let Some(pp) = &profile {
-                                        crate::core::cms::convert_srgb_to_rgb_profile(
-                                            &mut band, pp, intent,
-                                        );
-                                    }
-                                    Ok(band)
-                                }
-                            },
-                        );
-                        crate::diag::note(
-                            "print",
-                            &match &result {
-                                Ok(()) => format!("{printer}: the job is with the spooler"),
-                                Err(e) => format!("{printer}: {e}"),
-                            },
-                        );
-                        let _ = tx.send(result);
-                    });
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
+                if let Some(pages) = &print_pages
+                    && gdi_failed.is_none()
+                {
+                    // What the worker needs is taken now (the layers are
+                    // shared, not copied); the dialog closes at once, as
+                    // Photoshop's does, and each page is composited and sent
+                    // off this thread, a print job of its own, in order. A
+                    // sheet printed while another is on its way goes after it.
+                    let tasks = self.print_tasks(pages, layout, printer_profile.clone());
+                    let count = tasks.len();
+                    self.shell.ui.show_print_dialog = false;
+                    for task in tasks {
+                        self.queue_print_task(task);
+                    }
+                    if count > 1 {
+                        self.shell.status_msg = format!("Đang gửi lệnh in {count} trang…");
                     }
                     if !actions.print.print_save_pdf {
                         return;
@@ -351,7 +296,7 @@ impl App {
                 // B&W bug). Ink needs a full flat buffer, so past the flat-buffer
                 // cap this falls back to the streamed RGB path.
                 let cmyk_pdf = actions.print.print_save_pdf
-                    && !actions.print.print_send
+                    && actions.print.print_send.is_none()
                     && self.docs.active().canvas.is_cmyk()
                     && crate::core::canvas::Canvas::fits_flat_buffer(cw, ch);
                 let cmyk_selection = if cmyk_pdf {
@@ -457,34 +402,31 @@ impl App {
                 };
                 match pdf_result {
                     Ok(pdf) => {
-                        if actions.print.print_save_pdf {
-                            if let Some(window) = self.win.window.as_ref() {
-                                let parent = crate::file_io::dialog_parent(window);
-                                let mut dialog = rfd::FileDialog::new()
-                                    .add_filter("PDF", &["pdf"])
-                                    .set_file_name("print.pdf");
-                                if let Some(p) = parent {
-                                    dialog = dialog.set_parent(&p);
-                                }
-                                if let Some(mut path) = dialog.save_file() {
-                                    path.set_extension("pdf");
-                                    match crate::core::atomic_file::write_bytes_atomic(&path, &pdf)
-                                    {
-                                        Ok(_) => {
-                                            let name = path
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("print.pdf");
-                                            self.shell.status_msg = if ink_native {
-                                                format!("Saved PDF (DeviceCMYK ink): {name}")
-                                            } else {
-                                                format!("Saved PDF: {name}")
-                                            };
-                                        }
-                                        Err(e) => {
-                                            self.report_save_error(format!("Lỗi lưu PDF: {e}"))
-                                        }
+                        if actions.print.print_save_pdf
+                            && let Some(window) = self.win.window.as_ref()
+                        {
+                            let parent = crate::file_io::dialog_parent(window);
+                            let mut dialog = rfd::FileDialog::new()
+                                .add_filter("PDF", &["pdf"])
+                                .set_file_name("print.pdf");
+                            if let Some(p) = parent {
+                                dialog = dialog.set_parent(&p);
+                            }
+                            if let Some(mut path) = dialog.save_file() {
+                                path.set_extension("pdf");
+                                match crate::core::atomic_file::write_bytes_atomic(&path, &pdf) {
+                                    Ok(_) => {
+                                        let name = path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("print.pdf");
+                                        self.shell.status_msg = if ink_native {
+                                            format!("Saved PDF (DeviceCMYK ink): {name}")
+                                        } else {
+                                            format!("Saved PDF: {name}")
+                                        };
                                     }
+                                    Err(e) => self.report_save_error(format!("Lỗi lưu PDF: {e}")),
                                 }
                             }
                         }

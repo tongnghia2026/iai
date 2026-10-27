@@ -19,7 +19,7 @@ use cosmic_text::{
     Align, Attrs, AttrsList, Buffer, BufferLine, Color as CtColor, Ellipsize, Family, FontSystem,
     Hinting, LineEnding, Metrics, Shaping, Style, SwashCache, UnderlineStyle, Weight, Wrap,
 };
-use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
+use lopdf::{Dictionary, Document, Object, Stream, StringFormat, dictionary};
 
 use iai_doc::text_document::{
     CharStyle, ImageBlock, ImageWrap, InlineImage, ListKind, ParagraphAlign, TextDocument,
@@ -76,11 +76,11 @@ pub fn square_wrap(
     blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut merged: Vec<(f32, f32)> = Vec::with_capacity(blocked.len());
     for (left, right) in blocked {
-        if let Some(last) = merged.last_mut() {
-            if left <= last.1 {
-                last.1 = last.1.max(right);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && left <= last.1
+        {
+            last.1 = last.1.max(right);
+            continue;
         }
         merged.push((left, right));
     }
@@ -733,21 +733,21 @@ impl DocumentLayout {
                         let base_y = cy + top + (run.line_y - run.line_top);
                         let ox = cx + line_offsets.get(li).copied().unwrap_or(0.0);
                         for glyph in run.glyphs {
-                            if run.text.get(glyph.start..glyph.end) == Some(INLINE_PLACEHOLDER) {
-                                if let Some(image) = self.inline_images.get(&glyph.metadata) {
-                                    let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
-                                    blit_image(
-                                        &mut buf,
-                                        pw,
-                                        ph,
-                                        image,
-                                        ox + glyph.x,
-                                        base_y - h_px,
-                                        w_px,
-                                        h_px,
-                                    );
-                                    continue;
-                                }
+                            if run.text.get(glyph.start..glyph.end) == Some(INLINE_PLACEHOLDER)
+                                && let Some(image) = self.inline_images.get(&glyph.metadata)
+                            {
+                                let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
+                                blit_image(
+                                    &mut buf,
+                                    pw,
+                                    ph,
+                                    image,
+                                    ox + glyph.x,
+                                    base_y - h_px,
+                                    w_px,
+                                    h_px,
+                                );
+                                continue;
                             }
                             let color = glyph.color_opt.unwrap_or(default_ink);
                             let phys = glyph.physical((ox, base_y), 1.0);
@@ -756,29 +756,29 @@ impl DocumentLayout {
                             });
                         }
                         // Draw the list marker in the gutter on the first line.
-                        if li == 0 {
-                            if let Some(mb) = marker {
-                                let marker_x = ox - LIST_INDENT_MM / 25.4 * self.dpi;
-                                for mrun in mb.layout_runs() {
-                                    for glyph in mrun.glyphs {
-                                        let color = glyph.color_opt.unwrap_or(default_ink);
-                                        let phys = glyph.physical((marker_x, base_y), 1.0);
-                                        cache.with_pixels(
-                                            font_system,
-                                            phys.cache_key,
-                                            color,
-                                            |gx, gy, col| {
-                                                blend_px(
-                                                    &mut buf,
-                                                    pw,
-                                                    ph,
-                                                    phys.x + gx,
-                                                    phys.y + gy,
-                                                    col,
-                                                );
-                                            },
-                                        );
-                                    }
+                        if li == 0
+                            && let Some(mb) = marker
+                        {
+                            let marker_x = ox - LIST_INDENT_MM / 25.4 * self.dpi;
+                            for mrun in mb.layout_runs() {
+                                for glyph in mrun.glyphs {
+                                    let color = glyph.color_opt.unwrap_or(default_ink);
+                                    let phys = glyph.physical((marker_x, base_y), 1.0);
+                                    cache.with_pixels(
+                                        font_system,
+                                        phys.cache_key,
+                                        color,
+                                        |gx, gy, col| {
+                                            blend_px(
+                                                &mut buf,
+                                                pw,
+                                                ph,
+                                                phys.x + gx,
+                                                phys.y + gy,
+                                                col,
+                                            );
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -997,19 +997,19 @@ impl DocumentLayout {
                         first_baseline = Some(baseline);
                     }
                     for g in run.glyphs {
-                        if run.text.get(g.start..g.end) == Some(INLINE_PLACEHOLDER) {
-                            if let Some(image) = self.inline_images.get(&g.metadata) {
-                                let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
-                                images.push(ImgPlace {
-                                    block: image,
-                                    x: (ox + g.x) * s,
-                                    y: page_h - baseline,
-                                    w: w_px * s,
-                                    h: h_px * s,
-                                    behind: false,
-                                });
-                                continue;
-                            }
+                        if run.text.get(g.start..g.end) == Some(INLINE_PLACEHOLDER)
+                            && let Some(image) = self.inline_images.get(&g.metadata)
+                        {
+                            let (w_px, h_px) = inline_image_size_px(image, cw, self.dpi);
+                            images.push(ImgPlace {
+                                block: image,
+                                x: (ox + g.x) * s,
+                                y: page_h - baseline,
+                                w: w_px * s,
+                                h: h_px * s,
+                                behind: false,
+                            });
+                            continue;
                         }
                         let fi = match font_ids.iter().position(|id| *id == g.font_id) {
                             Some(i) => i,
@@ -1020,12 +1020,12 @@ impl DocumentLayout {
                                 font_ids.len() - 1
                             }
                         };
-                        if let Some(src) = run.text.get(g.start..g.end) {
-                            if !src.is_empty() {
-                                to_unicode[fi]
-                                    .entry(g.glyph_id)
-                                    .or_insert_with(|| src.to_string());
-                            }
+                        if let Some(src) = run.text.get(g.start..g.end)
+                            && !src.is_empty()
+                        {
+                            to_unicode[fi]
+                                .entry(g.glyph_id)
+                                .or_insert_with(|| src.to_string());
                         }
                         let color = g
                             .color_opt
@@ -1104,12 +1104,12 @@ impl DocumentLayout {
                                     font_ids.len() - 1
                                 }
                             };
-                            if let Some(src) = mrun.text.get(g.start..g.end) {
-                                if !src.is_empty() {
-                                    to_unicode[fi]
-                                        .entry(g.glyph_id)
-                                        .or_insert_with(|| src.to_string());
-                                }
+                            if let Some(src) = mrun.text.get(g.start..g.end)
+                                && !src.is_empty()
+                            {
+                                to_unicode[fi]
+                                    .entry(g.glyph_id)
+                                    .or_insert_with(|| src.to_string());
                             }
                             glyphs.push(Glyph {
                                 font: fi,

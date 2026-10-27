@@ -265,11 +265,9 @@ impl App {
 
         // A shortcut the user re-bound in Preferences runs here; everything
         // still on its built-in key goes through the original arms below.
-        if pressed {
-            if let Some(cmd) = self.custom_command_for(physical_key) {
-                self.run_command(cmd, event_loop, repeat);
-                return;
-            }
+        if pressed && let Some(cmd) = self.custom_command_for(physical_key) {
+            self.run_command(cmd, event_loop, repeat);
+            return;
         }
 
         match physical_key {
@@ -428,10 +426,16 @@ impl App {
             PhysicalKey::Code(KeyCode::Delete) | PhysicalKey::Code(KeyCode::Backspace)
                 if pressed && !repeat =>
             {
-                if self.edit.input.alt_held {
-                    self.edit.pending_fill = Some(self.edit.tools.brush().settings.color);
-                } else if self.edit.input.ctrl_held {
-                    self.edit.pending_fill = Some(self.edit.bg_color);
+                if self.edit.input.alt_held || self.edit.input.ctrl_held {
+                    // Alt+Delete fills with the foreground, Ctrl+Delete with
+                    // the background colour: the command an agent runs.
+                    let colour = if self.edit.input.alt_held {
+                        self.edit.tools.brush().settings.color
+                    } else {
+                        self.edit.bg_color
+                    };
+                    let colour = crate::ui::color_hex(colour);
+                    let _ = self.run_with("edit.fill", serde_json::json!({"color": colour}));
                 } else {
                     // Plain Delete. Over the CANVAS with an active selection,
                     // clear only that region (transparent on a normal layer, or
@@ -446,14 +450,13 @@ impl App {
                     let has_sel = canvas.selection.active;
                     let is_bg = !canvas.layer_stack.layers.is_empty()
                         && canvas.active_layer().is_background;
-                    if has_sel && !over_panel && is_bg {
-                        self.edit.pending_fill = Some(self.edit.bg_color);
-                    } else if has_sel && !over_panel {
-                        if self.docs.active_mut().canvas.clear_selection() {
-                            self.apply_canvas_event(
-                                crate::app::render::CanvasEvent::LayerPixelsChanged,
-                            );
-                        }
+                    if has_sel && !over_panel {
+                        // Cleared, or the Background filled with the
+                        // background colour.
+                        let colour = crate::ui::color_hex(self.edit.bg_color);
+                        let _ =
+                            self.run_with("edit.clear", serde_json::json!({"background": colour}));
+                        let _ = is_bg;
                     } else if self.docs.active_mut().canvas.remove_active_layer() {
                         self.apply_canvas_event(
                             crate::app::render::CanvasEvent::LayerStructureChanged,
@@ -535,8 +538,8 @@ impl App {
                     self.shell.status_msg =
                         "Merge Visible không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)"
                             .to_string();
-                } else if self.docs.active_mut().canvas.merge_visible() {
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
+                } else {
+                    let _ = self.run_with("layer.merge", serde_json::json!({"what": "visible"}));
                 }
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
@@ -544,13 +547,9 @@ impl App {
             }
             PhysicalKey::Code(KeyCode::KeyE) if pressed && self.edit.input.ctrl_held => {
                 // Tile-native (256-px chunks): no large-canvas gate needed.
-                if self.docs.active_mut().canvas.merge_selected() {
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
-                } else {
-                    self.shell.status_msg = crate::app::actions::MERGE_REFUSED_MSG.to_string();
-                    if let Some(w) = &self.win.window {
-                        w.request_redraw();
-                    }
+                let _ = self.run_with("layer.merge", serde_json::json!({"what": "picked"}));
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
                 }
             }
             PhysicalKey::Code(KeyCode::KeyV) if pressed && !self.edit.input.ctrl_held => {
@@ -1315,6 +1314,11 @@ impl App {
         let command = self
             .pressed_chord(physical_key)
             .and_then(|c| self.shell.keymap.command_for(c));
+        // An ID photo being made holds only this tab: opening another photo
+        // lets it go on.
+        if self.photo_only_holds_tab() && command == Some(Command::FileOpen) {
+            return true;
+        }
         let edits = match command {
             Some(Command::EditUndo) => {
                 self.drop_portrait_preview();
@@ -1459,6 +1463,14 @@ impl App {
         event_loop: &ActiveEventLoop,
         repeat: bool,
     ) {
+        if let Some((id, args)) = cmd.engine_command() {
+            // A held key runs it once.
+            if !repeat {
+                let _ = self.run_with(id, args);
+                self.redraw_main();
+            }
+            return;
+        }
         match cmd {
             Command::ToolMove => self.key_select_tool(ToolId::Move, event_loop),
             Command::ToolMarquee => self.key_select_group(crate::tools::SEL_GROUP, event_loop),
@@ -1550,23 +1562,16 @@ impl App {
                     self.redraw_main();
                     return;
                 }
-                // Same event path as the menu/panel Undo — it carries
-                // the full canvas-size bookkeeping (GPU texture resize,
-                // refit, flatten) the old inline copy here skipped.
-                self.sync_brush_gpu_to_cpu();
-                self.docs.active_mut().canvas.undo();
-                self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
-                self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
+                // The command an agent runs, as the menu's Undo: its events
+                // carry the canvas-size bookkeeping (GPU texture, refit).
+                let _ = self.run_now("edit.undo");
             }
             Command::EditRedo => {
                 if self.modal_lock_active() {
                     self.deny_modal_action();
                     return;
                 }
-                self.sync_brush_gpu_to_cpu();
-                self.docs.active_mut().canvas.redo();
-                self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
-                self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
+                let _ = self.run_now("edit.redo");
             }
             Command::EditCut => {
                 if !repeat {
@@ -1575,37 +1580,9 @@ impl App {
             }
             Command::EditCopy => self.do_copy(),
             Command::EditPaste => self.do_paste(),
-            Command::SelectAll => {
-                let _ = self.run_now("select.all");
-                self.redraw_main();
-            }
             Command::FreeTransform => {
                 self.begin_transform();
                 self.sync_cursor(event_loop);
-            }
-            Command::LayerViaCopy => {
-                if repeat {
-                    return;
-                }
-                if self.docs.active_mut().canvas.duplicate_active_group() {
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
-                    self.redraw_main();
-                } else {
-                    let had_selection = self.docs.active().canvas.selection.active;
-                    self.docs
-                        .active_mut()
-                        .canvas
-                        .begin_undo_group("Layer via Copy");
-                    self.docs.active_mut().canvas.layer_via_copy();
-                    if had_selection {
-                        self.docs.active_mut().canvas.deselect();
-                    }
-                    self.docs.active_mut().canvas.end_undo_group();
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerStructureChanged);
-                    if had_selection {
-                        self.apply_canvas_event(crate::app::render::CanvasEvent::SelectionChanged);
-                    }
-                }
             }
             Command::Levels => {
                 self.key_adjustment(crate::core::layer::AdjustmentType::default_levels())
@@ -1632,27 +1609,8 @@ impl App {
                     lightness: 0.0,
                 })
             }
-            Command::Desaturate => {
-                let ok = self
-                    .docs
-                    .active_mut()
-                    .canvas
-                    .apply_adjustment_to_active_layer(
-                        crate::core::layer::AdjustmentType::Desaturate,
-                    );
-                if ok {
-                    self.apply_canvas_event(crate::app::render::CanvasEvent::LayerPixelsChanged);
-                } else {
-                    self.shell.status_msg =
-                        "Desaturate requires an unlocked raster layer".to_string();
-                }
-                self.redraw_main();
-            }
-            Command::Invert => {
-                let idx = self.docs.active().canvas.layer_stack.active_idx;
-                self.do_invert_active(idx);
-                self.redraw_main();
-            }
+            // Engine commands, run above.
+            Command::SelectAll | Command::LayerViaCopy | Command::Desaturate | Command::Invert => {}
             Command::ToggleRulers => {
                 self.shell.ui.show_rulers = !self.shell.ui.show_rulers;
                 self.redraw_main();

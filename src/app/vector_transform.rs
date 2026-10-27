@@ -164,11 +164,7 @@ fn clamp_scale(s: f32) -> f32 {
         return 1.0;
     }
     if s.abs() < MIN_SCALE {
-        if s < 0.0 {
-            -MIN_SCALE
-        } else {
-            MIN_SCALE
-        }
+        if s < 0.0 { -MIN_SCALE } else { MIN_SCALE }
     } else {
         s
     }
@@ -696,10 +692,10 @@ impl App {
         };
         // Re-key the rotation pivot onto the copy (same object-local point) so the
         // rotate turns about the pivot the user set on the original, not the centre.
-        if let Some((pid, p)) = self.edit.path_pivot {
-            if pid == orig_id {
-                self.edit.path_pivot = Some((new_id, p));
-            }
+        if let Some((pid, p)) = self.edit.path_pivot
+            && pid == orig_id
+        {
+            self.edit.path_pivot = Some((new_id, p));
         }
         self.edit.path_dup_before = Some(before);
         self.path_transform_begin(hit, cx, cy);
@@ -1070,13 +1066,13 @@ impl App {
                         continue;
                     };
                     let layer = &mut canvas.layer_stack.layers[idx];
-                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
-                        if o.transform != *orig {
-                            let mut o = o.clone();
-                            o.transform = *orig;
-                            crate::core::command_vector::apply_object_to_layer(layer, o);
-                            touched = true;
-                        }
+                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type
+                        && o.transform != *orig
+                    {
+                        let mut o = o.clone();
+                        o.transform = *orig;
+                        crate::core::command_vector::apply_object_to_layer(layer, o);
+                        touched = true;
                     }
                 }
                 if touched {
@@ -1224,19 +1220,18 @@ impl App {
         };
         {
             let canvas = &mut self.docs.active_mut().canvas;
-            if changed {
-                if let Some(pos) = canvas
+            if changed
+                && let Some(pos) = canvas
                     .layer_stack
                     .layers
                     .iter()
                     .position(|l| l.id == drag.layer_id)
-                {
-                    let layer = &mut canvas.layer_stack.layers[pos];
-                    if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
-                        let mut o = o.clone();
-                        o.transform = final_t;
-                        crate::core::command_vector::apply_object_to_layer(layer, o);
-                    }
+            {
+                let layer = &mut canvas.layer_stack.layers[pos];
+                if let LayerType::Vector(VectorGeometry::Path(o)) = &layer.layer_type {
+                    let mut o = o.clone();
+                    o.transform = final_t;
+                    crate::core::command_vector::apply_object_to_layer(layer, o);
                 }
             }
             before.capture_after(&canvas.layer_stack, cw, ch);

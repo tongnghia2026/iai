@@ -310,10 +310,10 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions, viewpo
         }
         // Focus an object requested from the Layers panel (text or an image).
         let focus = FOCUS_INBOX.with(|cell| cell.borrow_mut().take());
-        if let Some((focus_id, target)) = focus {
-            if focus_id == data.doc.id {
-                apply_focus(d, font_system, target);
-            }
+        if let Some((focus_id, target)) = focus
+            && focus_id == data.doc.id
+        {
+            apply_focus(d, font_system, target);
         }
 
         egui::Area::new(egui::Id::new("flow_text_document_surface"))
@@ -808,63 +808,63 @@ fn window_ui(
     }
 
     // Contextual row for a selected floating image (Word "in front of text").
-    if let Some(fi) = d.selected_floating {
-        if let Some((cur_width, cur_wrap)) = d.floating.get(fi).map(|b| (b.width_mm, b.wrap)) {
-            let wrap_label = match cur_wrap {
-                ImageWrap::BehindText => "Nổi sau chữ",
-                ImageWrap::Square => "Bao quanh ảnh",
-                ImageWrap::TopBottom => "Trên và dưới",
-                _ => "Nổi trên chữ",
-            };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(ph::IMAGE).on_hover_text("Ảnh nổi đang chọn");
-                egui::ComboBox::from_id_salt("doc_img_wrap_float")
-                    .selected_text(wrap_label)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(false, "Trên và dưới").clicked() {
-                            float_set_wrap = Some(ImageWrap::TopBottom);
-                        }
-                        if ui
-                            .selectable_label(cur_wrap == ImageWrap::InFrontOfText, "Nổi trên chữ")
-                            .clicked()
-                        {
-                            float_set_wrap = Some(ImageWrap::InFrontOfText);
-                        }
-                        if ui
-                            .selectable_label(cur_wrap == ImageWrap::BehindText, "Nổi sau chữ")
-                            .clicked()
-                        {
-                            float_set_wrap = Some(ImageWrap::BehindText);
-                        }
-                        if ui
-                            .selectable_label(cur_wrap == ImageWrap::Square, "Bao quanh ảnh")
-                            .clicked()
-                        {
-                            float_set_wrap = Some(ImageWrap::Square);
-                        }
-                    });
-                ui.separator();
-                ui.label("Rộng").on_hover_text("Chiều rộng ảnh (mm)");
-                let mut width_mm = cur_width;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut width_mm)
-                            .range(10.0..=400.0)
-                            .speed(0.5)
-                            .suffix(" mm"),
-                    )
-                    .changed()
-                {
-                    float_width_cmd = Some(width_mm);
-                }
-                ui.separator();
-                ui.label("Kéo ảnh để di chuyển; kéo góc để đổi cỡ.");
-                ui.separator();
-                if ui.button(ph::TRASH).on_hover_text("Xoá ảnh").clicked() {
-                    float_delete_cmd = true;
-                }
-            });
-        }
+    if let Some(fi) = d.selected_floating
+        && let Some((cur_width, cur_wrap)) = d.floating.get(fi).map(|b| (b.width_mm, b.wrap))
+    {
+        let wrap_label = match cur_wrap {
+            ImageWrap::BehindText => "Nổi sau chữ",
+            ImageWrap::Square => "Bao quanh ảnh",
+            ImageWrap::TopBottom => "Trên và dưới",
+            _ => "Nổi trên chữ",
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(ph::IMAGE).on_hover_text("Ảnh nổi đang chọn");
+            egui::ComboBox::from_id_salt("doc_img_wrap_float")
+                .selected_text(wrap_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(false, "Trên và dưới").clicked() {
+                        float_set_wrap = Some(ImageWrap::TopBottom);
+                    }
+                    if ui
+                        .selectable_label(cur_wrap == ImageWrap::InFrontOfText, "Nổi trên chữ")
+                        .clicked()
+                    {
+                        float_set_wrap = Some(ImageWrap::InFrontOfText);
+                    }
+                    if ui
+                        .selectable_label(cur_wrap == ImageWrap::BehindText, "Nổi sau chữ")
+                        .clicked()
+                    {
+                        float_set_wrap = Some(ImageWrap::BehindText);
+                    }
+                    if ui
+                        .selectable_label(cur_wrap == ImageWrap::Square, "Bao quanh ảnh")
+                        .clicked()
+                    {
+                        float_set_wrap = Some(ImageWrap::Square);
+                    }
+                });
+            ui.separator();
+            ui.label("Rộng").on_hover_text("Chiều rộng ảnh (mm)");
+            let mut width_mm = cur_width;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut width_mm)
+                        .range(10.0..=400.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                )
+                .changed()
+            {
+                float_width_cmd = Some(width_mm);
+            }
+            ui.separator();
+            ui.label("Kéo ảnh để di chuyển; kéo góc để đổi cỡ.");
+            ui.separator();
+            if ui.button(ph::TRASH).on_hover_text("Xoá ảnh").clicked() {
+                float_delete_cmd = true;
+            }
+        });
     }
 
     if reshape {
@@ -906,11 +906,11 @@ fn window_ui(
         if let Some(wrap) = float_set_wrap {
             if wrap == ImageWrap::TopBottom {
                 convert_floating_to_top_bottom(d, fs, fi);
-            } else if let Some(block) = d.floating.get_mut(fi) {
-                if block.wrap != wrap {
-                    block.wrap = wrap;
-                    d.revision = d.revision.wrapping_add(1);
-                }
+            } else if let Some(block) = d.floating.get_mut(fi)
+                && block.wrap != wrap
+            {
+                block.wrap = wrap;
+                d.revision = d.revision.wrapping_add(1);
             }
         } else if let Some(w) = float_width_cmd {
             if let Some(block) = d.floating.get_mut(fi) {
@@ -1029,39 +1029,38 @@ fn window_ui(
                     (bx, by)
                 });
                 if response.drag_started() {
-                    if let Some((bx, by)) = pointer {
-                        if let Some((id, line, byte, left, top, width, height)) =
+                    if let Some((bx, by)) = pointer
+                        && let Some((id, line, byte, left, top, width, height)) =
                             image_at(d, cw, bx, by)
-                        {
-                            let handle_r = 7.0;
-                            let corners = [
-                                (left, top),
-                                (left + width, top),
-                                (left + width, top + height),
-                                (left, top + height),
-                            ];
-                            let corner = corners.iter().enumerate().find_map(|(i, (x, y))| {
-                                ((bx - x).abs() <= handle_r && (by - y).abs() <= handle_r)
-                                    .then_some(i as u8)
-                            });
-                            if let Some(corner) = corner.filter(|_| {
-                                line_is_block_image(d.editor.as_ref().expect("editor"), line)
-                            }) {
-                                let opposite_x = if matches!(corner, 0 | 3) {
-                                    left + width
-                                } else {
-                                    left
-                                };
-                                d.resizing_block_image = Some((id, corner, opposite_x));
+                    {
+                        let handle_r = 7.0;
+                        let corners = [
+                            (left, top),
+                            (left + width, top),
+                            (left + width, top + height),
+                            (left, top + height),
+                        ];
+                        let corner = corners.iter().enumerate().find_map(|(i, (x, y))| {
+                            ((bx - x).abs() <= handle_r && (by - y).abs() <= handle_r)
+                                .then_some(i as u8)
+                        });
+                        if let Some(corner) = corner.filter(|_| {
+                            line_is_block_image(d.editor.as_ref().expect("editor"), line)
+                        }) {
+                            let opposite_x = if matches!(corner, 0 | 3) {
+                                left + width
                             } else {
-                                d.dragging_image = Some(id);
-                            }
-                            if let Some(e) = d.editor.as_mut() {
-                                e.set_selection(Selection::None);
-                                e.set_cursor(Cursor::new(line, byte));
-                            }
-                            image_drag = true;
+                                left
+                            };
+                            d.resizing_block_image = Some((id, corner, opposite_x));
+                        } else {
+                            d.dragging_image = Some(id);
                         }
+                        if let Some(e) = d.editor.as_mut() {
+                            e.set_selection(Selection::None);
+                            e.set_cursor(Cursor::new(line, byte));
+                        }
+                        image_drag = true;
                     }
                 } else if response.dragged() {
                     if let (Some((id, corner, opposite_x)), Some((bx, _))) =
@@ -1139,12 +1138,12 @@ fn window_ui(
                                 d.drag_active = true;
                             }
                         }
-                    } else if response.clicked() {
-                        if let Some(p) = response.interact_pointer_pos() {
-                            let (mut x, y) = map(p, page_index);
-                            x -= text_offset_at_y(editor, y, &d.floating, cx, cy, cw, ch);
-                            editor.action(fs, Action::Click { x, y });
-                        }
+                    } else if response.clicked()
+                        && let Some(p) = response.interact_pointer_pos()
+                    {
+                        let (mut x, y) = map(p, page_index);
+                        x -= text_offset_at_y(editor, y, &d.floating, cx, cy, cw, ch);
+                        editor.action(fs, Action::Click { x, y });
                     }
                     if response.drag_stopped() {
                         d.drag_active = false;
@@ -1434,15 +1433,15 @@ fn window_ui(
                 } else {
                     None
                 };
-                if let Some(bytes) = data {
-                    if let Some(ci) = decode_color_image(&bytes) {
-                        let tex = ctx.load_texture(
-                            format!("iai_doc_img_{id}"),
-                            ci,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        d.image_tex.insert(id, tex);
-                    }
+                if let Some(bytes) = data
+                    && let Some(ci) = decode_color_image(&bytes)
+                {
+                    let tex = ctx.load_texture(
+                        format!("iai_doc_img_{id}"),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    d.image_tex.insert(id, tex);
                 }
                 if let Some(tex) = d.image_tex.get(&id) {
                     let top = cy + line_y - page_index as f32 * ch - h_px;
@@ -1503,40 +1502,38 @@ fn window_ui(
                     paint_floating_image(&painter, d, i, rect, scale);
                 }
             }
-            if focused {
-                if let Some((qx, qy)) = caret {
-                    if (qy as f32 / ch).floor() as usize == page_index {
-                        let caret_offset = text_offset_at_y(
-                            d.editor.as_ref().expect("editor"),
-                            qy,
-                            &d.floating,
-                            cx,
-                            cy,
-                            cw,
-                            ch,
-                        ) as f32;
-                        let x = rect.min.x + (cx + caret_offset + qx as f32) * scale;
-                        let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
-                        let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
-                        if blink {
-                            painter.line_segment(
-                                [egui::pos2(x, y0), egui::pos2(x, y0 + lh * scale)],
-                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(20, 20, 20)),
-                            );
-                        }
-                        let caret_rect = egui::Rect::from_min_max(
-                            egui::pos2(x, y0),
-                            egui::pos2(x + 1.0, y0 + lh * scale),
+            if focused && let Some((qx, qy)) = caret {
+                if (qy as f32 / ch).floor() as usize == page_index {
+                    let caret_offset = text_offset_at_y(
+                        d.editor.as_ref().expect("editor"),
+                        qy,
+                        &d.floating,
+                        cx,
+                        cy,
+                        cw,
+                        ch,
+                    ) as f32;
+                    let x = rect.min.x + (cx + caret_offset + qx as f32) * scale;
+                    let y0 = rect.min.y + (cy + qy as f32 - page_index as f32 * ch) * scale;
+                    let blink = ui.input(|i| (i.time * 1.5) as i64 % 2 == 0);
+                    if blink {
+                        painter.line_segment(
+                            [egui::pos2(x, y0), egui::pos2(x, y0 + lh * scale)],
+                            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(20, 20, 20)),
                         );
-                        ctx.output_mut(|o| {
-                            o.ime = Some(egui::output::IMEOutput {
-                                rect: caret_rect,
-                                cursor_rect: caret_rect,
-                            });
-                        });
                     }
-                    ctx.request_repaint_after(Duration::from_millis(400)); // caret blink
+                    let caret_rect = egui::Rect::from_min_max(
+                        egui::pos2(x, y0),
+                        egui::pos2(x + 1.0, y0 + lh * scale),
+                    );
+                    ctx.output_mut(|o| {
+                        o.ime = Some(egui::output::IMEOutput {
+                            rect: caret_rect,
+                            cursor_rect: caret_rect,
+                        });
+                    });
                 }
+                ctx.request_repaint_after(Duration::from_millis(400)); // caret blink
             }
             rect
         });
@@ -3006,15 +3003,13 @@ fn handle_floating_pointer(
 
     if response.drag_started() || response.clicked() {
         // A handle of the already-selected image starts a resize.
-        if let Some(sel) = d.selected_floating {
-            if let Some(block) = d.floating.get(sel) {
-                if block.page == page_index {
-                    if let Some(corner) = hit_corner(block, pmm, handle_mm) {
-                        d.float_drag = Some(FloatDrag::Resize { corner });
-                        return true;
-                    }
-                }
-            }
+        if let Some(sel) = d.selected_floating
+            && let Some(block) = d.floating.get(sel)
+            && block.page == page_index
+            && let Some(corner) = hit_corner(block, pmm, handle_mm)
+        {
+            d.float_drag = Some(FloatDrag::Resize { corner });
+            return true;
         }
         // Otherwise select the top-most floating image under the pointer.
         let mut hit = None;
@@ -3036,24 +3031,23 @@ fn handle_floating_pointer(
         d.float_drag = None;
         return false;
     }
-    if response.dragged() {
-        if let (Some(sel), Some(drag)) = (d.selected_floating, d.float_drag) {
-            if let Some(block) = d.floating.get_mut(sel) {
-                match drag {
-                    FloatDrag::Move { dx_mm, dy_mm } => {
-                        block.x_mm = (pmm.0 - dx_mm).max(0.0);
-                        block.y_mm = (pmm.1 - dy_mm).max(0.0);
-                    }
-                    FloatDrag::Resize { corner } => resize_floating(block, corner, pmm),
-                }
-                // Square wrap must follow the image continuously while it is
-                // moved/resized, not jump only after mouse release.
-                if block.wrap == ImageWrap::Square {
-                    d.revision = d.revision.wrapping_add(1);
-                }
-                return true;
+    if response.dragged()
+        && let (Some(sel), Some(drag)) = (d.selected_floating, d.float_drag)
+        && let Some(block) = d.floating.get_mut(sel)
+    {
+        match drag {
+            FloatDrag::Move { dx_mm, dy_mm } => {
+                block.x_mm = (pmm.0 - dx_mm).max(0.0);
+                block.y_mm = (pmm.1 - dy_mm).max(0.0);
             }
+            FloatDrag::Resize { corner } => resize_floating(block, corner, pmm),
         }
+        // Square wrap must follow the image continuously while it is
+        // moved/resized, not jump only after mouse release.
+        if block.wrap == ImageWrap::Square {
+            d.revision = d.revision.wrapping_add(1);
+        }
+        return true;
     }
     if response.drag_stopped() {
         if d.float_drag.is_some() {
@@ -3193,28 +3187,29 @@ fn render_page(
                 );
             let base_y = cy + run.line_y - page as f32 * ch;
             // Draw the list marker (same font + baseline as the body) in the gutter.
-            if is_list && first_visual {
-                if let Some(Some(text)) = markers.get(run.line_i) {
-                    let mut mb = Buffer::new(fs, base_metrics(font_pt, line_spacing));
-                    mb.set_size(Some(list_indent.max(1.0)), None);
-                    mb.set_text(
-                        text,
-                        &Attrs::new().family(Family::Name(font_name)),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    mb.shape_until_scroll(fs, false);
-                    for mr in mb.layout_runs() {
-                        for glyph in mr.glyphs {
-                            let marker_x = ox - list_indent;
-                            let phys = glyph.physical(
-                                (marker_x * render_scale, base_y * render_scale),
-                                render_scale,
-                            );
-                            cache.with_pixels(fs, phys.cache_key, ink, |gx, gy, col| {
-                                blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
-                            });
-                        }
+            if is_list
+                && first_visual
+                && let Some(Some(text)) = markers.get(run.line_i)
+            {
+                let mut mb = Buffer::new(fs, base_metrics(font_pt, line_spacing));
+                mb.set_size(Some(list_indent.max(1.0)), None);
+                mb.set_text(
+                    text,
+                    &Attrs::new().family(Family::Name(font_name)),
+                    Shaping::Advanced,
+                    None,
+                );
+                mb.shape_until_scroll(fs, false);
+                for mr in mb.layout_runs() {
+                    for glyph in mr.glyphs {
+                        let marker_x = ox - list_indent;
+                        let phys = glyph.physical(
+                            (marker_x * render_scale, base_y * render_scale),
+                            render_scale,
+                        );
+                        cache.with_pixels(fs, phys.cache_key, ink, |gx, gy, col| {
+                            blend_px(&mut buf, pw, ph, phys.x + gx, phys.y + gy, col);
+                        });
                     }
                 }
             }
@@ -3386,18 +3381,16 @@ fn editor_document(d: &DocRuntime) -> TextDocument {
                 }
             };
 
-            if continuation {
-                if let Some(previous) = paragraphs.last_mut() {
-                    let byte_base = previous.text().len();
-                    previous
-                        .inline_images
-                        .extend(paragraph.inline_images.into_iter().map(|mut inline| {
-                            inline.byte_offset += byte_base;
-                            inline
-                        }));
-                    previous.runs.extend(paragraph.runs);
-                    continue;
-                }
+            if continuation && let Some(previous) = paragraphs.last_mut() {
+                let byte_base = previous.text().len();
+                previous
+                    .inline_images
+                    .extend(paragraph.inline_images.into_iter().map(|mut inline| {
+                        inline.byte_offset += byte_base;
+                        inline
+                    }));
+                previous.runs.extend(paragraph.runs);
+                continue;
             }
             paragraphs.push(paragraph);
         }
@@ -3584,10 +3577,12 @@ mod tests {
             "Times New Roman",
             CharToggle::Bold
         ));
-        assert!(editor
-            .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
-            .iter()
-            .all(|r| !r.style.bold));
+        assert!(
+            editor
+                .with_buffer(|b| runs_from_line(&b.lines[0], &CharStyle::default()))
+                .iter()
+                .all(|r| !r.style.bold)
+        );
     }
 
     #[test]

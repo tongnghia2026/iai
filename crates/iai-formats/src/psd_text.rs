@@ -20,7 +20,7 @@
 //! (EngineDict → StyleRun → RunArray → StyleSheet → StyleSheetData) is the
 //! documented text-engine layout. Real-Photoshop verification is still owed.
 
-use super::psd_descriptor::{read_descriptor, Cur, Descriptor, Val};
+use super::psd_descriptor::{Cur, Descriptor, Val, read_descriptor};
 use iai_text::text::{TextAlign, TextData, TextFontFamily};
 
 /// The editable text parsed from a `TySh` block.
@@ -68,35 +68,35 @@ fn build_text_import(desc: &Descriptor, m: [f64; 6]) -> Option<TextImport> {
     }
 
     // EngineData carries font/size/colour — best-effort enrichment.
-    if let Some(Val::Raw(bytes)) = desc.get("EngineData") {
-        if let Some(style) = engine_data::extract(bytes) {
-            if let Some(fs) = style.font_size {
-                // FontSize is the base point size; the transform scales it.
-                td.font_px = (fs * sy).clamp(1.0, 4096.0) as f32;
-            }
-            if let Some(col) = style.fill_color {
-                td.color = col;
-            }
-            if let Some(name) = style.font_name {
-                let (family, bold, italic) = map_font(&name);
-                td.font_family = family;
-                td.bold = bold;
-                td.italic = italic;
-            }
-            if style.faux_bold {
-                td.bold = true;
-            }
-            if style.faux_italic {
-                td.italic = true;
-            }
-            if let Some(a) = style.align {
-                td.align = a;
-            }
-            if let Some(tr) = style.tracking {
-                // Tracking is in 1/1000 em; convert to canvas pixels.
-                let base = style.font_size.unwrap_or(td.font_px as f64);
-                td.tracking_px = (tr / 1000.0 * base * sy) as f32;
-            }
+    if let Some(Val::Raw(bytes)) = desc.get("EngineData")
+        && let Some(style) = engine_data::extract(bytes)
+    {
+        if let Some(fs) = style.font_size {
+            // FontSize is the base point size; the transform scales it.
+            td.font_px = (fs * sy).clamp(1.0, 4096.0) as f32;
+        }
+        if let Some(col) = style.fill_color {
+            td.color = col;
+        }
+        if let Some(name) = style.font_name {
+            let (family, bold, italic) = map_font(&name);
+            td.font_family = family;
+            td.bold = bold;
+            td.italic = italic;
+        }
+        if style.faux_bold {
+            td.bold = true;
+        }
+        if style.faux_italic {
+            td.italic = true;
+        }
+        if let Some(a) = style.align {
+            td.align = a;
+        }
+        if let Some(tr) = style.tracking {
+            // Tracking is in 1/1000 em; convert to canvas pixels.
+            let base = style.font_size.unwrap_or(td.font_px as f64);
+            td.tracking_px = (tr / 1000.0 * base * sy) as f32;
         }
     }
 
@@ -549,7 +549,7 @@ mod tests {
         }
         push_u16(&mut d, 50); // text version
         push_u32(&mut d, 16); // descriptor version
-                              // descriptor: name, classID, count, items
+        // descriptor: name, classID, count, items
         push_unicode(&mut d, ""); // name
         push_key(&mut d, "TxLr"); // classID
         let count = 1 + engine.is_some() as u32;

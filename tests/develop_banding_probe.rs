@@ -1,7 +1,7 @@
 //! Phase-0 renderer banding baseline on a deterministic 16-bit neutral ramp.
 
 use iai::core::color_reference::analyze_ramp;
-use iai::core::develop_scene::{render_default_look, SceneSource};
+use iai::core::develop_scene::{SceneSource, render_default_look};
 use iai::core::working_color::WorkingColorSpace;
 
 #[test]

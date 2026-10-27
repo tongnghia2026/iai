@@ -7,11 +7,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use iai_engine::{CmdError, CommandCall, ErrorCode, JobId, JobState, Reply};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::recipe::{Over, ParamKind, Recipe, Step};
-use super::template::{fill, result_key, Results, Scope};
 use super::Store;
+use super::recipe::{Over, ParamKind, Recipe, Step};
+use super::template::{Results, Scope, fill, result_key};
 use crate::{Gate, Host};
 
 /// How deep skills may call skills.
@@ -31,6 +31,8 @@ pub struct Run {
     pub calls: usize,
     /// Files the run wrote, as the commands answered them.
     pub written: Vec<String>,
+    /// What the job waited on said it was doing, last.
+    pub doing: Option<String>,
 }
 
 struct Waiting {
@@ -236,6 +238,18 @@ impl Run {
         given: &Value,
     ) -> Result<(Run, Value), CmdError> {
         let recipe = store.load(name)?;
+        Self::start_recipe(store, gate, name, recipe, given)
+    }
+
+    /// As [`Run::start`], for a recipe that is not in the library (one iAi
+    /// carries itself); the skills it calls are the library's.
+    pub fn start_recipe(
+        store: &Store,
+        gate: &Gate,
+        name: &str,
+        recipe: Recipe,
+        given: &Value,
+    ) -> Result<(Run, Value), CmdError> {
         let params = resolve_params(&recipe, given, gate)?;
         check_commands(store, gate, &recipe, 0)?;
         // What the loops over folders will take, known before anything runs.
@@ -245,15 +259,13 @@ impl Run {
         }
         let mut loops = Vec::new();
         for step in &recipe.steps {
-            if let Some(over) = &step.foreach {
-                if let Some(t) = &over.files {
-                    if let Ok(Value::String(dir)) =
-                        fill(&Value::String(t.clone()), &scope, &Results::new(), name)
-                    {
-                        let n = folder_items(Path::new(&dir), over).map(|v| v.len()).ok();
-                        loops.push(json!({"step": step.id, "folder": dir, "files": n}));
-                    }
-                }
+            if let Some(over) = &step.foreach
+                && let Some(t) = &over.files
+                && let Ok(Value::String(dir)) =
+                    fill(&Value::String(t.clone()), &scope, &Results::new(), name)
+            {
+                let n = folder_items(Path::new(&dir), over).map(|v| v.len()).ok();
+                loops.push(json!({"step": step.id, "folder": dir, "files": n}));
             }
         }
         let plan = json!({
@@ -279,8 +291,29 @@ impl Run {
             waiting: None,
             calls: 0,
             written: Vec::new(),
+            doing: None,
         };
         Ok((run, plan))
+    }
+
+    /// The outermost loop's round (1-based) and how many it has, while in
+    /// one.
+    pub fn rounds(&self) -> Option<(usize, usize)> {
+        self.frames.iter().find_map(|f| {
+            f.round
+                .as_ref()
+                .map(|r| (r.index.saturating_add(1).min(r.items.len()), r.items.len()))
+        })
+    }
+
+    /// The job the run waits on.
+    pub fn job(&self) -> Option<JobId> {
+        self.waiting.as_ref().map(|w| w.job)
+    }
+
+    /// What step `id` of the skill itself answered last.
+    pub fn result(&self, id: &str) -> Option<&Value> {
+        self.results.get(&result_key(&self.skill, id))
     }
 
     fn scope(&self) -> Scope {
@@ -289,12 +322,12 @@ impl Run {
             for (k, v) in &f.names {
                 scope.push(k, v.clone());
             }
-            if let Some(r) = &f.round {
-                if let Some(item) = r.items.get(r.index) {
-                    scope.push(&r.var, item.clone());
-                    scope.push("i", json!(r.index));
-                    scope.push("n", json!(r.index.saturating_add(1)));
-                }
+            if let Some(r) = &f.round
+                && let Some(item) = r.items.get(r.index)
+            {
+                scope.push(&r.var, item.clone());
+                scope.push("i", json!(r.index));
+                scope.push("n", json!(r.index.saturating_add(1)));
             }
         }
         scope
@@ -311,10 +344,8 @@ impl Run {
         let writes = gate
             .info(command)
             .is_some_and(|i| i.effects.contains(&iai_engine::Effect::WriteFiles));
-        if writes {
-            if let Some(p) = result.get("path").and_then(Value::as_str) {
-                self.written.push(p.to_string());
-            }
+        if writes && let Some(p) = result.get("path").and_then(Value::as_str) {
+            self.written.push(p.to_string());
         }
         self.results.insert(key, result);
         self.calls = self.calls.saturating_add(1);
@@ -344,9 +375,11 @@ impl Run {
                 match host.job(w.job, wait).map_err(|e| fail(e, self.round()))? {
                     Some(JobState::Done { result, .. }) => {
                         let (key, command) = (w.key.clone(), w.command.clone());
+                        self.doing = None;
                         self.keep(key, &command, result, gate);
                     }
-                    Some(JobState::Running { .. }) => {
+                    Some(JobState::Running { vi, .. }) => {
+                        self.doing = Some(vi).filter(|v| !v.is_empty());
                         self.waiting = Some(w);
                         if until.is_some_and(|u| Instant::now() >= u) {
                             return Ok(Progress::Paused);
@@ -357,13 +390,13 @@ impl Run {
                         return Err(fail(
                             CmdError::new(ErrorCode::Cancelled, "the job was cancelled"),
                             self.round(),
-                        ))
+                        ));
                     }
                     None => {
                         return Err(fail(
                             CmdError::new(ErrorCode::NotFound, format!("no job {}", w.job.0)),
                             self.round(),
-                        ))
+                        ));
                     }
                 }
                 continue;
@@ -434,7 +467,7 @@ impl Run {
                     match fill(&over.items, &scope, &self.results, &ns).map_err(|e| fail(bad(e)))? {
                         Value::Array(items) => items,
                         other => {
-                            return Err(fail(bad(format!("a loop goes over a list, not {other}"))))
+                            return Err(fail(bad(format!("a loop goes over a list, not {other}"))));
                         }
                     }
                 } else {

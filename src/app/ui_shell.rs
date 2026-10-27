@@ -96,7 +96,7 @@ pub struct UiShell {
     /// The last portrait analysis, kept so reopening the same photo does not
     /// run the models again.
     #[cfg(feature = "pro")]
-    pub(in crate::app) portrait_cache: Option<crate::app::portrait_ops::PortraitCache>,
+    pub(in crate::app) portrait_cache: crate::app::portrait_ops::PortraitCache,
     /// The "Làm ảnh thẻ" job (and its wait for the background model).
     #[cfg(feature = "pro")]
     pub(in crate::app) id_photo: crate::app::id_photo_ops::IdPhotoSession,
@@ -110,6 +110,10 @@ pub struct UiShell {
     pub(in crate::app) agent_link_error: Option<String>,
     /// The skill library as the agent dialog shows it, and when it was read.
     pub(in crate::app) agent_skills: Option<(std::time::Instant, Vec<crate::ui::SkillRow>)>,
+    /// "Nhờ AI làm": errands for Gemini in Antigravity.
+    pub(in crate::app) errands: crate::app::errands::Errands,
+    /// "Việc nhanh": jobs iAi does on a folder by itself.
+    pub(in crate::app) quick: crate::app::quick_tasks::QuickTasks,
     /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.
     pub(in crate::app) crop_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     pub(in crate::app) canvas_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,

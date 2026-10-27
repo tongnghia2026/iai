@@ -15,7 +15,7 @@
 //! there so they stay as cusps (a welded rectangle keeps its square corners).
 
 use crate::vector::path::{Contour, Node, NodeKind};
-use iai_geom::geometry::{cubic_bezier, Point};
+use iai_geom::geometry::{Point, cubic_bezier};
 
 /// A turn sharper than this (angle between the incoming and outgoing edge
 /// direction) forces a cusp and splits the fit there. 60° keeps obvious corners
@@ -552,10 +552,12 @@ mod tests {
         assert!(contour.nodes.len() >= 3);
         // No forced corners → every node smooth with handles.
         assert!(contour.nodes.iter().all(|n| n.kind == NodeKind::Smooth));
-        assert!(contour
-            .nodes
-            .iter()
-            .all(|n| n.in_handle.is_some() && n.out_handle.is_some()));
+        assert!(
+            contour
+                .nodes
+                .iter()
+                .all(|n| n.in_handle.is_some() && n.out_handle.is_some())
+        );
         // Area preserved within tolerance (π·50² ≈ 7854).
         let area = ring_signed_area(&contour_to_polyline(&contour)).abs();
         let expected = std::f32::consts::PI * 50.0 * 50.0;

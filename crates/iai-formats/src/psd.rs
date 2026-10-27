@@ -717,10 +717,10 @@ pub(crate) fn import_tiff_photoshop_layers(
         return Some(canvas);
     }
     // Framing B: payload begins with a 4-byte layer-info length.
-    if block.len() >= 4 {
-        if let Ok(Some(canvas)) = parse_layer_info(&block[4..], &header, icc) {
-            return Some(canvas);
-        }
+    if block.len() >= 4
+        && let Ok(Some(canvas)) = parse_layer_info(&block[4..], &header, icc)
+    {
+        return Some(canvas);
     }
     None
 }
@@ -825,10 +825,10 @@ fn parse_layer_record(r: &mut Reader, header: &Header) -> Result<RawLayer, Strin
         let data = es.take(len)?;
         match &key {
             b"luni" => {
-                if let Some(n) = parse_unicode_name(data) {
-                    if !n.is_empty() {
-                        name = n;
-                    }
+                if let Some(n) = parse_unicode_name(data)
+                    && !n.is_empty()
+                {
+                    name = n;
                 }
             }
             b"lsct" | b"lsdk" => {
@@ -1081,10 +1081,10 @@ fn build_app_layers(raw: &[RawLayer], header: &Header, icc: Option<&[u8]>) -> Ve
     // Drop parent references to groups that never materialised (unbalanced
     // dividers) so no child points at a missing header.
     for l in &mut out {
-        if let Some(p) = l.parent_id {
-            if !group_ids.contains(&p) {
-                l.parent_id = None;
-            }
+        if let Some(p) = l.parent_id
+            && !group_ids.contains(&p)
+        {
+            l.parent_id = None;
         }
     }
     out
@@ -1892,7 +1892,7 @@ mod tests {
     fn tysh_block(text: &str) -> Vec<u8> {
         let mut d = Vec::new();
         d.extend_from_slice(&1u16.to_be_bytes()); // version
-                                                  // identity transform (xx, xy, yx, yy, tx, ty)
+        // identity transform (xx, xy, yx, yy, tx, ty)
         for x in [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0] {
             d.extend_from_slice(&x.to_be_bytes());
         }

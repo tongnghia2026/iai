@@ -531,6 +531,8 @@ pub struct UiState {
     /// The `.icc` picked for CMYK conversion: `(display name, raw bytes)`.
     /// Pre-loaded from the prefs' remembered path when the dialog opens.
     pub cmyk_convert_icc: Option<(String, Vec<u8>)>,
+    /// Where `cmyk_convert_icc` was read from.
+    pub cmyk_convert_icc_path: Option<std::path::PathBuf>,
 }
 
 /// Pixels for [`App::make_perspective_crop_cursor`]: `(rgba, w, h, hot_x, hot_y)`.
@@ -746,7 +748,7 @@ fn message_beep(kind: u32) {
     #[cfg(all(windows, not(test)))]
     {
         #[link(name = "user32")]
-        extern "system" {
+        unsafe extern "system" {
             fn MessageBeep(u_type: u32) -> i32;
         }
         unsafe {
@@ -1270,6 +1272,7 @@ pub struct UiDataCache {
 
     pub layer_names: std::sync::Arc<Vec<String>>,
     pub layer_visibles: std::sync::Arc<Vec<bool>>,
+    pub layer_ids: std::sync::Arc<Vec<u32>>,
     pub layer_opacities: std::sync::Arc<Vec<f32>>,
     pub layer_blend_modes: std::sync::Arc<Vec<crate::core::layer::BlendMode>>,
     pub layer_locked: std::sync::Arc<Vec<bool>>,
@@ -1580,8 +1583,6 @@ impl App {
                 },
                 selection_mode: crate::core::selection::SelectionMode::Add,
                 pending_stroke_inputs: Vec::new(),
-                pending_fill: None,
-                pending_stroke: None,
                 guide_op: None,
                 selected_guide: None,
                 transform_snap_guides: Vec::new(),
@@ -1694,7 +1695,9 @@ impl App {
                 ext_decodes: Vec::new(),
                 pending_printer_settings: None,
                 pending_print: None,
+                print_queue: std::collections::VecDeque::new(),
                 print_gdi_failed: None,
+                print_failed_doc: None,
                 shape_bake: None,
                 path_bake: None,
                 path_bake_next: None,
@@ -1860,6 +1863,7 @@ impl App {
                     show_cmyk_convert_dialog: false,
                     cmyk_convert_use_icc: false,
                     cmyk_convert_icc: None,
+                    cmyk_convert_icc_path: None,
                 },
                 settings,
                 keymap,
@@ -1869,8 +1873,14 @@ impl App {
                 close_requested: false,
                 update_seen: None,
                 updated_notice: false,
+                // A test neither reads nor writes this machine's Pro: it
+                // starts unlocked (iai-pro only knows its own tests).
                 #[cfg(feature = "pro")]
-                pro: crate::pro::Pro::load(),
+                pro: if cfg!(test) {
+                    crate::pro::Pro::unlocked()
+                } else {
+                    crate::pro::Pro::load()
+                },
                 #[cfg(feature = "pro")]
                 pro_door: None,
                 canvas_unit: settings_default_unit,
@@ -1907,7 +1917,7 @@ impl App {
                 #[cfg(feature = "pro")]
                 portrait_error: None,
                 #[cfg(feature = "pro")]
-                portrait_cache: None,
+                portrait_cache: Default::default(),
                 #[cfg(feature = "pro")]
                 id_photo: Default::default(),
                 #[cfg(feature = "pro")]
@@ -1915,6 +1925,8 @@ impl App {
                 agent_link: None,
                 agent_link_error: None,
                 agent_skills: None,
+                errands: Default::default(),
+                quick: Default::default(),
                 crop_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
                     crate::core::presets::SizePresetList::Crop,
                 )),
@@ -2783,12 +2795,14 @@ impl App {
         // Leaving now would cut the job off before the spooler has all of it.
         // A printer that no longer answers is not waited for: nothing would
         // then let the app be closed at all.
-        if self
+        // Sheets waiting their turn go out after it.
+        let sending = self
             .jobs
             .pending_print
             .as_ref()
-            .is_some_and(|job| !job.is_stuck())
-        {
+            .is_some_and(|job| !job.is_stuck());
+        let next = self.jobs.pending_print.is_none() && !self.jobs.print_queue.is_empty();
+        if sending || next {
             return Some("the print being sent");
         }
         if self.edit.transform_state.is_some() || self.edit.pending_transform_commit.is_some() {
@@ -3009,16 +3023,16 @@ impl App {
     /// The front tab of the exit sweep has been answered (saved or discarded):
     /// close it so it leaves the tab strip, then prompt the next one.
     pub(crate) fn close_answered_exit_document(&mut self) {
-        if let Some(id) = self.docs.pending_exit_docs.pop_front() {
-            if let Some(idx) = self.docs.index_of(id) {
-                // Land straight on the next tab to ask about rather than the
-                // most recently used one, so each close costs one switch.
-                if let Some(&next) = self.docs.pending_exit_docs.front() {
-                    self.docs.doc_mru.retain(|mru| *mru != next);
-                    self.docs.doc_mru.insert(0, next);
-                }
-                self.close_doc_confirmed(idx);
+        if let Some(id) = self.docs.pending_exit_docs.pop_front()
+            && let Some(idx) = self.docs.index_of(id)
+        {
+            // Land straight on the next tab to ask about rather than the
+            // most recently used one, so each close costs one switch.
+            if let Some(&next) = self.docs.pending_exit_docs.front() {
+                self.docs.doc_mru.retain(|mru| *mru != next);
+                self.docs.doc_mru.insert(0, next);
             }
+            self.close_doc_confirmed(idx);
         }
         self.present_next_exit_document();
     }

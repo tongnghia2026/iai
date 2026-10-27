@@ -188,11 +188,9 @@ impl App {
             .gpu
             .as_ref()
             .is_some_and(|g| g.compositor.canvas_space);
-        if canvas_space {
-            if let Some(rect) = self.visible_canvas_rect() {
-                self.recomposite_with_dirty(Some(rect));
-                return;
-            }
+        if canvas_space && let Some(rect) = self.visible_canvas_rect() {
+            self.recomposite_with_dirty(Some(rect));
+            return;
         }
         self.recomposite();
     }
@@ -695,7 +693,7 @@ fn choose_canvas_space(
 
 #[cfg(test)]
 mod hybrid_canvas_mode_tests {
-    use super::{choose_canvas_space, App};
+    use super::{App, choose_canvas_space};
 
     #[test]
     fn gpu_vector_flag_forces_viewport_space_for_small_static_canvas() {

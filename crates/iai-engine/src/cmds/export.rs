@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use iai_canvas::canvas::Canvas;
 use iai_canvas::document::Document;
-use iai_canvas::print::{build_snapshots_pdf, prepare_pdf_pixels, PrintMarks};
+use iai_canvas::print::{PrintMarks, build_snapshots_pdf, prepare_pdf_pixels};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -161,15 +161,15 @@ fn hybrid_source(doc: &Document, positions: &[usize]) -> Result<HybridSource, Cm
                 .get(&page)
                 .map(|cached| (cached.canvas.export_snapshot(), cached.reference.clone()))
         };
-        if let Some((canvas, _)) = edited.as_mut() {
-            if let Some(overlay) = iai_canvas::document::build_pdf_global_overlay_stack(
+        if let Some((canvas, _)) = edited.as_mut()
+            && let Some(overlay) = iai_canvas::document::build_pdf_global_overlay_stack(
                 &global_edits,
                 page,
                 canvas.width,
                 canvas.height,
-            ) {
-                canvas.layer_stack = canvas.layer_stack.with_overlay(&overlay);
-            }
+            )
+        {
+            canvas.layer_stack = canvas.layer_stack.with_overlay(&overlay);
         }
         snapshots.push((page, edited));
     }

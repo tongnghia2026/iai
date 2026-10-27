@@ -39,11 +39,10 @@ impl App {
             .layers
             .iter_mut()
             .find(|layer| layer.id == layer_id)
+            && layer.visible != visible
         {
-            if layer.visible != visible {
-                layer.visible = visible;
-                canvas.layer_revision = canvas.layer_revision.wrapping_add(1);
-            }
+            layer.visible = visible;
+            canvas.layer_revision = canvas.layer_revision.wrapping_add(1);
         }
     }
 
@@ -214,17 +213,16 @@ impl App {
             pdf.global_edits
                 .push(crate::core::document::PdfGlobalEdit::Stamp(stamp));
             pdf.global_edits_redo.clear();
-            if let Some(layer_id) = source_layer_id {
-                if let Some(layer) = doc
+            if let Some(layer_id) = source_layer_id
+                && let Some(layer) = doc
                     .canvas
                     .layer_stack
                     .layers
                     .iter_mut()
                     .find(|layer| layer.id == layer_id)
-                {
-                    layer.visible = false;
-                    doc.canvas.layer_revision = doc.canvas.layer_revision.wrapping_add(1);
-                }
+            {
+                layer.visible = false;
+                doc.canvas.layer_revision = doc.canvas.layer_revision.wrapping_add(1);
             }
             doc.rebuild_pdf_global_overlay();
             page_count
@@ -246,48 +244,23 @@ impl App {
         if std::mem::take(&mut actions.sel.cancel_pdf_batch) {
             self.shell.ui.pdf_batch_operation = None;
         }
-        if std::mem::take(&mut actions.sel.apply_pdf_batch) {
-            if let Some(operation) = self.shell.ui.pdf_batch_operation.take() {
-                let target_pages = self.pdf_batch_target_pages(self.shell.ui.pdf_batch_page_count);
-                match operation {
-                    crate::ui::intent::PdfBatchOperation::Clear => {
-                        self.clear_selection_on_pdf_pages(target_pages)
-                    }
-                    crate::ui::intent::PdfBatchOperation::Text => self
-                        .stamp_active_layer_on_all_pdf_pages(
-                            crate::core::document::PdfGlobalStampKind::Text,
-                            target_pages,
-                        ),
+        if std::mem::take(&mut actions.sel.apply_pdf_batch)
+            && let Some(operation) = self.shell.ui.pdf_batch_operation.take()
+        {
+            let target_pages = self.pdf_batch_target_pages(self.shell.ui.pdf_batch_page_count);
+            match operation {
+                crate::ui::intent::PdfBatchOperation::Clear => {
+                    self.clear_selection_on_pdf_pages(target_pages)
                 }
+                crate::ui::intent::PdfBatchOperation::Text => self
+                    .stamp_active_layer_on_all_pdf_pages(
+                        crate::core::document::PdfGlobalStampKind::Text,
+                        target_pages,
+                    ),
             }
         }
         if let Some(mode) = actions.sel.set_selection_mode.take() {
             self.edit.selection_mode = mode;
-        }
-        // Select > Modify, as the command an agent runs.
-        let modify = [
-            ("feather", actions.sel.selection_feather.take()),
-            (
-                "grow",
-                actions.sel.selection_grow.take().map(|px| px as f32),
-            ),
-            (
-                "shrink",
-                actions.sel.selection_shrink.take().map(|px| px as f32),
-            ),
-            ("smooth", actions.sel.selection_smooth.take()),
-            (
-                "border",
-                actions.sel.selection_border.take().map(|px| px as f32),
-            ),
-        ];
-        for (change, amount) in modify {
-            if let Some(amount) = amount.filter(|a| *a > 0.0) {
-                let _ = self.run_with(
-                    "select.modify",
-                    serde_json::json!({"change": change, "amount": amount.min(500.0)}),
-                );
-            }
         }
         if let Some(kind) = actions.sel.open_modify_dialog.take() {
             self.shell.ui.show_modify_dialog = Some(kind);
@@ -429,28 +402,6 @@ impl App {
         if actions.doc.paste {
             self.do_paste();
         }
-        if actions.doc.fill_foreground {
-            self.edit.pending_fill = Some(self.edit.tools.brush().settings.color);
-        }
-        if actions.doc.fill_background {
-            self.edit.pending_fill = Some(self.edit.bg_color);
-        }
-        if actions.sel.clear_selection_pixels {
-            let has_selection = self.docs.active().canvas.selection.active;
-            let active_is_background = {
-                let canvas = &self.docs.active().canvas;
-                canvas
-                    .layer_stack
-                    .layers
-                    .get(canvas.layer_stack.active_idx)
-                    .is_some_and(|layer| layer.is_background)
-            };
-            if has_selection && active_is_background {
-                self.edit.pending_fill = Some(self.edit.bg_color);
-            } else if has_selection && self.docs.active_mut().canvas.clear_selection() {
-                self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
-            }
-        }
         if actions.sel.clear_selection_all_pdf_pages {
             self.open_pdf_batch_dialog(crate::ui::intent::PdfBatchOperation::Clear);
         }
@@ -468,15 +419,6 @@ impl App {
         }
         if actions.sel.redo_pdf_global_clear {
             self.redo_pdf_global_clear();
-        }
-        if actions.sel.select_all {
-            let _ = self.run_now("select.all");
-        }
-        if actions.sel.deselect {
-            let _ = self.run_now("select.none");
-        }
-        if actions.sel.invert_selection {
-            let _ = self.run_now("select.invert");
         }
     }
 }

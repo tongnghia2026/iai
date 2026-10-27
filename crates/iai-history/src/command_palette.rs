@@ -1,7 +1,7 @@
 //! The undo step that edits a document's palette.
 
 use crate::command::{Command, EditContext};
-use iai_doc::palette::{validate_palette, DocumentSwatch};
+use iai_doc::palette::{DocumentSwatch, validate_palette};
 
 /// Replace the complete small palette. At the documented 256-entry ceiling this
 /// is both simpler and cheaper than a family of index commands, and makes undo

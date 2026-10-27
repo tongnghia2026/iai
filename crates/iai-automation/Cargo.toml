@@ -1,7 +1,7 @@
 [package]
 name = "iai-automation"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "How AI agents and scripts reach iAi: MCP over stdio, the bridge to a running app, and the gate that holds them to what they were granted."
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/tongnghia2026/iai"

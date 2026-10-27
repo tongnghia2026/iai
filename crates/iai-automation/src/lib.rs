@@ -9,7 +9,9 @@
 //! - [`gate`]: what an agent was granted — effects, the folders it may read
 //!   and write, sizes — checked before a call reaches the host.
 //! - [`bridge`]: the app's side of the link to a running window (loopback
-//!   TCP, a 256-bit token) and the client that uses it.
+//!   TCP, a 256-bit token), the client that uses it, the host that prefers
+//!   the window when it is open ([`bridge::PreferWindow`]), and the errands
+//!   the person sends from the window to an agent elsewhere.
 //! - [`script`]: a script of calls (`iai.exe run`), longer than a batch when
 //!   it is not all or nothing.
 //! - [`skills`]: the skill library — tasks agents did well, kept as recipes
@@ -30,7 +32,7 @@ pub mod script;
 pub mod skills;
 
 pub use gate::{Gate, Roots};
-pub use host::{Host, LocalHost};
+pub use host::{Grants, Host, LocalHost};
 
 /// Limits on what an agent may send or be sent.
 pub mod limits {

@@ -17,10 +17,6 @@ pub struct EditorInteraction {
     pub(in crate::app) input: InputState,
     pub(in crate::app) selection_mode: crate::core::selection::SelectionMode,
     pub(in crate::app) pending_stroke_inputs: Vec<PointerEvent>,
-    pub(in crate::app) pending_fill: Option<[u8; 4]>,
-    /// Deferred selection-stroke request (Edit ▸ Stroke), applied after the egui
-    /// frame like `pending_fill`. None when nothing pending.
-    pub(in crate::app) pending_stroke: Option<crate::core::canvas::StrokeParams>,
     /// In-progress guide drag (create from ruler, or move an existing guide).
     pub(in crate::app) guide_op: Option<GuideOp>,
     /// Guide picked with the Move tool (its document, its index there):

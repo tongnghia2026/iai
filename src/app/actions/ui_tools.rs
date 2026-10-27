@@ -94,13 +94,13 @@ impl App {
                 w.request_redraw();
             }
         }
-        if let Some(origin) = actions.tool.text_move_origin.take() {
-            if let Some(session) = &mut self.edit.text_edit {
-                session.origin = origin;
-                self.edit.text_focus_pending = false;
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+        if let Some(origin) = actions.tool.text_move_origin.take()
+            && let Some(session) = &mut self.edit.text_edit
+        {
+            session.origin = origin;
+            self.edit.text_focus_pending = false;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
             }
         }
         if let Some(a) = actions.tool.set_text_align.take() {
@@ -215,20 +215,12 @@ impl App {
         }
 
         let sel_menu_consumed = actions.sel.selection_ctx_menu_close
-            || actions.sel.select_all
-            || actions.sel.deselect
-            || actions.sel.invert_selection
+            || !actions.commands.is_empty()
             || actions.sel.show_feather_dialog.is_some()
-            || actions.sel.selection_grow.is_some()
-            || actions.sel.selection_shrink.is_some()
-            || actions.sel.selection_smooth.is_some()
-            || actions.sel.selection_border.is_some()
             || actions.sel.open_modify_dialog.is_some()
             || actions.sel.close_modify_dialog
-            || actions.doc.fill_foreground
             || actions.sel.show_stroke_dialog.is_some()
             || actions.dialogs.smart_fill_fill
-            || actions.layers.layer_via_copy
             || actions.doc.copy
             || actions.doc.cut
             || actions.doc.paste
@@ -316,28 +308,28 @@ impl App {
         actions: &mut UiActions,
         event_loop: &ActiveEventLoop,
     ) {
-        if let Some(id) = actions.tool.select_tool.take() {
-            if !self.is_tool_modal_active() {
-                self.edit.tools.select(id);
-                // Entering (or re-entering) a tool ends any Arrow branch group in
-                // progress, so the next trunk drag starts a fresh multi-arrow.
-                self.edit.arrow_multi_layer = None;
-                if id == crate::tools::ToolId::Crop {
-                    let canvas = &self.docs.active().canvas;
-                    let dpi = canvas.metadata.resolution_ppi;
-                    self.edit.tools.crop_mut().sync_dpi_on_activate(dpi);
-                }
-                if id == crate::tools::ToolId::PerspectiveCrop {
-                    // No auto frame — wait for the user to pick the four corners.
-                    let canvas = &self.docs.active().canvas;
-                    let cw = canvas.width as f32;
-                    let ch = canvas.height as f32;
-                    let t = self.edit.tools.perspective_crop_mut();
-                    t.sync_manual_pixels(cw, ch);
-                    t.begin_placing();
-                }
-                self.sync_cursor(event_loop);
+        if let Some(id) = actions.tool.select_tool.take()
+            && !self.is_tool_modal_active()
+        {
+            self.edit.tools.select(id);
+            // Entering (or re-entering) a tool ends any Arrow branch group in
+            // progress, so the next trunk drag starts a fresh multi-arrow.
+            self.edit.arrow_multi_layer = None;
+            if id == crate::tools::ToolId::Crop {
+                let canvas = &self.docs.active().canvas;
+                let dpi = canvas.metadata.resolution_ppi;
+                self.edit.tools.crop_mut().sync_dpi_on_activate(dpi);
             }
+            if id == crate::tools::ToolId::PerspectiveCrop {
+                // No auto frame — wait for the user to pick the four corners.
+                let canvas = &self.docs.active().canvas;
+                let cw = canvas.width as f32;
+                let ch = canvas.height as f32;
+                let t = self.edit.tools.perspective_crop_mut();
+                t.sync_manual_pixels(cw, ch);
+                t.begin_placing();
+            }
+            self.sync_cursor(event_loop);
         }
         if let Some(s) = actions.tool.brush_size.take() {
             if self.edit.tools.active_id() == crate::tools::ToolId::Eraser {
@@ -597,19 +589,19 @@ impl App {
                         .to_string();
             }
         }
-        if let Some(color) = actions.tool.apply_palette_fill.take() {
-            if !self.path_apply_palette_fill(color) {
-                let rgba = color.to_rgba8();
-                self.set_paint_color(0, rgba);
-                self.shell.status_msg = "No Path selected; colour set as Foreground".to_string();
-            }
+        if let Some(color) = actions.tool.apply_palette_fill.take()
+            && !self.path_apply_palette_fill(color)
+        {
+            let rgba = color.to_rgba8();
+            self.set_paint_color(0, rgba);
+            self.shell.status_msg = "No Path selected; colour set as Foreground".to_string();
         }
-        if let Some(color) = actions.tool.apply_palette_outline.take() {
-            if !self.path_apply_palette_outline(color) {
-                let rgba = color.to_rgba8();
-                self.set_paint_color(1, rgba);
-                self.shell.status_msg = "No Path selected; colour set as Background".to_string();
-            }
+        if let Some(color) = actions.tool.apply_palette_outline.take()
+            && !self.path_apply_palette_outline(color)
+        {
+            let rgba = color.to_rgba8();
+            self.set_paint_color(1, rgba);
+            self.shell.status_msg = "No Path selected; colour set as Background".to_string();
         }
         if std::mem::take(&mut actions.tool.clear_palette_fill) && !self.path_clear_palette_fill() {
             self.shell.status_msg = "Select a Path to remove its Fill".to_string();
@@ -696,12 +688,12 @@ impl App {
         if let Some(s) = actions.tool.set_clone_spacing.take() {
             self.edit.tools.clone_like_mut().spacing = s.clamp(0.01, 2.0);
         }
-        if let Some(i) = actions.tool.set_clone_preset.take() {
-            if let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i) {
-                let t = self.edit.tools.clone_like_mut();
-                t.hardness = p.hardness;
-                t.spacing = p.spacing;
-            }
+        if let Some(i) = actions.tool.set_clone_preset.take()
+            && let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i)
+        {
+            let t = self.edit.tools.clone_like_mut();
+            t.hardness = p.hardness;
+            t.spacing = p.spacing;
         }
         if let Some(v) = actions.tool.set_clone_aligned.take() {
             self.edit.tools.clone_like_mut().aligned = v;
@@ -727,12 +719,12 @@ impl App {
         if let Some(v) = actions.tool.set_smudge_finger_painting.take() {
             self.edit.tools.smudge_mut().finger_painting = v;
         }
-        if let Some(i) = actions.tool.set_smudge_preset.take() {
-            if let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i) {
-                let t = self.edit.tools.smudge_mut();
-                t.hardness = p.hardness;
-                t.spacing = p.spacing;
-            }
+        if let Some(i) = actions.tool.set_smudge_preset.take()
+            && let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i)
+        {
+            let t = self.edit.tools.smudge_mut();
+            t.hardness = p.hardness;
+            t.spacing = p.spacing;
         }
         if let Some(s) = actions.tool.set_dodge_size.take() {
             self.edit.tools.dodge_burn_mut().size = s.clamp(1.0, 5000.0);
@@ -752,12 +744,12 @@ impl App {
         if let Some(v) = actions.tool.set_dodge_protect_tones.take() {
             self.edit.tools.dodge_burn_mut().protect_tones = v;
         }
-        if let Some(i) = actions.tool.set_dodge_preset.take() {
-            if let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i) {
-                let t = self.edit.tools.dodge_burn_mut();
-                t.hardness = p.hardness;
-                t.spacing = p.spacing;
-            }
+        if let Some(i) = actions.tool.set_dodge_preset.take()
+            && let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i)
+        {
+            let t = self.edit.tools.dodge_burn_mut();
+            t.hardness = p.hardness;
+            t.spacing = p.spacing;
         }
         if let Some(v) = actions.tool.set_patch_mode.take() {
             self.edit.tools.patch_mut().mode = crate::tools::patch::PatchMode::from_u8(v);
@@ -997,18 +989,15 @@ impl App {
         if let Some(d) = actions.tool.set_gradient_dither.take() {
             self.edit.tools.gradient_mut().dither = d;
         }
-        if let Some(stops) = actions.tool.set_gradient_stops.take() {
-            if self.active_gradient_mode() != 2 || !self.vector_gradient_set_stops(stops.clone()) {
-                let g = &mut self.edit.tools.gradient_mut().gradient;
-                g.name = "Custom".to_string();
-                g.stops = stops
-                    .into_iter()
-                    .map(|(position, color)| crate::tools::gradient::GradientStop {
-                        position,
-                        color,
-                    })
-                    .collect();
-            }
+        if let Some(stops) = actions.tool.set_gradient_stops.take()
+            && (self.active_gradient_mode() != 2 || !self.vector_gradient_set_stops(stops.clone()))
+        {
+            let g = &mut self.edit.tools.gradient_mut().gradient;
+            g.name = "Custom".to_string();
+            g.stops = stops
+                .into_iter()
+                .map(|(position, color)| crate::tools::gradient::GradientStop { position, color })
+                .collect();
         }
         if let Some(v) = actions.tool.toggle_gradient_editor.take() {
             self.shell.ui.show_gradient_editor = v;
@@ -1034,12 +1023,6 @@ impl App {
         }
         if let Some(s) = actions.tool.set_move_show_transform.take() {
             self.edit.tools.move_tool_mut().show_transform = s;
-        }
-        if let Some(align) = actions.layers.align_layers.take() {
-            self.align_selected_layers_to_canvas(align);
-        }
-        if let Some(distribute) = actions.layers.distribute_layers.take() {
-            self.distribute_selected_layers(distribute);
         }
         if actions.layers.duplicate_selected_step {
             self.duplicate_selected_with_step((0, 0));

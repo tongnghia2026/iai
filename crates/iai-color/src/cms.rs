@@ -360,8 +360,8 @@ pub fn generic_cmyk_icc_bytes() -> &'static [u8] {
 fn build_generic_cmyk_icc() -> Option<Vec<u8>> {
     use foreign_types_shared::ForeignType;
     use lcms2::{
-        ColorSpaceSignature, GlobalContext, Pipeline, ProfileClassSignature, Stage, Tag,
-        TagSignature, CIEXYZ, MLU,
+        CIEXYZ, ColorSpaceSignature, GlobalContext, MLU, Pipeline, ProfileClassSignature, Stage,
+        Tag, TagSignature,
     };
 
     let d50 = CIExyY {
@@ -716,17 +716,17 @@ pub fn system_display_profile_for_hwnd(hwnd: isize) -> Option<(String, Vec<u8>)>
     use core::ffi::c_void;
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateDCW, DeleteDC, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITORINFOEXW,
-        MONITOR_DEFAULTTONEAREST,
+        CreateDCW, DeleteDC, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+        MONITORINFOEXW, MonitorFromWindow,
     };
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetDC(hwnd: *mut c_void) -> *mut c_void;
         fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
     }
     #[link(name = "gdi32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetICMProfileW(hdc: *mut c_void, size: *mut u32, name: *mut u16) -> i32;
     }
 

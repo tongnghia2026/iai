@@ -1,8 +1,8 @@
 use super::{UiActions, UiData};
 use crate::core::color::{hsl_to_rgb, rgb_to_hsl};
 use crate::core::develop::{
-    DevelopMixerMode, DevelopSettings, LocalMaskKind, LocalMaskShape, CONTROL_LIMIT,
-    EXPOSURE_LIMIT, MIXER_COLORS, MIXER_LABELS,
+    CONTROL_LIMIT, DevelopMixerMode, DevelopSettings, EXPOSURE_LIMIT, LocalMaskKind,
+    LocalMaskShape, MIXER_COLORS, MIXER_LABELS,
 };
 use egui_phosphor::regular as ph;
 
@@ -112,6 +112,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     // (develop_mode) or as a raster-layer adjustment.
     egui::Window::new("Develop")
         .id(egui::Id::new("develop_dialog"))
+        .order(crate::ui::dialogs::DIALOG_ORDER)
         .open(&mut open)
         .default_pos(egui::pos2(pos_x, 96.0))
         .default_width(PANEL_W)
@@ -1590,20 +1591,20 @@ fn scopes_ui(
         return;
     }
     let textures = scope_textures(ui, scopes, revision);
-    if visible & SCOPE_WAVEFORM != 0 {
-        if let Some(texture) = textures.first() {
-            draw_scope_texture(ui, "Waveform (luma)", texture, 92.0);
-        }
+    if visible & SCOPE_WAVEFORM != 0
+        && let Some(texture) = textures.first()
+    {
+        draw_scope_texture(ui, "Waveform (luma)", texture, 92.0);
     }
-    if visible & SCOPE_PARADE != 0 {
-        if let Some(texture) = textures.get(1) {
-            draw_scope_texture(ui, "RGB Parade", texture, 92.0);
-        }
+    if visible & SCOPE_PARADE != 0
+        && let Some(texture) = textures.get(1)
+    {
+        draw_scope_texture(ui, "RGB Parade", texture, 92.0);
     }
-    if visible & SCOPE_VECTOR != 0 {
-        if let Some(texture) = textures.get(2) {
-            draw_scope_texture(ui, "Vectorscope (Rec.709)", texture, 150.0);
-        }
+    if visible & SCOPE_VECTOR != 0
+        && let Some(texture) = textures.get(2)
+    {
+        draw_scope_texture(ui, "Vectorscope (Rec.709)", texture, 150.0);
     }
     ui.label(
         egui::RichText::new(format!("{} sampled pixels", scopes.sample_count))
@@ -2269,59 +2270,59 @@ fn curve_editor_ui(
 
     // Interaction first, so the paint below shows this frame's state.
     let drag_id = ui.id().with(("dev_curve_drag", channel));
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let near = nearest_curve_point(points, pos, &to_screen);
-            let idx = match near {
-                Some(i) => i,
-                None => {
-                    let p = from_screen(pos);
-                    let at = [p[0], eval_point_curve(points, p[0])];
-                    let idx = points
-                        .iter()
-                        .position(|q| q[0] > at[0])
-                        .unwrap_or(points.len());
-                    points.insert(idx, at);
-                    changed = true;
-                    idx
-                }
-            };
-            ui.ctx().data_mut(|d| d.insert_temp(drag_id, Some(idx)));
-        }
+    if response.drag_started()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let near = nearest_curve_point(points, pos, &to_screen);
+        let idx = match near {
+            Some(i) => i,
+            None => {
+                let p = from_screen(pos);
+                let at = [p[0], eval_point_curve(points, p[0])];
+                let idx = points
+                    .iter()
+                    .position(|q| q[0] > at[0])
+                    .unwrap_or(points.len());
+                points.insert(idx, at);
+                changed = true;
+                idx
+            }
+        };
+        ui.ctx().data_mut(|d| d.insert_temp(drag_id, Some(idx)));
     }
     if response.dragged() {
         let dragging: Option<usize> = ui.ctx().data_mut(|d| *d.get_temp_mut_or(drag_id, None));
-        if let (Some(idx), Some(pos)) = (dragging, response.interact_pointer_pos()) {
-            if idx < points.len() {
-                let p = from_screen(pos);
-                let lo = if idx == 0 {
-                    0.0
-                } else {
-                    points[idx - 1][0] + 0.004
-                };
-                let hi = if idx + 1 == points.len() {
-                    1.0
-                } else {
-                    points[idx + 1][0] - 0.004
-                };
-                points[idx] = [p[0].clamp(lo, hi.max(lo)), p[1]];
-                changed = true;
-            }
+        if let (Some(idx), Some(pos)) = (dragging, response.interact_pointer_pos())
+            && idx < points.len()
+        {
+            let p = from_screen(pos);
+            let lo = if idx == 0 {
+                0.0
+            } else {
+                points[idx - 1][0] + 0.004
+            };
+            let hi = if idx + 1 == points.len() {
+                1.0
+            } else {
+                points[idx + 1][0] - 0.004
+            };
+            points[idx] = [p[0].clamp(lo, hi.max(lo)), p[1]];
+            changed = true;
         }
     }
     if response.drag_stopped() {
         ui.ctx()
             .data_mut(|d| d.insert_temp(drag_id, Option::<usize>::None));
     }
-    if response.double_clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some(idx) = nearest_curve_point(points, pos, &to_screen) {
-                if points.len() > 2 && idx > 0 && idx + 1 < points.len() {
-                    points.remove(idx);
-                    changed = true;
-                }
-            }
-        }
+    if response.double_clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(idx) = nearest_curve_point(points, pos, &to_screen)
+        && points.len() > 2
+        && idx > 0
+        && idx + 1 < points.len()
+    {
+        points.remove(idx);
+        changed = true;
     }
 
     let n = 65;

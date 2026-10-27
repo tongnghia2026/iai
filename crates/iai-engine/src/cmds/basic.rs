@@ -5,12 +5,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::common::{not_enabled, parse_color, DocParams, SelectMode};
-use super::doc::{layer_infos, LayerInfo};
-use super::select::{selected, Selected};
+use super::common::{DocParams, SelectMode, not_enabled, parse_color};
+use super::doc::{LayerInfo, layer_infos};
+use super::select::{Selected, selected};
 use crate::{
-    layer_index, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session,
-    Validate,
+    CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session, Validate,
+    layer_index,
 };
 
 /// The layers after a change.
@@ -104,17 +104,27 @@ pub struct ClearParams {
     pub doc: Option<u32>,
     /// Layer id (see `doc.inspect`); the active layer when omitted.
     pub layer: Option<u32>,
+    /// What the Background is filled with where it is cleared ("#RRGGBB"),
+    /// white when omitted (the window gives its background colour).
+    pub background: Option<String>,
 }
 
-impl Validate for ClearParams {}
+impl Validate for ClearParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if let Some(c) = &self.background {
+            parse_color("background", c)?;
+        }
+        Ok(())
+    }
+}
 
 static CLEAR: CommandMeta = CommandMeta {
     id: "edit.clear",
     label_vi: "Xóa vùng chọn",
     label_en: "Clear",
     doc: "Erase what is selected on a layer to clear, as the Delete key does (on the \
-          Background the selection is filled with white instead). Needs a selection. One undo \
-          step.",
+          Background the selection is filled with `background`, white by default, instead). \
+          Needs a selection. One undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -143,7 +153,11 @@ impl Command for Clear {
             .get(idx)
             .is_some_and(|l| l.is_background);
         let done = if background {
-            canvas.fill_solid_color([255, 255, 255, 255]);
+            let colour = match &p.background {
+                Some(c) => parse_color("background", c)?,
+                None => [255, 255, 255, 255],
+            };
+            canvas.fill_solid_color(colour);
             true
         } else {
             canvas.clear_selection()
@@ -154,6 +168,90 @@ impl Command for Clear {
                 "Layer đang khóa, hoặc vùng chọn không nằm trên layer",
             ));
         }
+        s.emit(EngineEvent::Pixels { doc });
+        layers(s, doc).map(Plan::Done)
+    }
+}
+
+/// Where `edit.stroke` draws its band.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StrokeAt {
+    /// Inside the selection's edge.
+    Inside,
+    /// Across the edge, half in and half out (default).
+    #[default]
+    Center,
+    /// Outside the edge.
+    Outside,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StrokeParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// "#RRGGBB" or "#RRGGBBAA".
+    pub color: String,
+    /// The band's width in pixels.
+    #[schemars(range(min = 1, max = 500))]
+    pub width_px: u32,
+    #[serde(default)]
+    pub location: StrokeAt,
+    /// 0 (clear) to 1 (opaque).
+    #[serde(default = "full_opacity")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub opacity: f32,
+}
+
+fn full_opacity() -> f32 {
+    1.0
+}
+
+impl Validate for StrokeParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        parse_color("color", &self.color).map(|_| ())
+    }
+}
+
+static STROKE: CommandMeta = CommandMeta {
+    id: "edit.stroke",
+    label_vi: "Viền vùng chọn",
+    label_en: "Stroke",
+    doc: "Paint a band of colour along the selection's edge on the active layer, as Edit ▸ \
+          Stroke does: inside, across or outside the edge. Needs a selection. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct Stroke;
+
+impl Command for Stroke {
+    type Params = StrokeParams;
+    type Output = Layers;
+
+    fn meta(&self) -> &'static CommandMeta {
+        &STROKE
+    }
+
+    fn plan(&self, s: &mut Session<'_>, p: StrokeParams) -> Result<Plan<Layers>, CmdError> {
+        use iai_canvas::canvas::StrokeLocation;
+        let doc = s.doc_id(p.doc)?;
+        let color = parse_color("color", &p.color)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        if !canvas.selection.active {
+            return Err(not_enabled("nothing is selected", "Chưa chọn vùng nào"));
+        }
+        canvas.stroke_selection(iai_canvas::canvas::StrokeParams {
+            color,
+            width: p.width_px,
+            location: match p.location {
+                StrokeAt::Inside => StrokeLocation::Inside,
+                StrokeAt::Center => StrokeLocation::Center,
+                StrokeAt::Outside => StrokeLocation::Outside,
+            },
+            opacity: p.opacity.clamp(0.0, 1.0),
+        });
         s.emit(EngineEvent::Pixels { doc });
         layers(s, doc).map(Plan::Done)
     }
@@ -245,12 +343,29 @@ pub struct OneLayerParams {
 
 impl Validate for OneLayerParams {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DuplicateParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// Layer id (see `doc.inspect`); the active layer when omitted.
+    pub layer: Option<u32>,
+    /// When the layer is one of those picked in the Layers panel, copy every
+    /// picked one (a folder with what it holds), as the panel's Duplicate
+    /// does.
+    #[serde(default)]
+    pub picked: bool,
+}
+
+impl Validate for DuplicateParams {}
+
 static DUPLICATE: CommandMeta = CommandMeta {
     id: "layer.duplicate",
     label_vi: "Nhân đôi layer",
     label_en: "Duplicate Layer",
     doc: "Copy a layer (Ctrl+J without a selection): the copy goes right above it and becomes \
-          the active layer. One undo step.",
+          the active layer; a folder is copied with what it holds. With `picked`, the other \
+          layers picked in the Layers panel are copied too. One undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -258,19 +373,38 @@ static DUPLICATE: CommandMeta = CommandMeta {
 pub struct DuplicateLayer;
 
 impl Command for DuplicateLayer {
-    type Params = OneLayerParams;
+    type Params = DuplicateParams;
     type Output = Layers;
 
     fn meta(&self) -> &'static CommandMeta {
         &DUPLICATE
     }
 
-    fn plan(&self, s: &mut Session<'_>, p: OneLayerParams) -> Result<Plan<Layers>, CmdError> {
+    fn plan(&self, s: &mut Session<'_>, p: DuplicateParams) -> Result<Plan<Layers>, CmdError> {
         let doc = s.doc_id(p.doc)?;
         let canvas = s.canvas_mut(Some(doc))?;
-        canvas.layer_stack.active_idx = layer_index(canvas, p.layer)?;
-        let idx = canvas.duplicate_active_layer();
-        canvas.layer_stack.active_idx = idx;
+        let idx = layer_index(canvas, p.layer)?;
+        let group = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .is_some_and(|l| l.is_group());
+        if p.picked || group {
+            // The panel's way: a folder with what it holds, and the other
+            // picked layers with it.
+            super::layer::structural(canvas, "Duplicate Layer", |canvas| {
+                let stack = &mut canvas.layer_stack;
+                if !(p.picked && stack.duplicate_selected_from(idx)) {
+                    let copy = stack.duplicate_node(idx);
+                    stack.select_only(copy);
+                }
+                Ok(())
+            })?;
+        } else {
+            canvas.layer_stack.active_idx = idx;
+            let copy = canvas.duplicate_active_layer();
+            canvas.layer_stack.active_idx = copy;
+        }
         layers(s, doc).map(Plan::Done)
     }
 }
@@ -302,7 +436,7 @@ impl Command for MergeDown {
             return Err(not_enabled(
                 "it cannot be merged down: the bottom layer, a folder's edge, or a locked or \
                  adjustment layer below",
-                "Không gộp xuống được layer này",
+                super::arrange::MERGE_REFUSED_VI,
             ));
         }
         layers(s, doc).map(Plan::Done)
@@ -498,6 +632,17 @@ impl Command for ColorRange {
         canvas.selection.apply_with_mode(mask, p.mode.to_core());
         cmd.capture_after(&canvas.selection);
         canvas.record_as(Box::new(cmd), iai_history::gateway::ChangeKind::Selection);
+        if canvas.selection.active {
+            s.notice(
+                "Color Range: đã tạo vùng chọn theo màu",
+                "Color Range: selected by colour",
+            );
+        } else {
+            s.notice(
+                "Color Range: không có điểm ảnh nào khớp màu",
+                "Color Range: no pixel matches the colour",
+            );
+        }
         selected(s, doc).map(Plan::Done)
     }
 }

@@ -1,0 +1,19 @@
+# How many asks each intent struct of `src/ui/intent.rs` may still have:
+# the fields a menu, panel or dialog sets for the app to act on, outside the
+# command engine. `cargo xtask intents` fails when a struct has more. Phase 5
+# turns them into engine commands (`UiActions::run`) until none is left: the
+# numbers only go down (`cargo xtask intents --update` after taking fields
+# out). `cargo xtask intents --list` prints the ones left.
+AiIntent 7
+ChannelsIntent 1
+ChromeIntent 42
+DevelopIntent 13
+DialogIntent 77
+DocumentIntent 77
+LayerIntent 11
+LibraryIntent 6
+PrintIntent 20
+SelectionIntent 44
+SettingsIntent 5
+ToolIntent 160
+UiActions 0

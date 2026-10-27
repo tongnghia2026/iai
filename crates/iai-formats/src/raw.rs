@@ -11,8 +11,8 @@
 //! sigmoid render from `develop_scene` — so the image on screen equals a
 //! Develop session at neutral settings, non-destructively.
 
-use super::raw_library::{self, Cfa, Decoder, Orientation, RawImage, RawImageData};
 use super::Importer;
+use super::raw_library::{self, Cfa, Decoder, Orientation, RawImage, RawImageData};
 use iai_canvas::canvas::Canvas;
 use iai_develop::camera_profile::dcp_transform::PreparedHueSatMap;
 use iai_develop::camera_profile::resolver;
@@ -21,11 +21,11 @@ use iai_develop::camera_profile::resolver::{
     ResolvedCameraCharacterization,
 };
 use iai_develop::camera_profile::{
-    discovery, embedded_dng, resolve_decoder_matrix, JpegMatchMode, RawDecoderBackend,
-    RawRenderRecipeVersion, RawSceneCharacterization,
+    JpegMatchMode, RawDecoderBackend, RawRenderRecipeVersion, RawSceneCharacterization, discovery,
+    embedded_dng, resolve_decoder_matrix,
 };
 use iai_develop::develop_scene::{
-    f16_bits_to_f32, f32_to_f16_bits, render_default_look, SceneSource,
+    SceneSource, f16_bits_to_f32, f32_to_f16_bits, render_default_look,
 };
 use rayon::prelude::*;
 use std::path::Path;
@@ -794,13 +794,13 @@ fn decode_raw_from(
     // Clone the provenance now so it can be moved onto the scene after the pixel
     // loops, while the writer keeps borrowing the resolved transform.
     let resolver_provenance = resolution.provenance.clone();
-    if let ResolvedCameraCharacterization::Dcp { transform, .. } = &resolution.characterization {
-        if let Some(white) = &mut as_shot_white {
-            // The profile-aware neutral iteration is a better CCT estimate than
-            // the compatibility decoder matrix; retain the independently
-            // measured Duv coordinate from the camera neutral.
-            white.cct_kelvin = transform.selection.cct_kelvin as f32;
-        }
+    if let ResolvedCameraCharacterization::Dcp { transform, .. } = &resolution.characterization
+        && let Some(white) = &mut as_shot_white
+    {
+        // The profile-aware neutral iteration is a better CCT estimate than
+        // the compatibility decoder matrix; retain the independently
+        // measured Duv coordinate from the camera neutral.
+        white.cct_kelvin = transform.selection.cct_kelvin as f32;
     }
 
     let writer = match &resolution.characterization {
@@ -1629,11 +1629,7 @@ fn croot(v: f32) -> f32 {
 /// Fold the second green (CFA colour 3) in with green; R/G/B pass through.
 #[inline]
 fn chroma_channel(col: usize) -> usize {
-    if col == 3 {
-        1
-    } else {
-        col
-    }
+    if col == 3 { 1 } else { col }
 }
 
 /// Per-channel clip thresholds in white-balanced units (the plane and camera
@@ -2799,7 +2795,7 @@ fn env_usize(name: &str, default: usize) -> usize {
 #[inline]
 fn median9(mut v: [f32; 9]) -> f32 {
     macro_rules! order {
-        ($a:expr, $b:expr) => {{
+        ($a:expr_2021, $b:expr_2021) => {{
             let (lo, hi) = (v[$a].min(v[$b]), v[$a].max(v[$b]));
             v[$a] = lo;
             v[$b] = hi;
@@ -3795,11 +3791,7 @@ mod tests {
                     let v = ((raw_value(&raw.data, rr * raw.width + cc) - levels.black[ch])
                         / levels.denom[ch])
                         .max(0.0);
-                    if apply_wb {
-                        v * gain[ch]
-                    } else {
-                        v
-                    }
+                    if apply_wb { v * gain[ch] } else { v }
                 };
                 if mono {
                     let v = at(0, 0);
@@ -3846,11 +3838,7 @@ mod tests {
                     let v = ((raw_value(&raw.data, src + ch) - levels.black[ch])
                         / levels.denom[ch])
                         .max(0.0);
-                    if apply_wb {
-                        v * gain[ch]
-                    } else {
-                        v
-                    }
+                    if apply_wb { v * gain[ch] } else { v }
                 })
             }
             _ => [0.0; 3],
@@ -4039,7 +4027,9 @@ mod tests {
         );
         eprintln!("cam_to_xyz={cam2xyz:?}");
         eprintln!("cam_to_linear_srgb={cam2srgb:?}");
-        eprintln!("profile: no DCP/ICC camera profile found; using rawloader normalized camera matrix + neutral scene-referred sigmoid render; output document is tagged sRGB");
+        eprintln!(
+            "profile: no DCP/ICC camera profile found; using rawloader normalized camera matrix + neutral scene-referred sigmoid render; output document is tagged sRGB"
+        );
         let default_tone = iai_develop::develop_scene::build_scene_tone(&Default::default());
         eprintln!(
             "samples are auto-selected proxies from the RAW render, not hand-labelled regions:"
@@ -4750,7 +4740,7 @@ mod tests {
     // gap and the flat-vs-base-curve question can be inspected without the GUI.
     #[test]
     fn develop_diagnosis() {
-        use iai_develop::develop::{apply_to_tilemap_direct, DevelopSettings};
+        use iai_develop::develop::{DevelopSettings, apply_to_tilemap_direct};
 
         let (Some(sample), Some(outdir)) = (
             std::env::var_os("IAI_RAW_SAMPLE"),

@@ -4,7 +4,7 @@ use crate::core::geometry::Point;
 use crate::core::layer::LayerType;
 use crate::core::selection::SelectionMode;
 use crate::core::vector::object::VectorGeometry;
-use crate::core::vector::snap::{snap_to_paths, SnapHit};
+use crate::core::vector::snap::{SnapHit, snap_to_paths};
 
 /// Identity of every tool IAI ships. Lives beside the [`Tool`] trait that
 /// returns it so this layer never depends on the concrete `tools` module.

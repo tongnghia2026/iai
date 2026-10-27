@@ -309,10 +309,10 @@ pub fn download_model(model: SelectSubjectModel, progress: &dyn Fn(f32)) -> Resu
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
     let mut req = client.get(spec.url);
-    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN")) {
-        if !token.trim().is_empty() {
-            req = req.bearer_auth(token.trim());
-        }
+    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
+        && !token.trim().is_empty()
+    {
+        req = req.bearer_auth(token.trim());
     }
     let resp = req.send().map_err(|e| format!("download failed: {e}"))?;
     let status_code = resp.status();

@@ -1,4 +1,4 @@
-use super::{modal_flash_btn, LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData};
+use super::{LayerAlign, LayerDistribute, MoveTransformAction, UiActions, UiData, modal_flash_btn};
 use crate::core::text::TextAlign;
 use crate::tools::ToolId;
 use egui;
@@ -1795,7 +1795,7 @@ fn shaping_buttons(ui: &mut egui::Ui, actions: &mut UiActions) {
             .on_hover_text(tip)
             .clicked()
         {
-            actions.layers.boolean_op = Some(op);
+            actions.run("vector.shaping", super::shaping_args(op));
         }
     }
 }
@@ -1850,14 +1850,17 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .on_hover_text("Distribute horizontal centres of 3 or more selected objects")
         .clicked()
     {
-        actions.layers.distribute_layers = Some(LayerDistribute::HorizontalCenters);
+        actions.run(
+            "layer.distribute",
+            LayerDistribute::HorizontalCenters.args(),
+        );
     }
     if ui
         .button(top_options_icon(ph::ARROWS_DOWN_UP))
         .on_hover_text("Distribute vertical centres of 3 or more selected objects")
         .clicked()
     {
-        actions.layers.distribute_layers = Some(LayerDistribute::VerticalCenters);
+        actions.run("layer.distribute", LayerDistribute::VerticalCenters.args());
     }
     ui.separator();
     if ui
@@ -2412,7 +2415,7 @@ fn align_button(ui: &mut egui::Ui, actions: &mut UiActions, align: LayerAlign, t
         )
         .on_hover_text(tooltip);
     if resp.clicked() {
-        actions.layers.align_layers = Some(align);
+        actions.run("layer.align", align.args());
     }
 }
 
@@ -2620,14 +2623,14 @@ fn selection_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) 
         .on_hover_text("Grow selection by 1px")
         .clicked()
     {
-        actions.sel.selection_grow = Some(1);
+        actions.modify_selection("grow", 1.0);
     }
     if ui
         .small_button("Shrink")
         .on_hover_text("Shrink selection by 1px")
         .clicked()
     {
-        actions.sel.selection_shrink = Some(1);
+        actions.modify_selection("shrink", 1.0);
     }
 }
 

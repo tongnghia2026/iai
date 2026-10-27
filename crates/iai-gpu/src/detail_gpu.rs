@@ -7,7 +7,7 @@
 //!
 //! Shared core used by the live native-resolution compositor and parity probes.
 
-use iai_develop::develop::{DetailPlan, DevelopSettings, DETAIL_HALO, DETAIL_LEVELS};
+use iai_develop::develop::{DETAIL_HALO, DETAIL_LEVELS, DetailPlan, DevelopSettings};
 
 /// Detail sliders folded once on the CPU; the GPU consumes exactly these
 /// numbers, so preview and commit share one parameterisation.

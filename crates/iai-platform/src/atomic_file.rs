@@ -51,7 +51,7 @@ fn held_by_another_program(error: &std::io::Error) -> bool {
 fn move_over(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
     let source_w: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -246,11 +246,12 @@ mod tests {
         assert_eq!(temp.parent(), dest.parent());
         assert_eq!(temp.extension(), dest.extension());
         assert_ne!(temp, dest);
-        assert!(temp
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("ảnh thẻ.~iai"));
+        assert!(
+            temp.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("ảnh thẻ.~iai")
+        );
 
         let bare = temp_sibling(Path::new("khong_duoi"));
         assert!(bare.to_string_lossy().starts_with("khong_duoi.~iai"));

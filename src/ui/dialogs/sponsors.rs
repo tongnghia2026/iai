@@ -288,9 +288,11 @@ mod tests {
         assert!(said.iter().any(|text| text == "C"));
         assert!(at("Cá nhân") < at("Nguyễn Văn A   ·   Trần Thị B   ·   Lê C"));
         assert!(at("Lê C") < at("và 4 người ẩn danh"));
-        assert!(!said
-            .iter()
-            .any(|text| text == NOBODY_YET || text == NOT_LOADED));
+        assert!(
+            !said
+                .iter()
+                .any(|text| text == NOBODY_YET || text == NOT_LOADED)
+        );
     }
 
     #[test]

@@ -648,7 +648,16 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         });
 
     if do_resize {
-        actions.doc.canvas_resize = Some((new_w_px as u32, new_h_px as u32, anchor_x, anchor_y));
+        // The picture stays at the top-left corner (the anchor fields are
+        // not applied yet).
+        let _ = (anchor_x, anchor_y);
+        actions.run(
+            "image.canvas_size",
+            serde_json::json!({
+                "widthPx": (new_w_px as u32).max(1),
+                "heightPx": (new_h_px as u32).max(1),
+            }),
+        );
         actions.dialogs.show_resize_dialog = Some(false);
     }
     if do_cancel {
@@ -823,11 +832,14 @@ pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
         });
 
     if do_resize {
-        actions.doc.image_resize = Some((
-            new_w_px.round().max(1.0) as u32,
-            new_h_px.round().max(1.0) as u32,
-            res_dpi.max(1.0),
-        ));
+        actions.run(
+            "image.resize",
+            serde_json::json!({
+                "widthPx": new_w_px.round().max(1.0) as u32,
+                "heightPx": new_h_px.round().max(1.0) as u32,
+                "dpi": res_dpi.max(1.0),
+            }),
+        );
         actions.dialogs.show_image_size_dialog = Some(false);
     }
     if do_cancel {
@@ -890,7 +902,12 @@ pub(crate) fn rename_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         });
 
     if do_rename && !text.is_empty() {
-        actions.doc.rename_confirmed = Some((idx, text));
+        actions.run_on_layer(
+            &data.layers.layer_ids,
+            idx,
+            "layer.set",
+            serde_json::json!({"name": text}),
+        );
         actions.dialogs.show_rename_dialog = Some((false, idx));
     }
     if do_cancel {

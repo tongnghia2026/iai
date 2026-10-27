@@ -1,5 +1,5 @@
 use iai::core::develop::DevelopSettings;
-use iai::core::develop_scene::{eval_scene_pixel, BaseLook};
+use iai::core::develop_scene::{BaseLook, eval_scene_pixel};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;

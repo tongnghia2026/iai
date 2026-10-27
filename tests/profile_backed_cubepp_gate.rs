@@ -12,17 +12,20 @@
 //!
 //! Ignored and env-driven: it needs the external Cube++ fixture and the locally
 //! installed Adobe profile, neither of which lives in the repository.
+// Setting the process environment is unsafe from edition 2024 on (another
+// thread may read it meanwhile); these runs set it before they render.
+#![allow(unsafe_code)]
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use iai::core::camera_profile::JpegMatchMode;
 use iai::core::camera_profile::resolver::{
     CandidateTier, ProfileCandidateId, SelectedProfileProvenance,
 };
-use iai::core::camera_profile::JpegMatchMode;
-use iai::core::develop_scene::{f16_bits_to_f32, SceneSource};
-use iai::formats::raw::RawImporter;
+use iai::core::develop_scene::{SceneSource, f16_bits_to_f32};
 use iai::formats::Importer;
+use iai::formats::raw::RawImporter;
 
 const CR2_BYTES: u64 = 24_867_695;
 const CR2_SHA256: &str = "0d5de5728cac4855572acc46b47b07c2598cab5df79b19207713f09ba23c2bdd";
@@ -208,8 +211,10 @@ fn cubepp_dcp_profile_backed_gate() {
     assert_eq!(sha256_hex(&dcp), DCP_SHA256, "Adobe Standard DCP identity");
 
     // --- Decoder-matrix fallback render (no profile) ---
-    std::env::remove_var("IAI_CAMERA_PROFILE");
-    std::env::set_var("IAI_RAW_JPEG_MATCH", "none");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_CAMERA_PROFILE") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("IAI_RAW_JPEG_MATCH", "none") };
     let fallback = render(&cr2);
     let fallback_scene = fallback
         .develop_source
@@ -228,10 +233,13 @@ fn cubepp_dcp_profile_backed_gate() {
     let fallback_right = sample_scene_triangle(fallback_scene, RIGHT_TRIANGLE);
 
     // --- Profile-backed DCP render ---
-    std::env::set_var("IAI_CAMERA_PROFILE", &dcp);
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("IAI_CAMERA_PROFILE", &dcp) };
     let dcp_canvas = render(&cr2);
-    std::env::remove_var("IAI_CAMERA_PROFILE");
-    std::env::remove_var("IAI_RAW_JPEG_MATCH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_CAMERA_PROFILE") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_RAW_JPEG_MATCH") };
 
     let scene = dcp_canvas
         .develop_source
@@ -381,9 +389,12 @@ fn cubepp_dcp_via_manifest_tier() {
 
     // Read the exact make/model the decoder reports so the manifest camera
     // binding is an exact, normalized match regardless of decoder naming.
-    std::env::remove_var("IAI_CAMERA_PROFILE");
-    std::env::remove_var("IAI_CAMERA_PROFILE_MANIFEST");
-    std::env::set_var("IAI_RAW_JPEG_MATCH", "none");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_CAMERA_PROFILE") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_CAMERA_PROFILE_MANIFEST") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("IAI_RAW_JPEG_MATCH", "none") };
     let probe = render(&cr2);
     let identity = probe
         .develop_source
@@ -415,10 +426,13 @@ fn cubepp_dcp_via_manifest_tier() {
     let manifest_path = root.join("manifest.json");
     std::fs::write(&manifest_path, manifest).expect("write manifest");
 
-    std::env::set_var("IAI_CAMERA_PROFILE_MANIFEST", &manifest_path);
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("IAI_CAMERA_PROFILE_MANIFEST", &manifest_path) };
     let canvas = render(&cr2);
-    std::env::remove_var("IAI_CAMERA_PROFILE_MANIFEST");
-    std::env::remove_var("IAI_RAW_JPEG_MATCH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_CAMERA_PROFILE_MANIFEST") };
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_RAW_JPEG_MATCH") };
 
     let characterization = canvas
         .develop_source

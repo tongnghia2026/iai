@@ -428,6 +428,7 @@ fn draw_refine_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     let mut open = data.sel.show_refine_color_dialog;
     let mut window = egui::Window::new("Overlay Tint")
         .id(egui::Id::new("sam_overlay_tint_dialog"))
+        .order(crate::ui::dialogs::DIALOG_ORDER)
         .collapsible(false)
         .resizable(false)
         .movable(true)

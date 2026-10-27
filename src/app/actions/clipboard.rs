@@ -108,10 +108,10 @@ fn place_block(block: &mut [Layer], (dx, dy): (i32, i32), canvas_w: u32, canvas_
             layer.offset.1 += dy;
             continue;
         }
-        if let Some(mask) = layer.mask.as_mut() {
-            if (dx, dy) != (0, 0) || (mask.width, mask.height) != (canvas_w, canvas_h) {
-                *mask = mask.moved_onto(dx, dy, canvas_w, canvas_h);
-            }
+        if let Some(mask) = layer.mask.as_mut()
+            && ((dx, dy) != (0, 0) || (mask.width, mask.height) != (canvas_w, canvas_h))
+        {
+            *mask = mask.moved_onto(dx, dy, canvas_w, canvas_h);
         }
         layer.tiles = crate::core::tile::TileMap::new(canvas_w, canvas_h);
         layer.width = canvas_w;
@@ -630,7 +630,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::core::selection::Selection;
-    use crate::core::tile::{Tile, TILE_BYTES, TILE_PIXELS, TILE_SIZE};
+    use crate::core::tile::{TILE_BYTES, TILE_PIXELS, TILE_SIZE, Tile};
 
     #[test]
     fn paste_rescue_keeps_intersecting_box_in_place() {

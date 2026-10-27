@@ -1,5 +1,6 @@
 mod adjustment;
 mod agent;
+mod ai_errand;
 mod author_mail;
 mod document;
 mod filter;
@@ -16,6 +17,7 @@ mod print_sheet;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 mod pro;
+mod quick_tasks;
 mod scan_cleanup;
 mod select_ops;
 mod session;
@@ -26,6 +28,7 @@ mod update;
 mod vector_style;
 pub(crate) use adjustment::*;
 pub(crate) use agent::*;
+pub(crate) use ai_errand::*;
 pub(crate) use author_mail::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
@@ -36,6 +39,7 @@ pub(crate) use print::*;
 pub(crate) use print_sheet::*;
 #[cfg(feature = "pro")]
 pub(crate) use pro::*;
+pub(crate) use quick_tasks::*;
 pub(crate) use scan_cleanup::*;
 pub(crate) use select_ops::*;
 pub(crate) use session::*;
@@ -95,6 +99,15 @@ pub(crate) fn save_last_cmyk_icc_path(path: &std::path::Path) {
 pub(crate) fn sanitize_adjustment_options(mut options: AdjustmentOptions) -> AdjustmentOptions {
     options.auto_clip_percent = options.auto_clip_percent.clamp(0.0, 10.0);
     options
+}
+
+/// What `image.auto_levels` is run with: the Levels dialog's Auto options.
+pub(crate) fn auto_levels_args(options: AdjustmentOptions) -> serde_json::Value {
+    let options = sanitize_adjustment_options(options);
+    serde_json::json!({
+        "monochromatic": options.auto_levels_algorithm == AutoLevelsAlgorithm::Monochromatic,
+        "clipPercent": options.auto_clip_percent,
+    })
 }
 
 pub(crate) fn load_adjustment_options() -> AdjustmentOptions {
@@ -241,6 +254,12 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     // The save prompts of a closing app come before the news of a newer one,
     // and before the ask to support its author.
     let closing = data.dialogs.show_exit_dialog || data.dialogs.show_close_dialog || save_failed;
+    if data.chrome.errand.open && !closing {
+        errand_window(ctx, data, actions);
+    }
+    if data.chrome.quick.open && !closing {
+        quick_window(ctx, data, actions);
+    }
     if data.chrome.update.show_dialog && !closing {
         update_dialog(ctx, data, actions);
     } else if !closing {

@@ -79,11 +79,7 @@ pub fn fast_exp2(x: f32) -> f32 {
 pub fn round_u8(v: f32) -> u8 {
     let v = v.clamp(0.0, 255.0);
     let t = v as u8;
-    if v - t as f32 >= 0.5 {
-        t + 1
-    } else {
-        t
-    }
+    if v - t as f32 >= 0.5 { t + 1 } else { t }
 }
 
 /// Exactly `v.round().clamp(0.0, 65535.0) as u16` (NaN gives 0); see [`round_u8`].
@@ -91,22 +87,14 @@ pub fn round_u8(v: f32) -> u8 {
 pub fn round_u16(v: f32) -> u16 {
     let v = v.clamp(0.0, 65535.0);
     let t = v as u16;
-    if v - t as f32 >= 0.5 {
-        t + 1
-    } else {
-        t
-    }
+    if v - t as f32 >= 0.5 { t + 1 } else { t }
 }
 
 /// Exactly `v.floor() as i32` (saturating, NaN gives 0), with no libm call.
 #[inline]
 pub fn floor_i32(v: f32) -> i32 {
     let t = v as i32;
-    if t as f32 > v {
-        t.saturating_sub(1)
-    } else {
-        t
-    }
+    if t as f32 > v { t.saturating_sub(1) } else { t }
 }
 
 #[cfg(test)]

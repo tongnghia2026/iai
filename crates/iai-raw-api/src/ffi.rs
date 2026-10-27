@@ -326,7 +326,7 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
         other => {
             return Err(format!(
                 "the RAW library names an unknown decoder ({other})"
-            ))
+            ));
         }
     };
     let cfa = Cfa::new(
@@ -381,7 +381,7 @@ pub unsafe fn receive(frame: *const Frame, free: FreeFn) -> Result<RawImage, Str
         other => {
             return Err(format!(
                 "the RAW library names an unknown kind of sample ({other})"
-            ))
+            ));
         }
     };
     Ok(image)

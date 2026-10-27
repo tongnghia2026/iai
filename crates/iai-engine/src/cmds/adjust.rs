@@ -4,15 +4,15 @@
 use iai_canvas::canvas::Canvas;
 use iai_doc::layer::{AdjustmentType, LevelsParams};
 use iai_imaging::filters::FilterType;
-use iai_imaging::scan_cleanup::{clean_scan_rgba, ScanCleanupMode, ScanCleanupParams};
+use iai_imaging::scan_cleanup::{ScanCleanupMode, ScanCleanupParams, clean_scan_rgba};
 use iai_raster::tile::TileMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::common::{not_enabled, parse_color};
 use crate::{
-    layer_index, Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan,
-    Session, Validate,
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session,
+    Validate, layer_index,
 };
 
 /// What a change of a layer's pixels answers.
@@ -251,7 +251,7 @@ fn quarter() -> f32 {
 }
 
 impl Adjustment {
-    fn core(&self) -> Result<AdjustmentType, CmdError> {
+    pub(super) fn core(&self) -> Result<AdjustmentType, CmdError> {
         Ok(match self.clone() {
             Adjustment::BrightnessContrast {
                 brightness,

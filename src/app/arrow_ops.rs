@@ -4,7 +4,7 @@ use crate::core::command_vector::{CreatePathLayer, ReplacePathGeometry};
 use crate::core::gateway::ChangeKind;
 use crate::core::layer::LayerType;
 use crate::core::vector::affine::AffineTransform;
-use crate::core::vector::from_shape::{elbow_connector_path, ConnectorRoute};
+use crate::core::vector::from_shape::{ConnectorRoute, elbow_connector_path};
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::core::vector::path::{Contour, FillRule, Node, PathData};
 use crate::core::vector::style::ArrowHead;

@@ -48,11 +48,7 @@ impl LassoTool {
     }
 
     pub fn preview_points(&self) -> &[(f32, f32)] {
-        if self.dragging {
-            &self.points
-        } else {
-            &[]
-        }
+        if self.dragging { &self.points } else { &[] }
     }
 
     /// How the last gesture ended, once.

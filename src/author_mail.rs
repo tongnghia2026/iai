@@ -191,14 +191,14 @@ fn message(outgoing: &Outgoing, diagnostics: &Path) -> Result<Message, String> {
     if let Some(logo) = &outgoing.logo {
         files.push(logo_file(logo)?);
     }
-    if outgoing.diagnostics {
-        if let Some(bytes) = pack_sessions(diagnostics) {
-            files.push(Attachment {
-                name: "nhat_ky_loi.zip".to_owned(),
-                mime: "application/zip",
-                bytes,
-            });
-        }
+    if outgoing.diagnostics
+        && let Some(bytes) = pack_sessions(diagnostics)
+    {
+        files.push(Attachment {
+            name: "nhat_ky_loi.zip".to_owned(),
+            mime: "application/zip",
+            bytes,
+        });
     }
     Ok(Message {
         kind: outgoing.kind,
@@ -601,9 +601,11 @@ mod tests {
         assert_eq!(body["name"], "Tiệm ảnh Hoa Mai");
         assert_eq!(body["contact"], "0900 000 000");
         assert_eq!(body["text"], "Bấm in thì app đứng.\nMáy in Canon.");
-        assert!(body["build"]
-            .as_str()
-            .is_some_and(|build| !build.is_empty()));
+        assert!(
+            body["build"]
+                .as_str()
+                .is_some_and(|build| !build.is_empty())
+        );
         assert_eq!(body["files"][0]["name"], "logo.png");
         assert_eq!(body["files"][0]["type"], "image/png");
         let data = body["files"][0]["data"].as_str().unwrap();

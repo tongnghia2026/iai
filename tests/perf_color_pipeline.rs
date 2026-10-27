@@ -1,5 +1,5 @@
 use iai::core::develop::DevelopSettings;
-use iai::core::develop_scene::{apply_scene_to_tilemap, SceneSource};
+use iai::core::develop_scene::{SceneSource, apply_scene_to_tilemap};
 use std::time::Instant;
 
 #[test]

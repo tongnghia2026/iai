@@ -2,13 +2,13 @@ use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::canvas::Canvas;
 use crate::core::geometry::Point;
 use crate::core::layer::{LayerType, PaintTarget};
-use crate::core::tile::{Tile, TilePos, TILE_SIZE};
+use crate::core::tile::{TILE_SIZE, Tile, TilePos};
 use crate::core::vector::affine::AffineTransform;
 use crate::core::vector::color::ColorValue;
 use crate::core::vector::object::VectorGeometry;
 use crate::core::vector::style::{
-    Gradient as VectorGradient, GradientKind, GradientStop as VectorGradientStop, Paint,
-    MAX_GRADIENT_STOPS,
+    Gradient as VectorGradient, GradientKind, GradientStop as VectorGradientStop,
+    MAX_GRADIENT_STOPS, Paint,
 };
 use std::sync::Arc;
 
@@ -669,14 +669,14 @@ impl GradientTool {
                 (layer.offset, layer.width, layer.height)
             };
             canvas.mark_dirty_layer_bounds(
-                old_bounds.0 .0,
-                old_bounds.0 .1,
+                old_bounds.0.0,
+                old_bounds.0.1,
                 old_bounds.1,
                 old_bounds.2,
             );
             canvas.mark_dirty_layer_bounds(
-                new_bounds.0 .0,
-                new_bounds.0 .1,
+                new_bounds.0.0,
+                new_bounds.0.1,
                 new_bounds.1,
                 new_bounds.2,
             );

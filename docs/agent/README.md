@@ -5,12 +5,16 @@ iAi is driven by AI agents (Claude Desktop, Claude Code, any MCP client) through
 (`iai-engine`); an agent calls the same commands, on documents of its own or on the
 window the person has open. Hướng dẫn tiếng Việt cho người dùng: [HUONG_DAN.md](HUONG_DAN.md).
 
-## Two ways to run
+## Three ways to run
 
 | | Command | Documents |
 |---|---|---|
 | On its own | `iai.exe mcp --write-root D:\Photos` | its own, no window |
 | On the open window | `iai.exe mcp --bridge --write-root D:\Photos` | the tabs the person sees |
+| Window when open | `iai.exe mcp --prefer-window --write-root D:\Photos` | the window's while it lets AI in, else its own |
+
+`--prefer-window` looks for the window when a task begins (`iai_task_begin`) and before a
+call while nothing is open on its own documents; work under way is not moved.
 
 The bridge needs the person to turn it on first: **Help ▸ Cho AI điều khiển iAi ▸ Bật**.
 The window then listens on 127.0.0.1 and writes the port and a fresh 256-bit token to
@@ -27,6 +31,56 @@ Options:
 Files are read and written only inside the granted folders: a relative `path` is joined to
 the first one, an absolute one must lie inside one. `..`, device names (`CON`, `NUL`…),
 `\\?\` / `\\.\` paths and links leading out are refused.
+
+### Antigravity: the "Nhờ AI làm" button
+
+The person picks a job and a folder in the window and presses **Gửi cho Gemini**; Gemini,
+in Antigravity, does it on the window. **Nối với Antigravity** (in that window) sets up,
+under `~/.gemini/config`:
+
+- `mcp_config.json`: the `iai` server as `iai.exe mcp --prefer-window` (the folders it had
+  are kept, else `Downloads`);
+- `config.json`: `mcp(iai/<tool>)` for every tool, so none asks; the relay turned on
+  (`sidecars.iai.enabled`); the file as it was is kept once as `config.json.bak-iai`;
+- `sidecars/iai/sidecar.json`: `iai.exe antigravity-relay`, which Antigravity runs beside
+  it with what starting a conversation needs (`ANTIGRAVITY_AGENTAPI_EXE`…).
+
+Antigravity reads its permissions and MCP servers when it starts, so it is started again.
+The window turns the bridge on when an errand is sent. The relay asks the window for
+errands (`next_errand`, about every 1.5 s while linked), starts a conversation for each
+(`agentapi new-conversation --title=… -- <ask>`) and says how that went; the window
+grants the errand's folder to read and its `iAi_ket_qua` to write (`grants`), hears the
+task begin and end, counts each command as a step, and after **Dừng** refuses the agent's
+calls. An errand nobody takes for 6 s starts Antigravity; one untaken in 90 s is given up.
+
+The ask forbids Antigravity's image generator unless the person ticks **Dùng AI online cho ca
+khó** (ID photos and "Việc khác"; never ID cards): then the hard cases (clothes, text over a
+face, a messy backdrop) go to `invoke_subagent {TypeName: "image-generator"}`, whose pictures
+land in `~/.gemini/antigravity/brain/<conversation>/`. The window grants that folder to read
+for the errand, and **Nối với Antigravity** adds it as a `--read-root` of the MCP server, so
+the agent opens the picture in iAi and goes on with iAi's commands.
+
+"Sửa ảnh đang mở (AI online)" works on the tab shown, not a folder:
+- the window writes the page, flattened onto white and at most 2048 px long, to
+  `<photo's folder>\iAi_ket_qua\<name>_gui_AI.jpg`;
+- the ask names that file, the tab's `doc` id and the generator frame nearest the photo's;
+- the agent puts the drawn picture back as a new layer of that tab
+  (`layer.place {doc, from: {path}, fit: "cover", name: "AI: …"}`) and exports a copy to
+  `<name>_AI.jpg` beside it.
+
+"Thay áo, lấp vai ảnh thẻ đang mở (AI online)" (Pro; also the **Thay áo, lấp vai bằng AI…**
+button of the made ID photo, which applies the retouch shown first) is for a tight shot whose
+shoulders the ID photo's frame cut off, or for other clothes, without the AI's redraw moving
+the face:
+- the window writes the photo with what the customer's photo did not reach painted grey
+  (`id_photo.dress_input`);
+- the agent has the generator fill the grey (or dress the person, keeping the head as it is);
+- `id_photo.dress {doc, path, keepClothes}` lays the drawing back as a new masked layer,
+  turned and scaled so its 478 face landmarks fall on the photo's (least squares). All above
+  the chin — face, hair, backdrop — stays the photo's own pixels; below it the mask shows the
+  person the AI drew (`keepClothes`: only where the photo had nothing). `faceOffPx` is how far
+  the landmarks stay apart once laid; above `height / 150` the message warns that the AI drew
+  the face another shape.
 
 ### Claude Desktop
 
@@ -77,8 +131,11 @@ script's first call). An MCP batch (`iai_command_batch`) holds at most 256 calls
   `iai_image_perspective_crop`, `iai_image_adjust`, `iai_image_auto_levels`,
   `iai_image_filter`, `iai_image_scan_cleanup`, `iai_layer_place`, and (Pro)
   `iai_id_photo_make`, `iai_id_photo_batch`, `iai_print_impose_sheet`, `iai_print_card_sheet`;
-  the others (`edit.fill`, `edit.clear`, `select.modify`, `select.color_range`, `select.wand`,
-  `layer.duplicate`, `layer.merge_down`, `layer.flatten`, `image.grayscale`, `doc.close`, …)
+  the others (`edit.fill`, `edit.clear`, `select.ellipse`, `select.polygon`, `select.modify`,
+  `select.color_range`, `select.wand`, `layer.transform`, `layer.duplicate`, `layer.merge_down`,
+  `layer.via_copy`, `layer.flatten`, `layer.group`, `layer.merge`, `layer.clip`,
+  `layer.align`, `layer.distribute`, `layer.step_copy`, `vector.shaping`, `vector.powerclip`,
+  `page.delete`, `page.move`, `page.rename`, `image.mode`, `image.canvas_size`, `doc.close`, …)
   through `iai_command_run`;
 - `iai_command_list` (optionally by `prefix`, with each command's JSON Schema),
   `iai_command_run`, `iai_command_batch` (atomic by default: all or nothing);
@@ -136,7 +193,20 @@ The test `agent::e2e` runs this through MCP (a light one in the suite; the full 
 - `layer.place {from: {path} | {doc}, box, fit}` — a picture centred on the page or in a box:
   a photo centred on A4, several photos on one page (one box each), a page of cards. With
   `text.add` and `vector.add_shape` that lays out a card or a sheet without a script.
-- Selections: `select.color_range {color | at, fuzziness}`, `select.wand {at, tolerance}`,
+- `layer.transform {layer, scale | scaleX/scaleY, angle, dx, dy}` — a picture layer scaled,
+  turned by any angle round its middle and moved, as Free Transform does (a scan a little
+  askew: duplicate the Background, then turn the copy by `angle`).
+- Layers as the Layers panel and the Move tool do them: `layer.group {layers}` /
+  `layer.ungroup`, `layer.merge {what: picked | group | visible}`, `layer.clip` (to the layer
+  below), `layer.align {layers, align: left | horizontal_center | right | top |
+  vertical_center | bottom}`, `layer.distribute {layers, axis}`, `layer.step_copy {layers, dx,
+  dy}` (a row of copies: call it again, it goes on from the last copy).
+- Shapes: `vector.to_curves {layer}`, `vector.shaping {op: weld | trim | intersect | simplify,
+  layers}`, `vector.powerclip {op: place, layers: [photo, frame]}` (a photo inside a shape; then
+  `op: fit | fill | center | stretch` to arrange it, `extract` to take it out).
+- Selections: `select.rect {rect}`, `select.ellipse {rect}` (the ellipse filling the box),
+  `select.polygon {points: [[x, y], …]}`, `select.color_range {color | at, fuzziness}`,
+  `select.wand {at, tolerance}` (each with `mode`: replace, add, subtract, intersect),
   `select.modify {change: feather | grow | shrink | smooth | border, amount}`; then
   `edit.fill {color}` or `edit.clear`.
 

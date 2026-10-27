@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use serde::Deserialize;
 use winit::window::Window;
@@ -44,14 +44,14 @@ fn focus_parent_window(parent: &Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     parent.focus_window();
-    if let Ok(handle) = parent.window_handle() {
-        if let RawWindowHandle::Win32(handle) = handle.as_raw() {
-            // Hiding a focused child HWND does not reliably move keyboard focus
-            // back to its parent. Explicit SetFocus keeps egui TextEdit/DragValue
-            // fields and application shortcuts alive after leaving a text tab.
-            unsafe {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(handle.hwnd.get() as _);
-            }
+    if let Ok(handle) = parent.window_handle()
+        && let RawWindowHandle::Win32(handle) = handle.as_raw()
+    {
+        // Hiding a focused child HWND does not reliably move keyboard focus
+        // back to its parent. Explicit SetFocus keeps egui TextEdit/DragValue
+        // fields and application shortcuts alive after leaving a text tab.
+        unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(handle.hwnd.get() as _);
         }
     }
 }
@@ -152,17 +152,15 @@ fn defer_switch_intent(
     document_id: DocumentId,
     target_id: DocumentId,
 ) {
-    if let Some(pending) = pending_snapshot {
-        if let SnapshotPurpose::Switch {
+    if let Some(pending) = pending_snapshot
+        && let SnapshotPurpose::Switch {
             document_id: pending_document_id,
             target_id: pending_target_id,
         } = &mut pending.purpose
-        {
-            if *pending_document_id == document_id {
-                *pending_target_id = target_id;
-                return;
-            }
-        }
+        && *pending_document_id == document_id
+    {
+        *pending_target_id = target_id;
+        return;
     }
     *deferred_switch = Some(DeferredSwitch {
         document_id,
@@ -1010,14 +1008,12 @@ impl DocumentWebView {
                     if self.ping_request_id.as_deref() == Some(request_id.as_str()) =>
                 {
                     self.ping_request_id = None;
-                    status = Some(
-                        match self.request_snapshot(SnapshotPurpose::Probe) {
-                            Ok(()) => format!(
+                    status = Some(match self.request_snapshot(SnapshotPurpose::Probe) {
+                        Ok(()) => format!(
                             "Canvas Editor {CANVAS_EDITOR_VERSION} ready — ping/pong OK; checking snapshot..."
                         ),
-                            Err(error) => self.fail_pending_work(error),
-                        },
-                    );
+                        Err(error) => self.fail_pending_work(error),
+                    });
                 }
                 Ok(BridgeMessage::DocumentChanged { revision }) => {
                     if revision > self.bridge_revision {
@@ -1772,28 +1768,26 @@ impl App {
             }
         }
 
-        if commit_legacy_conversion {
-            if let Some((document_id, revision, conversion)) = pending_legacy_conversion {
-                if let Some(flow_text) = self
-                    .docs
-                    .by_id_mut(document_id)
-                    .and_then(|document| document.flow_text.as_mut())
-                    .filter(|flow_text| {
-                        flow_text.revision() == revision
-                            && matches!(
-                                flow_text.backing(),
-                                crate::core::document::FlowTextBacking::Legacy(_)
-                            )
-                    })
-                {
-                    let warning_count = conversion.warnings.len();
-                    flow_text.replace_canvas_editor_document(conversion.document, revision);
-                    if warning_count > 0 {
-                        self.shell.status_msg = format!(
-                            "Legacy document migrated to Canvas Editor with {warning_count} compatibility warning(s)"
-                        );
-                    }
-                }
+        if commit_legacy_conversion
+            && let Some((document_id, revision, conversion)) = pending_legacy_conversion
+            && let Some(flow_text) = self
+                .docs
+                .by_id_mut(document_id)
+                .and_then(|document| document.flow_text.as_mut())
+                .filter(|flow_text| {
+                    flow_text.revision() == revision
+                        && matches!(
+                            flow_text.backing(),
+                            crate::core::document::FlowTextBacking::Legacy(_)
+                        )
+                })
+        {
+            let warning_count = conversion.warnings.len();
+            flow_text.replace_canvas_editor_document(conversion.document, revision);
+            if warning_count > 0 {
+                self.shell.status_msg = format!(
+                    "Legacy document migrated to Canvas Editor with {warning_count} compatibility warning(s)"
+                );
             }
         }
 
@@ -2139,17 +2133,19 @@ mod tests {
         )
         .is_err());
         assert!(parse_bridge_message(&"x".repeat(MAX_SNAPSHOT_MESSAGE_BYTES + 1)).is_err());
-        assert!(parse_bridge_message(
-            &serde_json::json!({
-                "protocol_version": 1,
-                "request_id": "web-large",
-                "type": "document_changed",
-                "revision": 1,
-                "padding": "x".repeat(MAX_CONTROL_MESSAGE_BYTES)
-            })
-            .to_string()
-        )
-        .is_err());
+        assert!(
+            parse_bridge_message(
+                &serde_json::json!({
+                    "protocol_version": 1,
+                    "request_id": "web-large",
+                    "type": "document_changed",
+                    "revision": 1,
+                    "padding": "x".repeat(MAX_CONTROL_MESSAGE_BYTES)
+                })
+                .to_string()
+            )
+            .is_err()
+        );
     }
 
     #[test]

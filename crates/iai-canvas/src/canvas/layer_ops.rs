@@ -482,12 +482,11 @@ impl Canvas {
             .filter(|l| movable(l))
             .map(|l| l.id)
             .collect();
-        if ids.is_empty() {
-            if let Some(l) = self.layer_stack.layers.get(self.layer_stack.active_idx) {
-                if movable(l) {
-                    ids.push(l.id);
-                }
-            }
+        if ids.is_empty()
+            && let Some(l) = self.layer_stack.layers.get(self.layer_stack.active_idx)
+            && movable(l)
+        {
+            ids.push(l.id);
         }
         if ids.is_empty() {
             return false;

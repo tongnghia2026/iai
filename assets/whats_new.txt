@@ -2,6 +2,32 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+27/10/2026
+- Bấm Print là cửa sổ in đóng ngay để làm việc khác, lệnh in chạy ngầm. In thêm tờ khác khi tờ trước chưa gửi xong thì tờ sau tự xếp hàng, không phải chờ.
+- Làm ảnh thẻ tự động: bấm chạy xong có thể sang tab khác làm việc khác, hoặc mở ảnh của khách khác (Ctrl+O) và bấm làm tiếp — máy làm lần lượt từng ảnh, ảnh sau tự chờ tới lượt. Tab đang làm có vòng quay, tab đang chờ có đồng hồ.
+- Ảnh thẻ làm xong có chuông báo; nếu bạn đang ở tab khác thì tab của ảnh đó nhấp nháy, bấm vào là mở để in.
+- Mỗi ảnh thẻ được làm đủ các bước (cắt, tách nền, làm đẹp da, làm nét, chỉnh sáng…) rồi mới báo xong và chuyển sang ảnh kế tiếp.
+- Quay lại tab ảnh thẻ đã xong (kể cả khi máy còn đang làm ảnh khác) hay đưa chuột vào cửa sổ AI: các thanh chỉnh và «Xem trước» dùng được ngay, không phải bấm «Chỉnh tiếp ảnh này», không phải chờ nhận diện khuôn mặt lại — cả khi bạn đã sửa thêm vài chỗ trên ảnh.
+- Cửa sổ AI (ảnh thẻ, chân dung) chỉ đóng khi bạn bấm ✕ hoặc «Đóng». Đóng đi để làm việc khác thì các ảnh thẻ đang làm hay đang chờ ở các tab khác vẫn chạy tới xong; ảnh đang chỉnh dở giữ đúng như đang thấy.
+- Bấm «Áp dụng» hay «Hủy» không còn đóng cửa sổ AI, để chỉnh tiếp ảnh khác ngay.
+- In tab có nhiều trang: trong cửa sổ Print chọn «Trang đang xem», «Tất cả các trang» hoặc gõ các trang cần in (ví dụ 1-3, 5) như Corel.
+
+26/10/2026
+- Cửa sổ Warp (Ctrl+Shift+X), Develop, «Lưu Preset kích thước» và «Overlay Tint» không còn bị các bảng khác che mất khi vừa mở.
+- Ảnh thẻ cho nhiều người (Việc nhanh hay nhờ AI) giờ được chỉnh chân dung trước khi xếp lên tờ in, như khi làm từng tấm.
+- Trợ lý AI làm được thêm: nhóm, gộp, căn thẳng hàng, dàn đều các layer; nhân bản một hình thành hàng; ghép, cắt hình; đặt ảnh vào trong một hình (PowerClip); thêm, xóa, đổi tên, đổi chỗ các trang; đổi chế độ màu (RGB, CMYK, 16 bit).
+- Các nút ở bảng Layer, bảng Channels, thanh trang, menu Trang, PowerClip, Căn / Dàn đều vẫn dùng như cũ; bên trong nay chạy chung một đường với trợ lý AI, nên việc bạn làm và việc AI làm ra kết quả giống hệt nhau.
+
+21/10/2026
+- Nút mới «Nhờ AI làm» ở cuối hàng menu: chọn việc (in căn cước lên A4, ảnh thẻ cho nhiều người, làm sạch ảnh chụp giấy tờ, hay tự viết việc khác), chọn thư mục ảnh của khách, bấm «Gửi cho Gemini». Không phải gõ lệnh cho AI.
+- Gemini (trong ứng dụng Antigravity của Google) làm ngay trên iAi cho bạn xem: ảnh mở ra, được cắt, được xếp; hộp «Nhờ AI làm» ghi đang làm tới đâu, có nút «Dừng». Kết quả nằm trong thư mục «iAi_ket_qua» cạnh ảnh của khách.
+- Lần đầu dùng, bấm «Nối với Antigravity»: iAi tự cài, Antigravity tự khởi động lại một lần.
+- Ca khó như thay áo (sơ mi trắng, vest, áo dài), xóa chữ, nền quá rối: tích ô «Dùng AI online cho ca khó» để Gemini vẽ lại riêng những ảnh đó. Mặc định vẫn làm bằng AI offline của iAi; căn cước không bao giờ bị vẽ lại.
+- Việc mới «Sửa ảnh đang mở (AI online)»: viết sửa gì (ví dụ thay áo sơ mi trắng), Gemini vẽ xong đặt thành một lớp mới ngay trên ảnh đó để bạn che mặt nạ giữ lại phần muốn giữ; một bản lưu trong thư mục iAi_ket_qua cạnh ảnh.
+- Ảnh thẻ bị hụt vai vì khách chụp quá sát: làm ảnh thẻ xong bấm «Thay áo, lấp vai bằng AI…». Gemini vẽ tiếp phần vai bị thiếu (hoặc thay áo bạn chọn), iAi đặt lại cho khuôn mặt khớp đúng ảnh gốc: từ cằm trở lên vẫn là ảnh gốc, chỉ phần áo, vai là của AI, thành một lớp mới có mặt nạ.
+- Nút mới «Việc nhanh» cạnh «Nhờ AI làm»: iAi tự làm trên cả thư mục ảnh, không cần AI, không cần mạng: làm sạch mọi ảnh chụp giấy tờ, làm ảnh thẻ cho mọi người trong thư mục (chọn cỡ, nền, giấy, số tấm mỗi người), hay chạy lại một kỹ năng AI đã lưu. Trong lúc chờ vẫn làm việc khác được; tờ ảnh thẻ mở thành tab mới, PDF lưu trong thư mục iAi_ket_qua.
+- Trợ lý AI làm được thêm: chọn vùng hình elip, hình đa giác; phóng to, thu nhỏ, xoay góc bất kỳ hay dời một layer.
+
 21/10/2026
 - Trợ lý AI làm được thêm nhiều việc chỉnh ảnh: tự cân sáng ảnh tối hay ám màu, chỉnh sáng tối, màu sắc, đen trắng, làm nét, làm mờ, giảm nhiễu, làm sạch ảnh chụp giấy tờ cho trắng như bản scan.
 - Trợ lý AI đặt được ảnh vào giữa trang A4 hay ghép nhiều ảnh lên một trang, chọn vùng theo màu, tô màu, xóa vùng chọn, gộp layer.

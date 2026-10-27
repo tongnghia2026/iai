@@ -20,11 +20,11 @@ use iai::core::vector::affine::AffineTransform;
 use iai::core::vector::color::ColorValue;
 use iai::core::vector::object::VectorObjectData;
 use iai::core::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
-use iai::core::vector::raster::{rasterize, PathRaster};
+use iai::core::vector::raster::{PathRaster, rasterize};
 use iai::core::vector::style::{Gradient, GradientKind, Paint, VectorStyle};
-use iai::gpu::vector::mesh::{tessellate, VectorMesh, VectorVertex};
+use iai::gpu::vector::mesh::{VectorMesh, VectorVertex, tessellate};
 use iai::gpu::vector::renderer::{
-    srgb_to_linear, CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer,
+    CanvasView, GpuMesh, GpuPaint, VectorDraw, VectorRenderer, srgb_to_linear,
 };
 
 /// sRGB fill applied to every fixture; a mid-tone exercises the gamma round-trip

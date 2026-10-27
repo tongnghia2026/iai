@@ -8,6 +8,9 @@
 //! IAI_RAW_LOOK_FILE="C:/path/to/file.arw" IAI_RAW_LOOK_OUT="C:/out" \
 //!   cargo test --release --test raw_look_probe -- --ignored --nocapture
 //! ```
+// Setting the process environment is unsafe from edition 2024 on (another
+// thread may read it meanwhile); these runs set it before they render.
+#![allow(unsafe_code)]
 
 use std::path::PathBuf;
 
@@ -227,7 +230,17 @@ fn raw_default_look_variants() {
         println!("wrote {}", crop_path.display());
         let m = mean_rgb8(&px16);
         let wp = bright_mean_rgb8(&px16);
-        println!("CAMERA_JPEG  mean=({:.0},{:.0},{:.0})  whites=({:.0},{:.0},{:.0})  wb g/r={:.3} g/b={:.3}", m[0], m[1], m[2], wp[0], wp[1], wp[2], wp[1]/wp[0], wp[1]/wp[2]);
+        println!(
+            "CAMERA_JPEG  mean=({:.0},{:.0},{:.0})  whites=({:.0},{:.0},{:.0})  wb g/r={:.3} g/b={:.3}",
+            m[0],
+            m[1],
+            m[2],
+            wp[0],
+            wp[1],
+            wp[2],
+            wp[1] / wp[0],
+            wp[1] / wp[2]
+        );
     } else {
         println!("no embedded preview found");
     }
@@ -249,7 +262,8 @@ fn raw_default_look_variants() {
             .as_ref()
             .is_none_or(|requested| requested.iter().any(|value| value == mode))
     }) {
-        std::env::set_var("IAI_RAW_JPEG_MATCH", mode_env);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("IAI_RAW_JPEG_MATCH", mode_env) };
         let canvas = RawImporter.import(&file).expect("decode RAW");
         let scene = canvas
             .develop_source
@@ -264,7 +278,14 @@ fn raw_default_look_variants() {
         let wp = bright_mean_rgb8(&small);
         println!(
             "{label:<16} mean=({:.0},{:.0},{:.0})  whites=({:.0},{:.0},{:.0})  wb g/r={:.3} g/b={:.3}",
-            m[0], m[1], m[2], wp[0], wp[1], wp[2], wp[1] / wp[0], wp[1] / wp[2]
+            m[0],
+            m[1],
+            m[2],
+            wp[0],
+            wp[1],
+            wp[2],
+            wp[1] / wp[0],
+            wp[1] / wp[2]
         );
         print_quality(label, &small, sw, sh);
         let full_path = out.join(format!("{stem}__{label}.png"));
@@ -291,5 +312,6 @@ fn raw_default_look_variants() {
             .expect("write crop PNG");
         println!("wrote {}", crop_path.display());
     }
-    std::env::remove_var("IAI_RAW_JPEG_MATCH");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("IAI_RAW_JPEG_MATCH") };
 }

@@ -168,10 +168,11 @@ mod tests {
         assert_eq!(c.nodes[0].anchor, p(0.0, 0.0));
         assert_eq!(c.nodes[1].anchor, p(10.0, 0.0));
         assert_eq!(c.nodes[2].anchor, p(5.0, 10.0));
-        assert!(c
-            .nodes
-            .iter()
-            .all(|n| n.in_handle.is_none() && n.out_handle.is_none()));
+        assert!(
+            c.nodes
+                .iter()
+                .all(|n| n.in_handle.is_none() && n.out_handle.is_none())
+        );
     }
 
     #[test]

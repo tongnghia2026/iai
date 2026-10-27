@@ -183,10 +183,10 @@ pub fn trace_mask_to_path(
                 None => break,
             };
             // Remove the reciprocal edge so we don't walk back along it.
-            if let Some(v) = adj.get_mut(&next) {
-                if let Some(pos) = v.iter().position(|&k| k == cur) {
-                    v.swap_remove(pos);
-                }
+            if let Some(v) = adj.get_mut(&next)
+                && let Some(pos) = v.iter().position(|&k| k == cur)
+            {
+                v.swap_remove(pos);
             }
             if next == start {
                 break;

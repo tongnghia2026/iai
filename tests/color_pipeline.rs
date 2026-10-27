@@ -1,5 +1,5 @@
 use iai::core::develop::DevelopSettings;
-use iai::core::develop_scene::{eval_scene_pixel, BaseLook};
+use iai::core::develop_scene::{BaseLook, eval_scene_pixel};
 
 // Matrix/SIMD evaluation differs slightly across supported CPUs, especially
 // after tone-mapping HDR values. This is under 0.051 of an 8-bit code value,

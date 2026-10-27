@@ -724,32 +724,32 @@ fn develop_to_gpu(
     // Shadows/Blacks region does not jump the moment the Mixer engages. The
     // region-luma proxy derives its dims from the layer size, so it no longer
     // needs adj_p[1].z/.w (reused here for the colour origin).
-    if let Some(c) = color {
-        if !c.region.is_empty() {
-            adj_p[8] = if c.exact_detail {
-                4.0
-            } else if c.fast_preview {
-                2.0
-            } else {
-                1.0
-            };
-            adj_p[9] = c.downsample.max(1) as f32;
-            adj_p[10] = c.w as f32;
-            adj_p[11] = c.h as f32;
-            adj_p[6] = c.origin_x as f32;
-            adj_p[7] = c.origin_y as f32;
-            if c.fast_preview {
-                return (adj_p, [0.0f32; 256], [0.0f32; 256], 0);
-            }
-            if tone.is_local {
-                if let Some(r) = region.filter(|r| !r.data.is_empty()) {
-                    adj_p[4] = 1.0;
-                    adj_p[5] = r.downsample.max(1) as f32;
-                    return (adj_p, tone.global_lut, tone.local_lut, tone_active);
-                }
-            }
-            return (adj_p, tone.lut, [0.0f32; 256], tone_active);
+    if let Some(c) = color
+        && !c.region.is_empty()
+    {
+        adj_p[8] = if c.exact_detail {
+            4.0
+        } else if c.fast_preview {
+            2.0
+        } else {
+            1.0
+        };
+        adj_p[9] = c.downsample.max(1) as f32;
+        adj_p[10] = c.w as f32;
+        adj_p[11] = c.h as f32;
+        adj_p[6] = c.origin_x as f32;
+        adj_p[7] = c.origin_y as f32;
+        if c.fast_preview {
+            return (adj_p, [0.0f32; 256], [0.0f32; 256], 0);
         }
+        if tone.is_local
+            && let Some(r) = region.filter(|r| !r.data.is_empty())
+        {
+            adj_p[4] = 1.0;
+            adj_p[5] = r.downsample.max(1) as f32;
+            return (adj_p, tone.global_lut, tone.local_lut, tone_active);
+        }
+        return (adj_p, tone.lut, [0.0f32; 256], tone_active);
     }
 
     match (tone.is_local, region) {
@@ -777,29 +777,29 @@ fn develop_scene_to_gpu(
 ) -> ([f32; 12], [f32; 256]) {
     let tone = iai_develop::develop_scene::build_scene_tone_for_scene(settings, scene);
     let mut adj_p = [0.0f32; 12];
-    if let Some(c) = color {
-        if !c.region.is_empty() {
-            adj_p[8] = if c.exact_detail {
-                4.0
-            } else if c.guided_controls {
-                3.0
-            } else if c.fast_preview {
-                2.0
-            } else {
-                1.0
-            };
-            adj_p[9] = c.downsample.max(1) as f32;
-            adj_p[10] = c.w as f32;
-            adj_p[11] = c.h as f32;
-            adj_p[6] = c.origin_x as f32;
-            adj_p[7] = c.origin_y as f32;
-        }
+    if let Some(c) = color
+        && !c.region.is_empty()
+    {
+        adj_p[8] = if c.exact_detail {
+            4.0
+        } else if c.guided_controls {
+            3.0
+        } else if c.fast_preview {
+            2.0
+        } else {
+            1.0
+        };
+        adj_p[9] = c.downsample.max(1) as f32;
+        adj_p[10] = c.w as f32;
+        adj_p[11] = c.h as f32;
+        adj_p[6] = c.origin_x as f32;
+        adj_p[7] = c.origin_y as f32;
     }
-    if settings.has_local_tone() {
-        if let Some(r) = region.filter(|r| !r.data.is_empty()) {
-            adj_p[4] = 1.0;
-            adj_p[5] = r.downsample.max(1) as f32;
-        }
+    if settings.has_local_tone()
+        && let Some(r) = region.filter(|r| !r.data.is_empty())
+    {
+        adj_p[4] = 1.0;
+        adj_p[5] = r.downsample.max(1) as f32;
     }
     (adj_p, tone.lut)
 }
@@ -3779,20 +3779,18 @@ struct VsOut {
             ltw,
             lth,
         );
-        if mask_enabled {
-            if let Some(m) = layer.mask.as_ref() {
-                vis += Self::visible_tile_slots_for_rect(
-                    &m.tiles,
-                    band,
-                    zoom,
-                    (view_offset_x, view_offset_y),
-                    off,
-                    layer.width,
-                    layer.height,
-                    ltw,
-                    lth,
-                );
-            }
+        if mask_enabled && let Some(m) = layer.mask.as_ref() {
+            vis += Self::visible_tile_slots_for_rect(
+                &m.tiles,
+                band,
+                zoom,
+                (view_offset_x, view_offset_y),
+                off,
+                layer.width,
+                layer.height,
+                ltw,
+                lth,
+            );
         }
         if vis <= slot_count {
             return None;
@@ -4426,10 +4424,10 @@ struct VsOut {
             && self.ping_initialized
             && self.render_scale == 1
             && !gpu_vector_active;
-        if let Some(stage) = self.vector_stage.as_mut() {
-            if gpu_vector_active {
-                stage.begin_frame();
-            }
+        if let Some(stage) = self.vector_stage.as_mut()
+            && gpu_vector_active
+        {
+            stage.begin_frame();
         }
         // A live preview (Develop / Ctrl+L·M / filter) targeting a layer inside
         // the frozen prefix would make the snapshot stale — its parameters live
@@ -5168,12 +5166,12 @@ struct VsOut {
                         adj_p = p;
                         adj_lut = lut;
                     }
-                } else if let Some(preview) = &self.preview_filter {
-                    if preview.layer_id == layer.id {
-                        let (k, p) = filter_to_gpu(&preview.filter);
-                        adj_kind = k;
-                        adj_p = p;
-                    }
+                } else if let Some(preview) = &self.preview_filter
+                    && preview.layer_id == layer.id
+                {
+                    let (k, p) = filter_to_gpu(&preview.filter);
+                    adj_kind = k;
+                    adj_p = p;
                 }
             }
 
@@ -5787,7 +5785,7 @@ mod shader_tests {
     #[test]
     fn oklab_cpu_wgsl_twins_meet_f32_tolerance() {
         use iai_color::perceptual_color::{
-            linear_srgb_to_oklab, oklab_to_linear_srgb, OKLAB_GPU_PARITY_TOLERANCE,
+            OKLAB_GPU_PARITY_TOLERANCE, linear_srgb_to_oklab, oklab_to_linear_srgb,
         };
 
         // Literal f32 transcription of dev_linear_srgb_to_oklab and its inverse.

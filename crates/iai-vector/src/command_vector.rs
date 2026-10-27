@@ -247,10 +247,10 @@ impl Command for CreatePathLayer {
     }
 
     fn undo(&mut self, ctx: &mut EditContext) -> Result<(), String> {
-        if let Some(id) = self.created_id {
-            if let Some(pos) = ctx.layers.layers.iter().position(|l| l.id == id) {
-                ctx.layers.layers.remove(pos);
-            }
+        if let Some(id) = self.created_id
+            && let Some(pos) = ctx.layers.layers.iter().position(|l| l.id == id)
+        {
+            ctx.layers.layers.remove(pos);
         }
         ctx.layers.active_idx = self
             .prev_active

@@ -114,6 +114,26 @@ impl Gate {
         &self.roots
     }
 
+    /// Take in folders granted beyond those the session started with (the
+    /// person granted them in the window); whether any was new. A folder
+    /// that is not there is passed over; relative paths still start from
+    /// the first folder of the session's own.
+    pub fn grant(&mut self, read: &[PathBuf], write: &[PathBuf]) -> bool {
+        let mut added = false;
+        for (dirs, into) in [(read, &mut self.roots.read), (write, &mut self.roots.write)] {
+            for dir in dirs {
+                let Ok(real) = std::fs::canonicalize(dir).map(|c| plain(&c)) else {
+                    continue;
+                };
+                if real.is_dir() && !into.contains(&real) {
+                    into.push(real);
+                    added = true;
+                }
+            }
+        }
+        added
+    }
+
     /// Learn the host's commands (for their effects).
     pub fn learn(&mut self, commands: &[CommandInfo]) {
         self.commands = commands.iter().map(|c| (c.id.clone(), c.clone())).collect();
@@ -256,7 +276,7 @@ impl Gate {
             match part {
                 Component::ParentDir => return Err(refuse("`..` is not taken")),
                 Component::Normal(name) if is_device(&name.to_string_lossy()) => {
-                    return Err(refuse("a device name is not a file"))
+                    return Err(refuse("a device name is not a file"));
                 }
                 _ => {}
             }

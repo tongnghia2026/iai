@@ -63,7 +63,7 @@ pub fn end_process_now() -> ! {
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentProcess() -> isize;
             fn TerminateProcess(process: isize, exit_code: u32) -> i32;
         }

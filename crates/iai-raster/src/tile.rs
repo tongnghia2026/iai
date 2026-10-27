@@ -1,8 +1,8 @@
-use crate::fast_math::{floor_i32, round_u16, round_u8};
+use crate::fast_math::{floor_i32, round_u8, round_u16};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TILE_REV: AtomicU64 = AtomicU64::new(100);
 
@@ -2169,10 +2169,11 @@ impl<'a> TileGrid<'a> {
             let (Ok(x), Ok(y)) = (usize::try_from(pos.x), usize::try_from(pos.y)) else {
                 continue;
             };
-            if x < cols && y < rows {
-                if let Some(slot) = tiles.get_mut(y * cols + x) {
-                    *slot = Some(&**tile);
-                }
+            if x < cols
+                && y < rows
+                && let Some(slot) = tiles.get_mut(y * cols + x)
+            {
+                *slot = Some(&**tile);
             }
         }
         Self {
@@ -2493,7 +2494,7 @@ mod tests {
 
     // ── CMYK ink planes ─────────────────────────────────────────────────────
 
-    use iai_color::cms::{naive_cmyk_to_rgb, naive_rgb_to_cmyk, CmykConverter};
+    use iai_color::cms::{CmykConverter, naive_cmyk_to_rgb, naive_rgb_to_cmyk};
 
     /// Every tile with an ink plane must mirror it exactly: pixels' RGB ==
     /// converter projection of the ink, for every VISIBLE pixel (alpha > 0 —

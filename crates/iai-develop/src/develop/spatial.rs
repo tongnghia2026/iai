@@ -5,7 +5,7 @@
 
 use super::*;
 use iai_color::color::luminance_f32;
-use iai_raster::tile::{TileMap, TILE_SIZE};
+use iai_raster::tile::{TILE_SIZE, TileMap};
 use rayon::prelude::*;
 use std::sync::Arc;
 

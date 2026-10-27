@@ -1,6 +1,6 @@
 use super::*;
 use iai_color::color::{luminance_f32, oklab_hue_deg, rgb_to_hsl};
-use iai_raster::tile::{quantize_dither, TileMap};
+use iai_raster::tile::{TileMap, quantize_dither};
 
 #[test]
 fn develop3_midtones_only_activates_and_changes_display_fallback() {
@@ -460,7 +460,7 @@ fn strong_light_edit_stays_smooth_finite_and_color_stable() {
 
 #[test]
 fn production_local_light_preserves_bright_and_dark_texture() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let (w, h) = (96u32, 24u32);
     let mut px = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
@@ -1565,7 +1565,7 @@ fn shadows_reach_colored_skin_midtones_more_than_bright_skin() {
 
 #[test]
 fn color_mixer_softens_small_chroma_blocks_vs_per_pixel() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let w = 24u32;
     let h = 24u32;
     // Flat reddish field with a small (3x3) higher-chroma block in the centre,
@@ -1621,7 +1621,7 @@ fn color_mixer_softens_small_chroma_blocks_vs_per_pixel() {
 
 #[test]
 fn color_mixer_pulls_offhue_speck_toward_its_region() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let w = 40u32;
     let h = 40u32;
     // Large orange (skin) field with a small red speck in the centre.
@@ -1753,7 +1753,7 @@ fn yellow_band_grips_orange_yellow_skin() {
 
 #[test]
 fn local_shadows_preserve_texture_better_than_global() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let w = 64u32;
     let h = 16u32;
     // Dark region with fine texture (alternating luma) — the kind of local
@@ -1819,7 +1819,7 @@ fn local_shadows_preserve_texture_better_than_global() {
 
 #[test]
 fn mixer_band_edit_does_not_bleed_across_color_boundary() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     // Left half saturated red, right half saturated blue. Boosting the RED
     // band hard must leave the blue side untouched even right next to the
     // boundary — the low-res colour proxy used to leak the push across.
@@ -1879,7 +1879,7 @@ fn red_luminance_brightens_reds_and_spares_the_orange_node() {
 
 #[test]
 fn local_blacks_preserve_dark_detail_better_than_global() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let w = 64u32;
     let h = 16u32;
     // Very dark region with fine texture (e.g. hair strands) that a global
@@ -1924,7 +1924,7 @@ fn local_blacks_preserve_dark_detail_better_than_global() {
 #[test]
 #[ignore = "diagnostic instrumentation, run with --ignored --nocapture"]
 fn diag_mixer_live_strength() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let cases: [(&str, usize, [u8; 3]); 15] = [
         ("deep_lip_red", R, [150, 20, 34]),
         ("sat_red", R, [210, 45, 45]),
@@ -2472,7 +2472,7 @@ fn oklab_chroma_delta(a: [u8; 3], b: [u8; 3]) -> f32 {
 /// return the centre pixel — this exercises `build_color_lowpass` +
 /// `finish_colored_pixel` (proxy + full-res re-gate), exactly like a RAW.
 fn proxy_apply(settings: &DevelopSettings, rgb: [u8; 3]) -> [u8; 3] {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let (w, h) = (TILE_SIZE, TILE_SIZE);
     let mut px = vec![0u8; (w * h * 4) as usize];
     for p in px.chunks_exact_mut(4) {
@@ -2513,7 +2513,7 @@ fn all_band_saturation_settings(value: f32) -> DevelopSettings {
 }
 
 fn proxy_patch_chroma_metrics(settings: &DevelopSettings, samples: &[[u8; 3]]) -> Vec<(f32, f32)> {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let (w, h) = (TILE_SIZE, TILE_SIZE);
     let stripe_w = w / samples.len() as u32;
     let mut px = vec![0u8; (w * h * 4) as usize];
@@ -2683,7 +2683,7 @@ fn shadows_and_blacks_keep_neutrals_neutral_and_black_uncolored() {
 
 #[test]
 fn local_light_lift_preserves_dark_green_texture_and_tonal_order() {
-    use iai_raster::tile::{TilePos, TILE_SIZE};
+    use iai_raster::tile::{TILE_SIZE, TilePos};
     let (w, h) = (64u32, 16u32);
     let levels = [[14u8, 32, 16], [20, 42, 20], [28, 56, 26]];
     let mut px = vec![0u8; (w * h * 4) as usize];
@@ -2963,8 +2963,8 @@ fn edge_suppression_fades_correction_at_luma_edges_only() {
         "interior correction suppressed: {interior}"
     );
     let edge = corr(4 * pw + pw / 2); // at the luma step
-                                      // Fades toward the boundary, but the EDGE_FADE_FLOOR keeps a real fraction
-                                      // of the edit so the taper never carves a dark rim into the colour.
+    // Fades toward the boundary, but the EDGE_FADE_FLOOR keeps a real fraction
+    // of the edit so the taper never carves a dark rim into the colour.
     assert!(
         edge < interior * 0.78,
         "edit did not fade across the edge: edge={edge} interior={interior}"
@@ -3205,11 +3205,7 @@ fn aqua_and_blue_minus200_can_remove_color_completely() {
     let saturation = |rgb: [u8; 3]| {
         let max = rgb[0].max(rgb[1]).max(rgb[2]) as f32;
         let min = rgb[0].min(rgb[1]).min(rgb[2]) as f32;
-        if max > 0.0 {
-            (max - min) / max
-        } else {
-            0.0
-        }
+        if max > 0.0 { (max - min) / max } else { 0.0 }
     };
     for rgb in [
         [40, 140, 140],
@@ -3781,7 +3777,7 @@ fn boundary_managed_saturation_beats_the_srgb_hull_knee() {
     // Mixer pushes "trong"/vivid AND at the input hue instead of greying (bạc) or
     // rotating (the pre-Q5 linear-radial defect that turned red toward orange).
     use iai_color::gamut_map::{is_in_gamut, map_to_output_gamut};
-    use iai_color::perceptual_color::{linear_srgb_to_oklab, PerceptualColor};
+    use iai_color::perceptual_color::{PerceptualColor, linear_srgb_to_oklab};
     use iai_color::working_color::OutputColorSpace;
 
     let mut settings = DevelopSettings::default();
@@ -4300,7 +4296,7 @@ fn develop3_guided_mixer_mask_smooths_noise_but_keeps_luma_edge() {
 
 #[test]
 fn develop3_mixer_saturation_prefers_muted_over_vivid_colour() {
-    use iai_color::perceptual_color::{working_rgb_to_perceptual, PerceptualColor};
+    use iai_color::perceptual_color::{PerceptualColor, working_rgb_to_perceptual};
     use iai_color::working_color::WorkingColorSpace;
 
     let mut settings = DevelopSettings::default();

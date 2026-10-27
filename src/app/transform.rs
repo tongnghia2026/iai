@@ -15,8 +15,8 @@ use crate::core::canvas::Canvas;
 use crate::core::document::GuideOrientation;
 use crate::core::layer::{Layer, LayerType};
 use crate::core::shape::ShapeData;
-use crate::core::snapping::{best_snap, SnapKind, SnapLine, SNAP_THRESHOLD_PX};
-use crate::core::text::{rasterize_placed, TextData};
+use crate::core::snapping::{SNAP_THRESHOLD_PX, SnapKind, SnapLine, best_snap};
+use crate::core::text::{TextData, rasterize_placed};
 use crate::core::tile::TileMap;
 use crate::core::vector::object::{VectorGeometry, VectorObjectData};
 use crate::gpu::compositor::TransformPreviewUniform;
@@ -1254,11 +1254,15 @@ impl App {
             .map(|ts| ts.layer_states.len())
             .unwrap_or(0);
         self.shell.status_msg = if !select_transform_tool && n > 1 {
-            format!("Move transform ({n} layers) — drag handles to scale, drag outside a corner to rotate")
+            format!(
+                "Move transform ({n} layers) — drag handles to scale, drag outside a corner to rotate"
+            )
         } else if !select_transform_tool {
             "Move transform — drag handles to scale, drag outside a corner to rotate".to_string()
         } else if n > 1 {
-            format!("Free Transform ({n} layers) — corner=proportional • Shift+edge=distort • Alt=from-center • Enter=commit • Esc=cancel")
+            format!(
+                "Free Transform ({n} layers) — corner=proportional • Shift+edge=distort • Alt=from-center • Enter=commit • Esc=cancel"
+            )
         } else {
             "Free Transform — corner=proportional • Shift+edge=distort • Alt=from-center • Enter/Esc".to_string()
         };
@@ -1766,29 +1770,27 @@ impl App {
                         // With Shift held, only snap along the chosen movement
                         // axis. Snapping the other axis would reintroduce the
                         // diagonal drift that the constraint is meant to remove.
-                        if !shift || moving_horizontally {
-                            if let Some((adj, pos, kind)) =
+                        if (!shift || moving_horizontally)
+                            && let Some((adj, pos, kind)) =
                                 best_snap(&[l, (l + r) * 0.5, r], &tx_targets, threshold)
-                            {
-                                ts.translate_x += adj;
-                                guides.push(SnapLine {
-                                    vertical: true,
-                                    pos,
-                                    kind,
-                                });
-                            }
+                        {
+                            ts.translate_x += adj;
+                            guides.push(SnapLine {
+                                vertical: true,
+                                pos,
+                                kind,
+                            });
                         }
-                        if !shift || !moving_horizontally {
-                            if let Some((adj, pos, kind)) =
+                        if (!shift || !moving_horizontally)
+                            && let Some((adj, pos, kind)) =
                                 best_snap(&[t, (t + b) * 0.5, b], &ty_targets, threshold)
-                            {
-                                ts.translate_y += adj;
-                                guides.push(SnapLine {
-                                    vertical: false,
-                                    pos,
-                                    kind,
-                                });
-                            }
+                        {
+                            ts.translate_y += adj;
+                            guides.push(SnapLine {
+                                vertical: false,
+                                pos,
+                                kind,
+                            });
                         }
                     }
                 }
@@ -1922,20 +1924,12 @@ impl App {
                         // Fixed anchor per axis: the opposite edge (far-side anchor) when
                         // this axis is dragged and not Alt, otherwise the center.
                         let ax_orig = if (move_left || move_right) && !alt {
-                            if move_right {
-                                ox0
-                            } else {
-                                ox1
-                            }
+                            if move_right { ox0 } else { ox1 }
                         } else {
                             pcx
                         };
                         let ay_orig = if (move_top || move_bottom) && !alt {
-                            if move_bottom {
-                                oy0
-                            } else {
-                                oy1
-                            }
+                            if move_bottom { oy0 } else { oy1 }
                         } else {
                             pcy
                         };
@@ -2415,7 +2409,7 @@ mod tests {
     use crate::core::command::{Command, EditContext};
     use crate::core::document::DocumentId;
     use crate::core::layer::{LayerMask, LayerStack};
-    use crate::core::text::{rasterize, TextData, TextFontFamily};
+    use crate::core::text::{TextData, TextFontFamily, rasterize};
     use crate::core::tile::TileMap;
 
     #[test]
