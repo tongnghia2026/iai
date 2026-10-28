@@ -70,21 +70,222 @@ pub enum Command {
     HueSaturation,
     Desaturate,
     Invert,
+    /// Levels / Curves / Hue-Saturation / Color Balance opened with the
+    /// values last applied (Photoshop's Ctrl+Alt+L, M, U, B).
+    LevelsLast,
+    CurvesLast,
+    HueSaturationLast,
+    ColorBalanceLast,
+    AutoContrast,
+    AutoColor,
+    BlackAndWhite,
+    CanvasSize,
+    SelectInverse,
+    // Layer
+    BringForward,
+    SendBackward,
+    BringToFront,
+    SendToBack,
+    SelectLayerAbove,
+    SelectLayerBelow,
+    Group,
+    Ungroup,
+    ClippingMask,
+    MergeLayers,
+    MergeVisible,
+    StampVisible,
+    ConvertToCurves,
+    // Image / Filter / Select, with fixed keys before
+    ImageSize,
+    Warp,
+    RefineSelection,
     // View
+    ProofColors,
+    GamutWarning,
     ToggleRulers,
     FitScreen,
     ZoomActual,
     // Window
     OpenDevelop,
+    /// A menu item that is an engine command with fixed params: no key until
+    /// the person gives it one.
+    Menu(&'static MenuCommand),
+}
+
+/// A menu item that runs an engine command with fixed params. The menu bar
+/// draws these items from here, and Preferences ▸ Shortcuts can give each a
+/// key, so the key, the menu and an agent all run the one command.
+#[derive(PartialEq, Eq, Debug, Hash)]
+pub struct MenuCommand {
+    /// Where its key is saved; never changes once shipped.
+    pub key_id: &'static str,
+    /// The menu item's text, also its name in the shortcut lists.
+    pub label: &'static str,
+    /// The engine command, and its params as JSON.
+    pub command: &'static str,
+    pub args: &'static str,
+    pub group: CommandGroup,
+    /// Its built-in key, Photoshop's where it has one.
+    pub key: Option<KeyChord>,
+}
+
+impl MenuCommand {
+    /// The params, as the command takes them.
+    pub fn params(&self) -> serde_json::Value {
+        serde_json::from_str(self.args).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
+/// The menu items that are commands with fixed params and no fixed key.
+pub mod menu {
+    use super::{CommandGroup, KeyChord, KeyName, MenuCommand};
+
+    const fn item(
+        key_id: &'static str,
+        label: &'static str,
+        command: &'static str,
+        args: &'static str,
+        group: CommandGroup,
+    ) -> MenuCommand {
+        MenuCommand {
+            key_id,
+            label,
+            command,
+            args,
+            group,
+            key: None,
+        }
+    }
+
+    /// [`item`] with a built-in key.
+    const fn keyed(item: MenuCommand, key: KeyChord) -> MenuCommand {
+        MenuCommand {
+            key: Some(key),
+            ..item
+        }
+    }
+
+    pub const GRAYSCALE: MenuCommand = item(
+        "image.grayscale",
+        "Grayscale",
+        "image.grayscale",
+        "{}",
+        CommandGroup::Image,
+    );
+    pub const BITS_8: MenuCommand = item(
+        "image.bits_8",
+        "8 Bits/Channel",
+        "image.mode",
+        r#"{"bits": 8}"#,
+        CommandGroup::Image,
+    );
+    pub const BITS_16: MenuCommand = item(
+        "image.bits_16",
+        "16 Bits/Channel",
+        "image.mode",
+        r#"{"bits": 16}"#,
+        CommandGroup::Image,
+    );
+    pub const ROTATE_CW: MenuCommand = item(
+        "image.rotate_cw",
+        "90° Clockwise",
+        "image.rotate",
+        r#"{"angle": "90"}"#,
+        CommandGroup::Image,
+    );
+    pub const ROTATE_CCW: MenuCommand = item(
+        "image.rotate_ccw",
+        "90° Counter-Clockwise",
+        "image.rotate",
+        r#"{"angle": "-90"}"#,
+        CommandGroup::Image,
+    );
+    pub const FLIP_H: MenuCommand = item(
+        "image.flip_horizontal",
+        "Flip Horizontal",
+        "image.flip",
+        r#"{"axis": "horizontal"}"#,
+        CommandGroup::Image,
+    );
+    pub const FLIP_V: MenuCommand = item(
+        "image.flip_vertical",
+        "Flip Vertical",
+        "image.flip",
+        r#"{"axis": "vertical"}"#,
+        CommandGroup::Image,
+    );
+    pub const ADD_ARTBOARD: MenuCommand = item(
+        "page.add",
+        "Thêm Artboard",
+        "page.add",
+        "{}",
+        CommandGroup::Image,
+    );
+    pub const NEW_LAYER: MenuCommand = keyed(
+        item(
+            "layer.new",
+            "New Layer",
+            "layer.new",
+            "{}",
+            CommandGroup::Layer,
+        ),
+        KeyChord::ctrl_shift(KeyName::N),
+    );
+    pub const MERGE_DOWN: MenuCommand = item(
+        "layer.merge_down",
+        "Merge Down",
+        "layer.merge_down",
+        "{}",
+        CommandGroup::Layer,
+    );
+    pub const MERGE_ALL: MenuCommand = item(
+        "layer.flatten",
+        "Merge All",
+        "layer.flatten",
+        "{}",
+        CommandGroup::Layer,
+    );
+    pub const POWERCLIP_PLACE: MenuCommand = item(
+        "vector.powerclip_place",
+        "Place Inside Frame",
+        "vector.powerclip",
+        r#"{"op": "place"}"#,
+        CommandGroup::Layer,
+    );
+    pub const POWERCLIP_EXTRACT: MenuCommand = item(
+        "vector.powerclip_extract",
+        "Extract From Frame",
+        "vector.powerclip",
+        r#"{"op": "extract"}"#,
+        CommandGroup::Layer,
+    );
+
+    /// Every one, in the order the shortcut lists show them.
+    pub const ALL: [&MenuCommand; 13] = [
+        &GRAYSCALE,
+        &BITS_8,
+        &BITS_16,
+        &ROTATE_CW,
+        &ROTATE_CCW,
+        &FLIP_H,
+        &FLIP_V,
+        &ADD_ARTBOARD,
+        &NEW_LAYER,
+        &MERGE_DOWN,
+        &MERGE_ALL,
+        &POWERCLIP_PLACE,
+        &POWERCLIP_EXTRACT,
+    ];
 }
 
 /// Coarse grouping used to lay the shortcut lists out in sections.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum CommandGroup {
     Tools,
     File,
     Edit,
     Image,
+    Layer,
     View,
     Window,
 }
@@ -96,18 +297,20 @@ impl CommandGroup {
             CommandGroup::File => "File",
             CommandGroup::Edit => "Edit",
             CommandGroup::Image => "Image & colour",
+            CommandGroup::Layer => "Layer",
             CommandGroup::View => "View",
             CommandGroup::Window => "Window",
         }
     }
 
     /// The order sections are shown in the lists.
-    pub fn all() -> [CommandGroup; 6] {
+    pub fn all() -> [CommandGroup; 7] {
         [
             CommandGroup::Tools,
             CommandGroup::File,
             CommandGroup::Edit,
             CommandGroup::Image,
+            CommandGroup::Layer,
             CommandGroup::View,
             CommandGroup::Window,
         ]
@@ -115,9 +318,10 @@ impl CommandGroup {
 }
 
 /// A physical key that a chord can name: letters, digits, F-keys and a few
-/// punctuation keys. Context keys (Space, Enter, Esc, arrows, Delete, brackets,
-/// `+`/`-`) are absent on purpose — they stay hard-wired. Kept separate from
-/// winit's `KeyCode` so this module stays dependency-free and serialisable.
+/// punctuation keys, and the brackets (with Ctrl or Alt). Context keys (Space,
+/// Enter, Esc, arrows, Delete, `+`/`-`) are absent on purpose — they stay
+/// hard-wired. Kept separate from winit's `KeyCode` so this module stays
+/// dependency-free and serialisable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 pub enum KeyName {
     A,
@@ -175,11 +379,13 @@ pub enum KeyName {
     Quote,
     Backquote,
     Backslash,
+    BracketLeft,
+    BracketRight,
 }
 
 impl KeyName {
     /// Every nameable key, in display order.
-    pub const ALL: [KeyName; 55] = [
+    pub const ALL: [KeyName; 57] = [
         KeyName::A,
         KeyName::B,
         KeyName::C,
@@ -235,6 +441,8 @@ impl KeyName {
         KeyName::Quote,
         KeyName::Backquote,
         KeyName::Backslash,
+        KeyName::BracketLeft,
+        KeyName::BracketRight,
     ];
 
     /// How the key reads in a shortcut label (e.g. `S`, `0`, `F5`, `,`).
@@ -295,6 +503,8 @@ impl KeyName {
             KeyName::Quote => "'",
             KeyName::Backquote => "`",
             KeyName::Backslash => "\\",
+            KeyName::BracketLeft => "[",
+            KeyName::BracketRight => "]",
         }
     }
 
@@ -384,17 +594,6 @@ pub const FIXED_SHORTCUTS: &[(&str, &str)] = &[
     ("D", "Reset colours"),
     ("Ctrl+D", "Deselect / Repeat"),
     ("Ctrl+Shift+D", "Repeat"),
-    ("Ctrl+G", "Group"),
-    ("Ctrl+Shift+G", "Ungroup"),
-    ("Ctrl+Alt+G", "Clipping Mask"),
-    ("Ctrl+E", "Merge Down"),
-    ("Ctrl+Shift+E", "Stamp Visible"),
-    ("Ctrl+Q", "Convert to Curves"),
-    ("Ctrl+Y", "Proof Colors"),
-    ("Ctrl+Shift+Y", "Gamut Warning"),
-    ("Ctrl+Shift+X", "Warp"),
-    ("Ctrl+Alt+I", "Image Size"),
-    ("Ctrl+Alt+R", "Refine Selection"),
     ("Shift+F5", "Smart Fill"),
     ("Shift+F6", "Feather"),
     ("Shift+F7", "Invert Selection"),
@@ -423,17 +622,8 @@ pub fn reserved_action(chord: KeyChord) -> Option<&'static str> {
         (false, false, false, K::D) => "Reset colours",
         (true, false, false, K::D) => "Deselect / Repeat",
         (true, true, false, K::D) => "Repeat",
-        (true, false, false, K::E) => "Merge Down",
-        (true, true, false, K::E) => "Stamp Visible",
-        (true, false, false, K::G) => "Group",
-        (true, true, false, K::G) => "Ungroup",
-        (true, false, true, K::G) => "Clipping Mask",
-        (true, false, false, K::Q) => "Convert to Curves",
-        (true, false, false, K::Y) => "Proof Colors",
-        (true, true, false, K::Y) => "Gamut Warning",
-        (true, true, false, K::X) => "Warp",
-        (true, false, true, K::I) => "Image Size",
-        (true, false, true, K::R) => "Refine Selection",
+        (false, false, false, K::BracketLeft | K::BracketRight) => "Brush size",
+        (false, true, false, K::BracketLeft | K::BracketRight) => "Brush hardness",
         (false, true, false, K::F3) => "Change Case",
         (false, true, false, K::F5) => "Smart Fill",
         (false, true, false, K::F6) => "Feather",
@@ -692,6 +882,169 @@ const TABLE: &[(Command, KeyChord, CommandGroup, &str)] = &[
         CommandGroup::Image,
         "Invert",
     ),
+    (
+        Command::LevelsLast,
+        KeyChord::new(true, false, true, KeyName::L),
+        CommandGroup::Image,
+        "Levels (last values)",
+    ),
+    (
+        Command::CurvesLast,
+        KeyChord::new(true, false, true, KeyName::M),
+        CommandGroup::Image,
+        "Curves (last values)",
+    ),
+    (
+        Command::HueSaturationLast,
+        KeyChord::new(true, false, true, KeyName::U),
+        CommandGroup::Image,
+        "Hue/Saturation (last values)",
+    ),
+    (
+        Command::ColorBalanceLast,
+        KeyChord::new(true, false, true, KeyName::B),
+        CommandGroup::Image,
+        "Color Balance (last values)",
+    ),
+    (
+        Command::AutoContrast,
+        KeyChord::new(true, true, true, KeyName::L),
+        CommandGroup::Image,
+        "Auto Contrast",
+    ),
+    (
+        Command::AutoColor,
+        KeyChord::ctrl_shift(KeyName::B),
+        CommandGroup::Image,
+        "Auto Color",
+    ),
+    (
+        Command::BlackAndWhite,
+        KeyChord::new(true, true, true, KeyName::B),
+        CommandGroup::Image,
+        "Black & White",
+    ),
+    (
+        Command::CanvasSize,
+        KeyChord::new(true, false, true, KeyName::C),
+        CommandGroup::Image,
+        "Canvas Size",
+    ),
+    (
+        Command::SelectInverse,
+        KeyChord::ctrl_shift(KeyName::I),
+        CommandGroup::Edit,
+        "Inverse Selection",
+    ),
+    // Layer
+    (
+        Command::BringForward,
+        KeyChord::ctrl(KeyName::BracketRight),
+        CommandGroup::Layer,
+        "Bring Forward",
+    ),
+    (
+        Command::SendBackward,
+        KeyChord::ctrl(KeyName::BracketLeft),
+        CommandGroup::Layer,
+        "Send Backward",
+    ),
+    (
+        Command::BringToFront,
+        KeyChord::ctrl_shift(KeyName::BracketRight),
+        CommandGroup::Layer,
+        "Bring to Front",
+    ),
+    (
+        Command::SendToBack,
+        KeyChord::ctrl_shift(KeyName::BracketLeft),
+        CommandGroup::Layer,
+        "Send to Back",
+    ),
+    (
+        Command::SelectLayerAbove,
+        KeyChord::new(false, false, true, KeyName::BracketRight),
+        CommandGroup::Layer,
+        "Select Layer Above",
+    ),
+    (
+        Command::SelectLayerBelow,
+        KeyChord::new(false, false, true, KeyName::BracketLeft),
+        CommandGroup::Layer,
+        "Select Layer Below",
+    ),
+    (
+        Command::Group,
+        KeyChord::ctrl(KeyName::G),
+        CommandGroup::Layer,
+        "Group",
+    ),
+    (
+        Command::Ungroup,
+        KeyChord::ctrl_shift(KeyName::G),
+        CommandGroup::Layer,
+        "Ungroup",
+    ),
+    (
+        Command::ClippingMask,
+        KeyChord::new(true, false, true, KeyName::G),
+        CommandGroup::Layer,
+        "Clipping Mask",
+    ),
+    (
+        Command::MergeLayers,
+        KeyChord::ctrl(KeyName::E),
+        CommandGroup::Layer,
+        "Merge Selected",
+    ),
+    (
+        Command::MergeVisible,
+        KeyChord::ctrl_shift(KeyName::E),
+        CommandGroup::Layer,
+        "Merge Visible",
+    ),
+    (
+        Command::StampVisible,
+        KeyChord::new(true, true, true, KeyName::E),
+        CommandGroup::Layer,
+        "Stamp Visible",
+    ),
+    (
+        Command::ConvertToCurves,
+        KeyChord::ctrl(KeyName::Q),
+        CommandGroup::Layer,
+        "Convert to Curves",
+    ),
+    (
+        Command::ImageSize,
+        KeyChord::new(true, false, true, KeyName::I),
+        CommandGroup::Image,
+        "Image Size",
+    ),
+    (
+        Command::Warp,
+        KeyChord::ctrl_shift(KeyName::X),
+        CommandGroup::Image,
+        "Warp",
+    ),
+    (
+        Command::RefineSelection,
+        KeyChord::new(true, false, true, KeyName::R),
+        CommandGroup::Edit,
+        "Refine Selection",
+    ),
+    (
+        Command::ProofColors,
+        KeyChord::ctrl(KeyName::Y),
+        CommandGroup::View,
+        "Proof Colors",
+    ),
+    (
+        Command::GamutWarning,
+        KeyChord::ctrl_shift(KeyName::Y),
+        CommandGroup::View,
+        "Gamut Warning",
+    ),
     // View
     (
         Command::ToggleRulers,
@@ -764,10 +1117,38 @@ impl Command {
             Command::HueSaturation => "image.hue_saturation",
             Command::Desaturate => "image.desaturate",
             Command::Invert => "image.invert",
+            Command::LevelsLast => "image.levels_last",
+            Command::CurvesLast => "image.curves_last",
+            Command::HueSaturationLast => "image.hue_saturation_last",
+            Command::ColorBalanceLast => "image.color_balance_last",
+            Command::AutoContrast => "image.auto_contrast",
+            Command::AutoColor => "image.auto_color",
+            Command::BlackAndWhite => "image.black_white",
+            Command::CanvasSize => "image.canvas_size",
+            Command::SelectInverse => "select.inverse",
+            Command::BringForward => "layer.bring_forward",
+            Command::SendBackward => "layer.send_backward",
+            Command::BringToFront => "layer.bring_to_front",
+            Command::SendToBack => "layer.send_to_back",
+            Command::SelectLayerAbove => "layer.select_above",
+            Command::SelectLayerBelow => "layer.select_below",
+            Command::Group => "layer.group",
+            Command::Ungroup => "layer.ungroup",
+            Command::ClippingMask => "layer.clipping_mask",
+            Command::MergeLayers => "layer.merge_picked",
+            Command::MergeVisible => "layer.merge_visible",
+            Command::StampVisible => "layer.stamp_visible",
+            Command::ConvertToCurves => "vector.to_curves",
+            Command::ImageSize => "image.image_size",
+            Command::Warp => "filter.warp",
+            Command::RefineSelection => "select.refine",
+            Command::ProofColors => "view.proof_colors",
+            Command::GamutWarning => "view.gamut_warning",
             Command::ToggleRulers => "view.rulers",
             Command::FitScreen => "view.fit_screen",
             Command::ZoomActual => "view.zoom_actual",
             Command::OpenDevelop => "window.develop",
+            Command::Menu(item) => item.key_id,
         }
     }
 
@@ -783,6 +1164,8 @@ impl Command {
                 serde_json::json!({"adjustment": {"kind": "desaturate"}}),
             ),
             Command::Invert => ("layer.invert", serde_json::json!({})),
+            Command::SelectInverse => ("select.invert", serde_json::json!({})),
+            Command::Menu(item) => (item.command, item.params()),
             _ => return None,
         };
         Some(call)
@@ -802,34 +1185,84 @@ impl Command {
 
     /// The name shown to the user.
     pub fn display_name(self) -> &'static str {
-        self.row().3
+        match self {
+            Command::Menu(item) => item.label,
+            _ => self.row().3,
+        }
     }
 
     pub fn group(self) -> CommandGroup {
-        self.row().2
+        match self {
+            Command::Menu(item) => item.group,
+            _ => self.row().2,
+        }
     }
 
-    /// The built-in default chord for this command.
-    pub fn default_chord(self) -> KeyChord {
-        self.row().1
+    /// The built-in default chord for this command; most menu commands have
+    /// none.
+    pub fn default_chord(self) -> Option<KeyChord> {
+        match self {
+            Command::Menu(item) => item.key,
+            _ => Some(self.row().1),
+        }
     }
 
-    /// The default shortcut label, e.g. `Ctrl+S`.
+    /// Run from the keymap by whatever key it has, built-in or not: the
+    /// commands added after the key arms of `keyboard.rs` (they have none
+    /// there) and the menu commands. The older ones keep their arms while on
+    /// their built-in keys.
+    pub fn runs_from_the_keymap(self) -> bool {
+        matches!(
+            self,
+            Command::LevelsLast
+                | Command::CurvesLast
+                | Command::HueSaturationLast
+                | Command::ColorBalanceLast
+                | Command::AutoContrast
+                | Command::AutoColor
+                | Command::BlackAndWhite
+                | Command::CanvasSize
+                | Command::SelectInverse
+                | Command::BringForward
+                | Command::SendBackward
+                | Command::BringToFront
+                | Command::SendToBack
+                | Command::SelectLayerAbove
+                | Command::SelectLayerBelow
+                | Command::Group
+                | Command::Ungroup
+                | Command::ClippingMask
+                | Command::MergeLayers
+                | Command::MergeVisible
+                | Command::StampVisible
+                | Command::ConvertToCurves
+                | Command::ImageSize
+                | Command::Warp
+                | Command::RefineSelection
+                | Command::ProofColors
+                | Command::GamutWarning
+                | Command::Menu(_)
+        )
+    }
+
+    /// The default shortcut label, e.g. `Ctrl+S`; empty when it has none.
     pub fn default_label(self) -> String {
-        self.default_chord().label()
+        self.default_chord()
+            .map(KeyChord::label)
+            .unwrap_or_default()
     }
 
-    /// Every command, in table (grouped) order.
+    /// Every command: the table's in grouped order, then the menu's.
     pub fn all() -> impl Iterator<Item = Command> {
-        TABLE.iter().map(|(cmd, _, _, _)| *cmd)
-    }
-
-    /// The commands in one group, in table order.
-    pub fn in_group(group: CommandGroup) -> impl Iterator<Item = Command> {
         TABLE
             .iter()
-            .filter(move |(_, _, g, _)| *g == group)
             .map(|(cmd, _, _, _)| *cmd)
+            .chain(menu::ALL.into_iter().map(Command::Menu))
+    }
+
+    /// The commands in one group, in that order.
+    pub fn in_group(group: CommandGroup) -> impl Iterator<Item = Command> {
+        Command::all().filter(move |cmd| cmd.group() == group)
     }
 }
 
@@ -855,9 +1288,8 @@ pub struct KeyMap {
 impl Default for KeyMap {
     fn default() -> Self {
         Self {
-            bindings: TABLE
-                .iter()
-                .map(|(cmd, chord, _, _)| (*cmd, Some(*chord)))
+            bindings: Command::all()
+                .map(|cmd| (cmd, cmd.default_chord()))
                 .collect(),
         }
     }
@@ -904,7 +1336,7 @@ impl KeyMap {
     pub fn to_overrides(&self) -> BTreeMap<String, String> {
         self.bindings
             .iter()
-            .filter(|(cmd, chord)| *chord != Some(cmd.default_chord()))
+            .filter(|(cmd, chord)| *chord != cmd.default_chord())
             .map(|(cmd, chord)| {
                 (
                     cmd.id().to_string(),
@@ -943,7 +1375,7 @@ impl KeyMap {
 
     /// `cmd` still has its built-in chord.
     pub fn is_default(&self, cmd: Command) -> bool {
-        self.chord_for(cmd) == Some(cmd.default_chord())
+        self.chord_for(cmd) == cmd.default_chord()
     }
 
     /// Why `chord` cannot go to `cmd` as-is, if anything stands in the way.
@@ -1036,6 +1468,51 @@ mod tests {
         assert!(any);
     }
 
+    /// Each menu command names a command of this build, with params its
+    /// schema takes, written as JSON that reads.
+    #[test]
+    fn the_menu_commands_are_calls_the_engine_takes() {
+        let registry = crate::app::engine::command_registry();
+        for item in menu::ALL {
+            let command = registry
+                .get(item.command)
+                .unwrap_or_else(|| panic!("{} names no command", item.key_id));
+            let args: serde_json::Value = serde_json::from_str(item.args).expect(item.key_id);
+            assert_eq!(item.params(), args);
+            iai_engine::schema_check::check(command.params_schema(), &args)
+                .unwrap_or_else(|e| panic!("{}: {e:?}", item.key_id));
+        }
+    }
+
+    /// A menu command has no key until given one, then runs from it, and the
+    /// key is saved under its own id.
+    #[test]
+    fn a_key_given_to_a_menu_command_runs_it_and_is_kept() {
+        let rotate = Command::Menu(&menu::ROTATE_CW);
+        let km = KeyMap::default();
+        assert_eq!(km.chord_for(rotate), None);
+        assert!(km.is_default(rotate));
+        let chord = KeyChord::new(true, false, true, KeyName::Digit9);
+        let mut km = km;
+        assert_eq!(km.conflict(rotate, chord), None);
+        km.assign(rotate, Some(chord));
+        assert_eq!(km.custom_command_for(chord), Some(rotate));
+        assert_eq!(
+            rotate.engine_command(),
+            Some(("image.rotate", serde_json::json!({"angle": "90"})))
+        );
+        let saved = km.to_overrides();
+        assert_eq!(
+            saved.get("image.rotate_cw").map(String::as_str),
+            Some("Ctrl+Alt+9")
+        );
+        assert_eq!(
+            KeyMap::from_overrides(&saved).chord_for(rotate),
+            Some(chord)
+        );
+        assert_eq!(Command::from_id("image.rotate_cw"), Some(rotate));
+    }
+
     #[test]
     fn every_command_appears_exactly_once() {
         let mut seen = HashSet::new();
@@ -1048,7 +1525,9 @@ mod tests {
     fn default_chords_are_unique() {
         let mut seen = HashSet::new();
         for cmd in Command::all() {
-            let chord = cmd.default_chord();
+            let Some(chord) = cmd.default_chord() else {
+                continue;
+            };
             assert!(
                 seen.insert(chord),
                 "two commands share the default chord {}: second is {:?}",
@@ -1118,7 +1597,9 @@ mod tests {
     #[test]
     fn no_default_binding_is_a_reserved_chord() {
         for cmd in Command::all() {
-            assert_eq!(reserved_action(cmd.default_chord()), None, "{cmd:?}");
+            if let Some(chord) = cmd.default_chord() {
+                assert_eq!(reserved_action(chord), None, "{cmd:?}");
+            }
         }
     }
 
@@ -1129,7 +1610,9 @@ mod tests {
         assert!(km.to_overrides().is_empty());
         for cmd in Command::all() {
             assert!(km.is_default(cmd));
-            assert_eq!(km.custom_command_for(cmd.default_chord()), None);
+            if let Some(chord) = cmd.default_chord() {
+                assert_eq!(km.custom_command_for(chord), None);
+            }
         }
     }
 
@@ -1155,7 +1638,7 @@ mod tests {
         let km = KeyMap::from_overrides(&overrides(&[
             ("tool.nonexistent", "Q"),
             ("tool.brush", "Ctrl+Hyper+?"),
-            ("file.save", "Ctrl+G"), // reserved: Group
+            ("file.save", "Ctrl+D"), // reserved: Deselect / Repeat
         ]));
         assert_eq!(km, KeyMap::default());
     }
@@ -1220,10 +1703,7 @@ mod tests {
             Some(Command::ToolBrush)
         );
         // Resetting Eraser to its default then takes E back from Brush.
-        km.assign(
-            Command::ToolEraser,
-            Some(Command::ToolEraser.default_chord()),
-        );
+        km.assign(Command::ToolEraser, Command::ToolEraser.default_chord());
         assert_eq!(km.chord_for(Command::ToolBrush), None);
         assert!(km.is_default(Command::ToolEraser));
     }
@@ -1248,7 +1728,7 @@ mod tests {
             "tool.brush": "Q",
             "tool.eraser": "E",
             "tool.teleport": "T",
-            "file.save": "Ctrl+G",
+            "file.save": "Ctrl+D",
             "file.open": 7
         } }"#;
         let (km, ignored) = KeyMap::import_json(text).unwrap();
@@ -1268,12 +1748,47 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_that_were_fixed_can_be_given_to_another_command() {
+        for cmd in [
+            Command::Group,
+            Command::Ungroup,
+            Command::ClippingMask,
+            Command::MergeLayers,
+            Command::MergeVisible,
+            Command::StampVisible,
+            Command::ConvertToCurves,
+            Command::ImageSize,
+            Command::Warp,
+            Command::RefineSelection,
+            Command::ProofColors,
+            Command::GamutWarning,
+        ] {
+            let chord = cmd.default_chord().expect("keeps its key");
+            assert_eq!(reserved_action(chord), None, "{cmd:?}");
+            assert!(cmd.runs_from_the_keymap(), "{cmd:?}");
+        }
+        let km = KeyMap::from_overrides(&overrides(&[
+            ("layer.group", "Ctrl+Alt+K"),
+            ("file.save", "Ctrl+G"),
+        ]));
+        assert_eq!(
+            km.command_for(KeyChord::ctrl(KeyName::G)),
+            Some(Command::FileSave)
+        );
+        assert_eq!(
+            km.command_for(KeyChord::new(true, false, true, KeyName::K)),
+            Some(Command::Group)
+        );
+    }
+
+    #[test]
     fn keymap_default_round_trips_commands_and_chords() {
         let km = KeyMap::default();
         for cmd in Command::all() {
-            let chord = km.chord_for(cmd).expect("bound");
-            assert_eq!(chord, cmd.default_chord());
-            assert_eq!(km.command_for(chord), Some(cmd));
+            assert_eq!(km.chord_for(cmd), cmd.default_chord());
+            if let Some(chord) = cmd.default_chord() {
+                assert_eq!(km.command_for(chord), Some(cmd));
+            }
         }
     }
 }

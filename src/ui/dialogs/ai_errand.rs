@@ -65,6 +65,16 @@ fn jobs() -> impl Iterator<Item = ErrandJob> {
         .filter(|j| !j.pro() || cfg!(feature = "pro"))
 }
 
+/// The ID photo sizes an errand can ask for: the command's name, the label.
+pub(super) const ID_PHOTO_SIZES: &[(&str, &str)] = &[
+    ("3x4", "3×4"),
+    ("2x3", "2×3"),
+    ("4x6", "4×6"),
+    ("33x48", "3,3×4,8"),
+    ("35x45", "3,5×4,5"),
+    ("5x5", "5×5"),
+];
+
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, choices: &[(&str, &str)]) {
     let shown = choices
         .iter()
@@ -202,12 +212,7 @@ pub(crate) fn errand_window(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("Cỡ");
-                        combo(
-                            ui,
-                            "errand_size",
-                            &mut form.size,
-                            &[("3x4", "3×4"), ("2x3", "2×3"), ("4x6", "4×6")],
-                        );
+                        combo(ui, "errand_size", &mut form.size, ID_PHOTO_SIZES);
                         ui.label("Nền");
                         combo(
                             ui,

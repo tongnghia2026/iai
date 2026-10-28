@@ -6,900 +6,17 @@
 // GPU:    Primary layer (index 0) gets live inverse-matrix preview shader.
 // Commit: CPU bilinear resample per layer → new TileMaps; one undo command.
 
-use super::state::{
-    App, LayerOrigState, TransformCommitLayer, TransformCommitResult, TransformHandle,
-    TransformState,
-};
+use super::state::{App, TransformHandle};
 use crate::app::render::CanvasEvent;
-use crate::core::canvas::Canvas;
 use crate::core::document::GuideOrientation;
-use crate::core::layer::{Layer, LayerType};
-use crate::core::shape::ShapeData;
+use crate::core::free_transform::*;
+use crate::core::layer::LayerType;
 use crate::core::snapping::{SNAP_THRESHOLD_PX, SnapKind, SnapLine, best_snap};
-use crate::core::text::{TextData, rasterize_placed};
-use crate::core::tile::TileMap;
-use crate::core::vector::object::{VectorGeometry, VectorObjectData};
+use crate::core::vector::object::VectorGeometry;
 use crate::gpu::compositor::TransformPreviewUniform;
-use rayon::prelude::*;
 
 const HANDLE_RADIUS: f32 = 8.0;
 const ROTATE_ZONE: f32 = 24.0;
-const MIN_LIVE_SCALE: f32 = 0.02;
-const TRANSFORM_EPS: f32 = 0.001;
-
-fn projective_handle_indices(h: TransformHandle) -> &'static [usize] {
-    match h {
-        TransformHandle::TopLeft => &[0],
-        TransformHandle::TopCenter => &[0, 1],
-        TransformHandle::TopRight => &[1],
-        TransformHandle::MiddleLeft => &[0, 3],
-        TransformHandle::MiddleRight => &[1, 2],
-        TransformHandle::BottomLeft => &[3],
-        TransformHandle::BottomCenter => &[3, 2],
-        TransformHandle::BottomRight => &[2],
-        TransformHandle::Center => &[0, 1, 2, 3],
-    }
-}
-
-fn dragged_projective_quad(
-    start: [(f32, f32); 4],
-    h: TransformHandle,
-    mode: crate::app::state::TransformMode,
-    dx: f32,
-    dy: f32,
-) -> [(f32, f32); 4] {
-    use crate::app::state::TransformMode;
-    let mut q = start;
-    if h == TransformHandle::Center {
-        for p in &mut q {
-            p.0 += dx;
-            p.1 += dy;
-        }
-        return q;
-    }
-    match mode {
-        TransformMode::Skew => {
-            let horizontal = matches!(
-                h,
-                TransformHandle::TopLeft
-                    | TransformHandle::TopCenter
-                    | TransformHandle::TopRight
-                    | TransformHandle::BottomLeft
-                    | TransformHandle::BottomCenter
-                    | TransformHandle::BottomRight
-            );
-            for &i in projective_handle_indices(h) {
-                if horizontal {
-                    q[i].0 += dx;
-                } else {
-                    q[i].1 += dy;
-                }
-            }
-        }
-        TransformMode::Distort => {
-            for &i in projective_handle_indices(h) {
-                q[i].0 += dx;
-                q[i].1 += dy;
-            }
-        }
-        TransformMode::Perspective => {
-            for &i in projective_handle_indices(h) {
-                q[i].0 += dx;
-                q[i].1 += dy;
-            }
-            // Moving a corner also moves its two adjacent corners in the
-            // opposite direction on the corresponding axis, producing the
-            // symmetric trapezoid expected from Perspective mode.
-            let corner = match h {
-                TransformHandle::TopLeft => Some((0, 3, 1)),
-                TransformHandle::TopRight => Some((1, 2, 0)),
-                TransformHandle::BottomRight => Some((2, 1, 3)),
-                TransformHandle::BottomLeft => Some((3, 0, 2)),
-                _ => None,
-            };
-            if let Some((_i, vertical_neighbor, horizontal_neighbor)) = corner {
-                q[vertical_neighbor].0 -= dx;
-                q[horizontal_neighbor].1 -= dy;
-            }
-        }
-        TransformMode::Free => {}
-    }
-    q
-}
-
-fn transform_quad_about_center(quad: &mut [(f32, f32); 4], sx: f32, sy: f32, angle_deg: f32) {
-    let center = (
-        quad.iter().map(|p| p.0).sum::<f32>() * 0.25,
-        quad.iter().map(|p| p.1).sum::<f32>() * 0.25,
-    );
-    let (s, c) = angle_deg.to_radians().sin_cos();
-    for p in quad {
-        let x = (p.0 - center.0) * sx;
-        let y = (p.1 - center.1) * sy;
-        p.0 = center.0 + c * x - s * y;
-        p.1 = center.1 + s * x + c * y;
-    }
-}
-
-fn clamp_live_scale(value: f32, drag_start: f32) -> f32 {
-    let sign = if drag_start < 0.0 { -1.0 } else { 1.0 };
-    (value * sign).max(MIN_LIVE_SCALE) * sign
-}
-
-/// Shift-constrained translation for a Free Transform center drag. The axis is
-/// chosen from the pointer's displacement since press, so pressing or releasing
-/// Shift midway through a drag remains predictable and does not accumulate
-/// off-axis movement.
-fn constrained_move_delta(dx: f32, dy: f32, shift: bool) -> (f32, f32) {
-    if !shift {
-        (dx, dy)
-    } else if dx.abs() >= dy.abs() {
-        (dx, 0.0)
-    } else {
-        (0.0, dy)
-    }
-}
-
-/// Uniform scale ratio whose transformed corner is closest to the pointer.
-/// `along_*` is the pointer in the transform's unrotated coordinate system.
-/// When scaling around the opposite corner, measure from that fixed corner;
-/// measuring from the pivot and translating afterwards applies the pointer
-/// movement twice and makes the handle outrun the cursor.
-fn corner_drag_ratio(
-    along_x: f32,
-    along_y: f32,
-    lx: f32,
-    ly: f32,
-    start_sx: f32,
-    start_sy: f32,
-    from_center: bool,
-) -> f32 {
-    let (anchor_lx, anchor_ly) = if from_center { (0.0, 0.0) } else { (-lx, -ly) };
-    let base_x = start_sx * (lx - anchor_lx);
-    let base_y = start_sy * (ly - anchor_ly);
-    let target_x = along_x - start_sx * anchor_lx;
-    let target_y = along_y - start_sy * anchor_ly;
-    let denom = base_x * base_x + base_y * base_y;
-    if denom <= f32::EPSILON {
-        1.0
-    } else {
-        (target_x * base_x + target_y * base_y) / denom
-    }
-}
-
-fn transformed_content_bounds(
-    ts: &TransformState,
-    ls: &LayerOrigState,
-) -> Option<(i32, i32, u32, u32)> {
-    let cx0 = ls.content_offset.0 as f32;
-    let cy0 = ls.content_offset.1 as f32;
-    let cx1 = cx0 + ls.content_w as f32;
-    let cy1 = cy0 + ls.content_h as f32;
-
-    let final_map = mat3_mul(transform_forward_homography(ts)?, ls.source_to_current);
-    let map = |x, y| {
-        let p = crate::core::geometry::Homography { m: final_map }.apply(x, y);
-        (p.x, p.y)
-    };
-    let corners = [map(cx0, cy0), map(cx1, cy0), map(cx0, cy1), map(cx1, cy1)];
-    let min_cx = corners
-        .iter()
-        .map(|(x, _)| *x)
-        .fold(f32::INFINITY, f32::min);
-    let max_cx = corners
-        .iter()
-        .map(|(x, _)| *x)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_cy = corners
-        .iter()
-        .map(|(_, y)| *y)
-        .fold(f32::INFINITY, f32::min);
-    let max_cy = corners
-        .iter()
-        .map(|(_, y)| *y)
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    if !min_cx.is_finite() || !max_cx.is_finite() || !min_cy.is_finite() || !max_cy.is_finite() {
-        return None;
-    }
-
-    // Matrix composition can leave an exact integer edge a few ULPs outside
-    // (e.g. rotate 20°, then -20° -> 28.000002). Snap that numerical noise
-    // before floor/ceil or a reversible transform grows a transparent row/col.
-    const BOUNDS_EPS: f32 = 1.0e-4;
-    let floor_x = (min_cx + BOUNDS_EPS).floor();
-    let floor_y = (min_cy + BOUNDS_EPS).floor();
-    let width = ((max_cx - BOUNDS_EPS).ceil() - floor_x).max(1.0);
-    let height = ((max_cy - BOUNDS_EPS).ceil() - floor_y).max(1.0);
-
-    if floor_x < i32::MIN as f32
-        || floor_x > i32::MAX as f32
-        || floor_y < i32::MIN as f32
-        || floor_y > i32::MAX as f32
-        || width > u32::MAX as f32
-        || height > u32::MAX as f32
-    {
-        return None;
-    }
-
-    Some((floor_x as i32, floor_y as i32, width as u32, height as u32))
-}
-
-const MAT3_IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-
-fn mat3_mul(a: [f32; 9], b: [f32; 9]) -> [f32; 9] {
-    let mut out = [0.0; 9];
-    for r in 0..3 {
-        for c in 0..3 {
-            out[r * 3 + c] = (0..3).map(|k| a[r * 3 + k] * b[k * 3 + c]).sum();
-        }
-    }
-    out
-}
-
-fn tile_content_fingerprint(tiles: &TileMap) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut entries: Vec<_> = tiles.tiles.iter().collect();
-    entries.sort_unstable_by_key(|(pos, _)| (pos.x, pos.y));
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tiles.width.hash(&mut hasher);
-    tiles.height.hash(&mut hasher);
-    for (pos, tile) in entries {
-        pos.x.hash(&mut hasher);
-        pos.y.hash(&mut hasher);
-        tile.pixels.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn transform_forward_homography(ts: &TransformState) -> Option<[f32; 9]> {
-    crate::core::geometry::Homography {
-        m: ts.inverse_homography()?,
-    }
-    .inverse()
-    .map(|h| h.m)
-}
-
-fn translate_only(ts: &TransformState) -> Option<(i32, i32)> {
-    if ts.quad.is_some() {
-        return None;
-    }
-    let angle = ts.angle_deg.rem_euclid(360.0);
-    let angle_is_zero = angle <= TRANSFORM_EPS || (360.0 - angle) <= TRANSFORM_EPS;
-    if !angle_is_zero
-        || (ts.scale_x - 1.0).abs() > TRANSFORM_EPS
-        || (ts.scale_y - 1.0).abs() > TRANSFORM_EPS
-        || !ts.translate_x.is_finite()
-        || !ts.translate_y.is_finite()
-    {
-        return None;
-    }
-
-    let dx = ts.translate_x.round();
-    let dy = ts.translate_y.round();
-    if dx < i32::MIN as f32 || dx > i32::MAX as f32 || dy < i32::MIN as f32 || dy > i32::MAX as f32
-    {
-        return None;
-    }
-    Some((dx as i32, dy as i32))
-}
-
-fn text_scales_are_uniform(sx: f32, sy: f32) -> bool {
-    (sx - sy).abs() <= sx.max(sy).max(1.0) * 0.02
-}
-
-/// A value the transform wanted, and the value the editable-text limits allow.
-/// Any real difference means the committed type can no longer describe what the
-/// preview showed, so the caller must keep the resampled pixels instead.
-fn clamped_or_bail(value: f32, lo: f32, hi: f32) -> Option<f32> {
-    let clamped = value.clamp(lo, hi);
-    ((clamped - value).abs() <= value.abs().max(1.0) * 1.0e-3).then_some(clamped)
-}
-
-/// Scale a `TextData` by the factors expressed in ITS OWN axes. `None` when a
-/// limit (font size, tracking, stretch) would silently cut the result short —
-/// the layer then stays the resampled raster, which still matches the preview.
-fn scaled_text_data(td: &TextData, sx: f32, sy: f32) -> Option<TextData> {
-    let mut out = td.clone();
-    let sx = sx.abs();
-    let sy = sy.abs();
-    let font_scale = if text_scales_are_uniform(sx, sy) {
-        (sx + sy) * 0.5
-    } else {
-        sy
-    };
-    out.font_px = clamped_or_bail(
-        out.font_px * font_scale,
-        crate::core::text::MIN_EDITABLE_FONT_PX,
-        crate::core::text::MAX_EDITABLE_FONT_PX,
-    )?;
-    // Font size carries the vertical scale; retain the independent horizontal
-    // component so reopening the Type tool reproduces the transformed glyphs.
-    out.stretch_x = clamped_or_bail(
-        out.stretch_x * sx / font_scale.max(TRANSFORM_EPS),
-        0.01,
-        100.0,
-    )?;
-    out.tracking_px = clamped_or_bail(out.tracking_px * font_scale, -200.0, 500.0)?;
-    for gs in &mut out.glyph_styles {
-        gs.font_px = clamped_or_bail(
-            gs.font_px * font_scale,
-            crate::core::text::MIN_EDITABLE_FONT_PX,
-            crate::core::text::MAX_EDITABLE_FONT_PX,
-        )?;
-    }
-    Some(out)
-}
-
-/// Whether the text's own axes are parallel to the canvas axes, so a
-/// non-uniform canvas scale can be split into font size (vertical) and
-/// `stretch_x` (horizontal). 180° counts: it negates both axes, which the flip
-/// flags absorb.
-fn text_axes_are_canvas_aligned(rotation_deg: f32) -> bool {
-    let a = rotation_deg.rem_euclid(180.0);
-    a <= TRANSFORM_EPS || (180.0 - a) <= TRANSFORM_EPS
-}
-
-fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData> {
-    if ts.quad.is_some() {
-        return None;
-    }
-    if !ts.scale_x.is_finite()
-        || !ts.scale_y.is_finite()
-        || !ts.angle_deg.is_finite()
-        || ts.scale_x.abs() <= TRANSFORM_EPS
-        || ts.scale_y.abs() <= TRANSFORM_EPS
-    {
-        return None;
-    }
-
-    // A non-uniform scale acts along the CANVAS axes, but font size and
-    // stretch_x act along the text's own baseline. Those only agree while the
-    // text is upright, so distorting already-rotated type would reshape the
-    // glyphs along the wrong axis — keep the resampled pixels instead.
-    if !text_scales_are_uniform(ts.scale_x.abs(), ts.scale_y.abs())
-        && !text_axes_are_canvas_aligned(td.rotation_deg)
-    {
-        return None;
-    }
-
-    let mut out = scaled_text_data(td, ts.scale_x.abs(), ts.scale_y.abs())?;
-    let sx_neg = ts.scale_x < 0.0;
-    let sy_neg = ts.scale_y < 0.0;
-    if sx_neg == sy_neg {
-        out.rotation_deg = (td.rotation_deg + ts.angle_deg).rem_euclid(360.0);
-    } else {
-        out.rotation_deg = (ts.angle_deg - td.rotation_deg).rem_euclid(360.0);
-    }
-    if sx_neg {
-        out.flip_x = !out.flip_x;
-    }
-    if sy_neg {
-        out.flip_y = !out.flip_y;
-    }
-    Some(out)
-}
-
-/// Canvas position of a Text layer's upright raster origin — the single point
-/// its rotation, flips and stretch pivot around. Recovered from the layer's own
-/// pixels (like `text_edit_origin_for_layer` does when Type reopens), so a
-/// bitmap that drifted from its `TextData` still anchors where it is drawn.
-fn text_layer_origin(td: &TextData, tiles: &TileMap, offset: (i32, i32)) -> Option<(f32, f32)> {
-    let (placed, delta) = rasterize_placed(td)?;
-    let placed_tiles = TileMap::from_rgba(&placed.rgba, placed.width, placed.height);
-    let (placed_min_x, placed_min_y, _, _) = placed_tiles.content_bounds()?;
-    let (layer_min_x, layer_min_y, _, _) = tiles.content_bounds()?;
-    Some((
-        (offset.0 + layer_min_x - delta.0 - placed_min_x) as f32,
-        (offset.1 + layer_min_y - delta.1 - placed_min_y) as f32,
-    ))
-}
-
-/// Re-render transformed type crisply from its outlines and place it at the
-/// transform's image of the old raster origin.
-///
-/// The gesture maps the text's whole local frame, so its origin simply travels
-/// with it — `M(origin)`. Centring the fresh ink inside the transformed
-/// bounding box instead (what this used to do) only agrees for ink that fills
-/// that box: rotate a ragged or centred block and the committed text landed
-/// several pixels off the preview.
-fn rasterized_text_layer_at_origin(
-    td: &TextData,
-    origin: (f32, f32),
-) -> Option<(TileMap, u32, u32, (i32, i32))> {
-    if !origin.0.is_finite() || !origin.1.is_finite() {
-        return None;
-    }
-    let (raster, delta) = rasterize_placed(td)?;
-    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-    let ox = origin.0.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
-    let oy = origin.1.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32;
-    let offset = (ox.saturating_add(delta.0), oy.saturating_add(delta.1));
-    Some((tiles, raster.width, raster.height, offset))
-}
-
-/// Whether the rotation keeps an axis-aligned box axis-aligned (a multiple of
-/// 90°). Flips arrive as negative scales and are harmless for the symmetric
-/// Rectangle/Ellipse geometry.
-fn axis_preserving_angle(angle_deg: f32) -> bool {
-    let a = angle_deg.rem_euclid(90.0);
-    a <= TRANSFORM_EPS || (90.0 - a) <= TRANSFORM_EPS
-}
-
-/// Map a Shape layer's geometry through the transform: the canvas-space span of
-/// the transformed shape plus its scaled corner radius and stroke width. `None`
-/// when the shape can't represent the transform (a rotated rectangle/ellipse)
-/// and the layer must fall back to a plain raster. Lines survive any rotation —
-/// their two endpoints are simply mapped.
-fn transformed_shape_span(
-    sd: &ShapeData,
-    ls: &LayerOrigState,
-    ts: &TransformState,
-) -> Option<(f32, f32, f32, f32, f32, f32)> {
-    if ts.quad.is_some() {
-        return None;
-    }
-    if !ts.scale_x.is_finite()
-        || !ts.scale_y.is_finite()
-        || !ts.angle_deg.is_finite()
-        || ts.scale_x.abs() <= TRANSFORM_EPS
-        || ts.scale_y.abs() <= TRANSFORM_EPS
-    {
-        return None;
-    }
-    // Linear part of the gesture, R(angle)·S(sx, sy). A shape that cannot
-    // redraw the mapped picture from a mapped box (a rotated rectangle, an
-    // odd-sided polygon turned on its side, a gradient that would stay put)
-    // must leave ShapeData, or the commit re-renders it upright.
-    let (sin, cos) = ts.angle_deg.to_radians().sin_cos();
-    if !sd.survives_linear_map(
-        cos * ts.scale_x,
-        sin * ts.scale_x,
-        -sin * ts.scale_y,
-        cos * ts.scale_y,
-    ) {
-        return None;
-    }
-    let (cx0, cy0, cx1, cy1) = sd.canvas_span(ls.offset);
-    let (nx0, ny0) = ts.transform_point(cx0, cy0);
-    let (nx1, ny1) = ts.transform_point(cx1, cy1);
-    if !(nx0.is_finite() && ny0.is_finite() && nx1.is_finite() && ny1.is_finite()) {
-        return None;
-    }
-    let sx = ts.scale_x.abs();
-    let sy = ts.scale_y.abs();
-    let radius = (sd.corner_radius * sx.min(sy)).max(0.0);
-    let stroke = (sd.stroke_width() * (sx * sy).sqrt()).max(0.0);
-    Some((nx0, ny0, nx1, ny1, radius, stroke))
-}
-
-/// Convert a parametric Shape to an editable Path when an affine rotation can
-/// no longer be represented by ShapeData's axis-aligned span. The geometry and
-/// paint remain vector; only the primitive-specific controls are relinquished.
-fn rotated_shape_as_path(
-    sd: &ShapeData,
-    ls: &LayerOrigState,
-    ts: &TransformState,
-) -> Option<(VectorObjectData, TileMap, u32, u32, (i32, i32))> {
-    if ts.quad.is_some()
-        || !ts.scale_x.is_finite()
-        || !ts.scale_y.is_finite()
-        || !ts.angle_deg.is_finite()
-        || ts.scale_x.abs() <= TRANSFORM_EPS
-        || ts.scale_y.abs() <= TRANSFORM_EPS
-    {
-        return None;
-    }
-    use crate::core::vector::affine::AffineTransform;
-    let pivot = AffineTransform::translate(ts.pivot_cx, ts.pivot_cy);
-    let unpivot = AffineTransform::translate(-ts.pivot_cx, -ts.pivot_cy);
-    let gesture = AffineTransform::translate(ts.translate_x, ts.translate_y)
-        .then(&pivot)
-        .then(&AffineTransform::rotate(ts.angle_deg.to_radians()))
-        .then(&AffineTransform::scale(ts.scale_x, ts.scale_y))
-        .then(&unpivot);
-    let mut object = sd.to_vector_object(ls.offset);
-    object.transform = gesture.then(&object.transform);
-    object.style.stroke_style.width =
-        (object.style.stroke_style.width * (ts.scale_x * ts.scale_y).abs().sqrt()).max(0.0);
-    let raster = crate::core::vector::raster::rasterize(&object)?;
-    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-    Some((object, tiles, raster.width, raster.height, raster.offset))
-}
-
-/// Rebuild a Shape layer at its transformed span and re-render it crisply from
-/// the vector (the analogue of `rasterized_text_layer_at`).
-fn rasterized_shape_layer_at(
-    sd: &ShapeData,
-    span: (f32, f32, f32, f32),
-    radius: f32,
-    stroke: f32,
-) -> Option<(ShapeData, TileMap, u32, u32, (i32, i32))> {
-    let mut style = sd.style;
-    style.stroke_style.width = stroke;
-    let (mut next, off) = ShapeData::from_canvas_span_with_style(
-        sd.kind, span.0, span.1, span.2, span.3, radius, style,
-    );
-    // `from_canvas_span_with_style` returns defaults for these; carry the source
-    // shape's own values so a transform never resets the corner style, polygon
-    // sides or star inner-radius.
-    next.corner_type = sd.corner_type;
-    next.sides = sd.sides;
-    next.star_inner = sd.star_inner;
-    let w = (span.2 - span.0).abs();
-    let h = (span.3 - span.1).abs();
-    next.corner_radius = next.corner_radius.min(w * 0.5).min(h * 0.5).max(0.0);
-    let raster = next.render()?;
-    let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
-    Some((next, tiles, raster.width, raster.height, off))
-}
-
-fn transformable_layer(layer: &Layer) -> bool {
-    !layer.locked
-        && !layer.is_background
-        && matches!(
-            layer.layer_type,
-            LayerType::Raster
-                | LayerType::Text(_)
-                | LayerType::Vector(VectorGeometry::Primitive(_))
-                | LayerType::SmartObject
-        )
-}
-
-fn layer_orig_state(layer: &Layer, layer_idx: usize) -> LayerOrigState {
-    orig_state_with_bounds(layer, layer_idx, layer.tiles.content_bounds())
-}
-
-/// `None` for a layer without one visible pixel. It has nothing to transform,
-/// and its raster rectangle (a fresh layer is canvas-sized) must not stretch
-/// the box every other selected layer is scaled and turned about.
-fn inked_layer_orig_state(layer: &Layer, layer_idx: usize) -> Option<LayerOrigState> {
-    let bounds = layer.tiles.content_bounds()?;
-    Some(orig_state_with_bounds(layer, layer_idx, Some(bounds)))
-}
-
-fn orig_state_with_bounds(
-    layer: &Layer,
-    layer_idx: usize,
-    content_bounds: Option<(i32, i32, i32, i32)>,
-) -> LayerOrigState {
-    let (c_ox, c_oy, c_w, c_h) = match content_bounds {
-        Some((x0, y0, x1, y1)) => (
-            layer.offset.0 + x0,
-            layer.offset.1 + y0,
-            (x1 - x0).max(1) as u32,
-            (y1 - y0).max(1) as u32,
-        ),
-        None => (
-            layer.offset.0,
-            layer.offset.1,
-            layer.width.max(1),
-            layer.height.max(1),
-        ),
-    };
-    LayerOrigState {
-        layer_id: layer.id,
-        layer_idx,
-        layer_type: layer.layer_type.clone(),
-        tiles: layer.tiles.clone(),
-        mask: layer.mask.clone(),
-        offset: layer.offset,
-        width: layer.width,
-        height: layer.height,
-        content_offset: (c_ox, c_oy),
-        content_w: c_w,
-        content_h: c_h,
-        source_to_current: MAT3_IDENTITY,
-    }
-}
-
-fn bake_transform_commit(
-    doc_id: crate::core::document::DocumentId,
-    ts: TransformState,
-    interpolation: crate::core::geometry::InterpolationMode,
-) -> Result<TransformCommitResult, String> {
-    for ls in &ts.layer_states {
-        let Some((_, _, new_w, new_h)) = transformed_content_bounds(&ts, ls) else {
-            return Err("Transform bi huy: kich thuoc output khong hop le".to_string());
-        };
-        if Canvas::checked_rgba_len(new_w, new_h).is_none() {
-            return Err("Transform bi huy: layer output vuot gioi han bo nho".to_string());
-        }
-    }
-
-    let mut cmd = crate::core::command::FreeTransformCommand::new("Free Transform");
-    let mut updates = Vec::with_capacity(ts.layer_states.len());
-    let mut rasterized_text = false;
-
-    for ls in &ts.layer_states {
-        let Some((new_ox, new_oy, new_w, new_h)) = transformed_content_bounds(&ts, ls) else {
-            continue;
-        };
-        let mut after_layer_type = ls.layer_type.clone();
-        let mut crisp_vector_layer = None;
-        if let LayerType::Text(td) = &ls.layer_type {
-            match transformed_text_data(td, &ts) {
-                Some(next_td) => {
-                    // Masked type keeps the resampled raster (its mask follows
-                    // the same affine), so only the metadata is carried over.
-                    if ls.mask.is_none() {
-                        crisp_vector_layer = text_layer_origin(td, &ls.tiles, ls.offset)
-                            .zip(transform_forward_homography(&ts))
-                            .and_then(|(origin, forward)| {
-                                let moved = crate::core::geometry::Homography {
-                                    m: mat3_mul(forward, ls.source_to_current),
-                                }
-                                .apply(origin.0, origin.1);
-                                rasterized_text_layer_at_origin(&next_td, (moved.x, moved.y))
-                            });
-                    }
-                    after_layer_type = LayerType::Text(next_td);
-                }
-                None => {
-                    // The gesture cannot be described by editable type (skew, a
-                    // distort on rotated text, a size past the font limits).
-                    // Keep the exact pixels the preview showed and say so.
-                    after_layer_type = LayerType::Raster;
-                    rasterized_text = true;
-                }
-            }
-        }
-        if let LayerType::Vector(VectorGeometry::Primitive(sd)) = &ls.layer_type {
-            match transformed_shape_span(sd, ls, &ts) {
-                Some((nx0, ny0, nx1, ny1, radius, stroke)) => {
-                    let crisp = if ls.mask.is_none() {
-                        rasterized_shape_layer_at(sd, (nx0, ny0, nx1, ny1), radius, stroke)
-                    } else {
-                        None
-                    };
-                    if let Some((next_sd, tiles, w, h, off)) = crisp {
-                        after_layer_type = LayerType::Vector(VectorGeometry::Primitive(next_sd));
-                        crisp_vector_layer = Some((tiles, w, h, off));
-                    } else if ls.mask.is_some() {
-                        // The mask was resampled to the transformed content
-                        // bounds, so keep the resampled raster and re-anchor the
-                        // geometry to those bounds — handles keep matching what
-                        // is on screen and later edits render at the new size.
-                        let mut next = sd.clone();
-                        next.x0 = nx0 - new_ox as f32;
-                        next.y0 = ny0 - new_oy as f32;
-                        next.x1 = nx1 - new_ox as f32;
-                        next.y1 = ny1 - new_oy as f32;
-                        next.corner_radius = radius;
-                        next.style.stroke_style.width = stroke;
-                        after_layer_type = LayerType::Vector(VectorGeometry::Primitive(next));
-                    } else {
-                        after_layer_type = LayerType::Raster;
-                    }
-                }
-                None => {
-                    if let Some((object, tiles, w, h, off)) = rotated_shape_as_path(sd, ls, &ts) {
-                        after_layer_type = LayerType::Vector(VectorGeometry::Path(object));
-                        crisp_vector_layer = Some((tiles, w, h, off));
-                    } else {
-                        after_layer_type = LayerType::Raster;
-                    }
-                }
-            }
-        }
-
-        let orig_ox = ls.offset.0 as f32;
-        let orig_oy = ls.offset.1 as f32;
-        let orig_w = ls.width as f32;
-        let orig_h = ls.height as f32;
-        let final_source_to_canvas = mat3_mul(
-            transform_forward_homography(&ts)
-                .ok_or_else(|| "Transform bi huy: ma tran khong hop le".to_string())?,
-            ls.source_to_current,
-        );
-        let canvas_to_source = crate::core::geometry::Homography {
-            m: final_source_to_canvas,
-        }
-        .inverse()
-        .ok_or_else(|| "Transform bi huy: ma tran khong the dao".to_string())?;
-
-        let Some(pixel_len) = Canvas::checked_rgba_len(new_w, new_h) else {
-            continue;
-        };
-        // Type and shapes that re-render crisply from their own geometry throw
-        // this resample away; skipping it is the bulk of the wait between Enter
-        // and the committed layer appearing.
-        let mut pixels = vec![
-            0u8;
-            if crisp_vector_layer.is_some() {
-                0
-            } else {
-                pixel_len
-            }
-        ];
-        let src_tiles = &ls.tiles;
-        // A rotated/projective raster needs one bilinear coverage ramp at its
-        // boundary. Do not add a second supersampling filter: that widens a
-        // Photoshop-style one-pixel edge into two visibly different alpha steps.
-        let filter_transform_edge = ts.quad.is_some() || !axis_preserving_angle(ts.angle_deg);
-        pixels
-            .par_chunks_mut((new_w * 4) as usize)
-            .enumerate()
-            .for_each(|(py, row)| {
-                // Transform pixel centres. Canvas-space layer bounds describe
-                // pixel edges, whereas TileMap samplers use integer pixel-centre
-                // coordinates.
-                let canvas_y = py as f32 + new_oy as f32 + 0.5;
-                for px in 0..new_w as usize {
-                    let canvas_x = px as f32 + new_ox as f32 + 0.5;
-                    let src = canvas_to_source.apply(canvas_x, canvas_y);
-                    let (src_x, src_y) = (src.x, src.y);
-                    let edge_x = src_x - orig_ox;
-                    let edge_y = src_y - orig_oy;
-                    if edge_x < 0.0 || edge_y < 0.0 || edge_x >= orig_w || edge_y >= orig_h {
-                        continue;
-                    }
-                    let lx = edge_x - 0.5;
-                    let ly = edge_y - 0.5;
-                    let (r, g, b, a) = match interpolation {
-                        crate::core::geometry::InterpolationMode::Bilinear => {
-                            // The continuous source rectangle extends to
-                            // `width/height`, while pixel centres end at
-                            // `width-1/height-1`. Clamp only after the rectangle
-                            // inclusion test above so bilinear filtering does not
-                            // mix a valid edge pixel with transparent out-of-bounds
-                            // samples and create a wide faded fringe after scaling.
-                            if filter_transform_edge {
-                                let filtered = src_tiles.sample_bilinear(lx, ly);
-                                let clamped = src_tiles.sample_bilinear(
-                                    lx.clamp(0.0, (orig_w - 1.0).max(0.0)),
-                                    ly.clamp(0.0, (orig_h - 1.0).max(0.0)),
-                                );
-                                if filtered.3 == 0 || clamped.3 == 0 {
-                                    filtered
-                                } else {
-                                    // Bilinear's transparent-border contribution is
-                                    // a coverage term. Sharpen that term independently
-                                    // from the source alpha: the inner fringe becomes
-                                    // opaque while the outer fringe carries the single
-                                    // AA ramp, matching Photoshop's transformed edge.
-                                    let coverage = filtered.3 as f32 / clamped.3 as f32;
-                                    let sharp_coverage = (coverage * 2.0).min(1.0);
-                                    (
-                                        filtered.0,
-                                        filtered.1,
-                                        filtered.2,
-                                        (clamped.3 as f32 * sharp_coverage)
-                                            .round()
-                                            .clamp(0.0, 255.0)
-                                            as u8,
-                                    )
-                                }
-                            } else {
-                                src_tiles.sample_bilinear(
-                                    lx.clamp(0.0, (orig_w - 1.0).max(0.0)),
-                                    ly.clamp(0.0, (orig_h - 1.0).max(0.0)),
-                                )
-                            }
-                        }
-                        crate::core::geometry::InterpolationMode::NearestNeighbor => {
-                            src_tiles.sample_nearest(lx, ly)
-                        }
-                    };
-                    if a == 0 {
-                        continue;
-                    }
-                    let i = px * 4;
-                    row[i] = r;
-                    row[i + 1] = g;
-                    row[i + 2] = b;
-                    row[i + 3] = a;
-                }
-            });
-
-        // The layer mask lives in layer-local space, so it must follow the same
-        // affine as the pixels or it keeps cutting the layer at its old position.
-        let new_mask = ls.mask.as_ref().map(|mask| {
-            let mw = mask.width.max(1) as f32;
-            let mh = mask.height.max(1) as f32;
-            let mask_tiles = &mask.tiles;
-            let mut mask_pixels = vec![0u8; pixel_len];
-            mask_pixels
-                .par_chunks_mut((new_w * 4) as usize)
-                .enumerate()
-                .for_each(|(py, row)| {
-                    let canvas_y = py as f32 + new_oy as f32 + 0.5;
-                    for px in 0..new_w as usize {
-                        let canvas_x = px as f32 + new_ox as f32 + 0.5;
-                        let src = canvas_to_source.apply(canvas_x, canvas_y);
-                        let (src_x, src_y) = (src.x, src.y);
-                        // Clamp-to-edge: pixels mapping outside the source mask
-                        // take the nearest edge value instead of a hard reveal.
-                        let lx = (src_x - orig_ox - 0.5).clamp(0.0, mw - 1.0);
-                        let ly = (src_y - orig_oy - 0.5).clamp(0.0, mh - 1.0);
-                        let g = match interpolation {
-                            crate::core::geometry::InterpolationMode::Bilinear => {
-                                mask_tiles.sample_bilinear(lx, ly).0
-                            }
-                            crate::core::geometry::InterpolationMode::NearestNeighbor => {
-                                mask_tiles.sample_nearest(lx, ly).0
-                            }
-                        };
-                        let i = px * 4;
-                        row[i] = g;
-                        row[i + 1] = g;
-                        row[i + 2] = g;
-                        row[i + 3] = 255;
-                    }
-                });
-            crate::core::layer::LayerMask {
-                tiles: crate::core::tile::TileMap::from_rgba(&mask_pixels, new_w, new_h),
-                width: new_w,
-                height: new_h,
-                enabled: mask.enabled,
-                inverted: mask.inverted,
-                // Re-derived on the next clip re-bake for PowerClip content.
-                bake_offset: (0, 0),
-                bake_frame_offset: (0, 0),
-            }
-        });
-
-        let mut new_tiles = if pixels.is_empty() {
-            crate::core::tile::TileMap::new(new_w, new_h)
-        } else {
-            crate::core::tile::TileMap::from_rgba(&pixels, new_w, new_h)
-        };
-        let mut out_w = new_w;
-        let mut out_h = new_h;
-        let mut out_offset = (new_ox, new_oy);
-        if let Some((tiles, width, height, offset)) = crisp_vector_layer {
-            new_tiles = tiles;
-            out_w = width;
-            out_h = height;
-            out_offset = offset;
-        }
-        cmd.add_layer(
-            ls.layer_id,
-            ls.layer_type.clone(),
-            ls.tiles.clone(),
-            ls.mask.clone(),
-            ls.width,
-            ls.height,
-            ls.offset,
-            after_layer_type.clone(),
-            new_tiles.clone(),
-            new_mask.clone(),
-            out_w,
-            out_h,
-            out_offset,
-        );
-        let lineage = matches!(after_layer_type, LayerType::Raster).then(|| {
-            let mut source = ls.clone();
-            source.source_to_current = MAT3_IDENTITY;
-            crate::app::state::RasterTransformLineage {
-                source,
-                source_to_current: final_source_to_canvas,
-                rendered_fingerprint: tile_content_fingerprint(&new_tiles),
-                rendered_offset: out_offset,
-                rendered_mask_fingerprint: new_mask
-                    .as_ref()
-                    .map(|m| tile_content_fingerprint(&m.tiles)),
-            }
-        });
-        updates.push(TransformCommitLayer {
-            layer_id: ls.layer_id,
-            layer_type: after_layer_type,
-            tiles: new_tiles,
-            mask: new_mask,
-            width: out_w,
-            height: out_h,
-            offset: out_offset,
-            lineage,
-        });
-    }
-
-    Ok(TransformCommitResult {
-        doc_id,
-        command: cmd,
-        layers: updates,
-        rasterized_text,
-    })
-}
 
 impl App {
     /// Axis-aligned selection box shown by Move for selected vector primitives
@@ -914,30 +31,68 @@ impl App {
         {
             return None;
         }
-        let canvas = &self.docs.active().canvas;
-        let selected: Vec<_> = canvas
-            .layer_stack
-            .layers
-            .iter()
-            .filter(|l| l.selected && !l.locked && !l.is_background)
-            .collect();
-        if selected.is_empty()
-            || selected.iter().any(|l| {
-                !matches!(
-                    l.layer_type,
-                    LayerType::Vector(VectorGeometry::Primitive(_))
-                )
-            })
-        {
+        // The path box has a single object, or paths alone; any other pick
+        // with a drawn object in it (shapes, paths, type, pictures among
+        // them) gets this one box around all of it, as CorelDRAW frames a
+        // selection. Pictures alone get a box through Ctrl+T only.
+        if self.active_path_transform_box().is_some() {
             return None;
         }
-        let x0 = selected.iter().map(|l| l.offset.0).min()? as f32;
-        let y0 = selected.iter().map(|l| l.offset.1).min()? as f32;
-        let x1 = selected.iter().map(|l| l.offset.0 + l.width as i32).max()? as f32;
-        let y1 = selected
+        let canvas = &self.docs.active().canvas;
+        let stack = &canvas.layer_stack;
+        let picked: Vec<usize> = stack
+            .layers
             .iter()
-            .map(|l| l.offset.1 + l.height as i32)
-            .max()? as f32;
+            .enumerate()
+            .filter(|(_, l)| l.selected && !l.locked && !l.is_background)
+            .map(|(i, _)| i)
+            .collect();
+        // A group stands for its members.
+        let mut targets: Vec<usize> = Vec::new();
+        for &i in &picked {
+            if stack.layers[i].is_group() {
+                targets.extend(stack.group_member_range(i));
+            } else {
+                targets.push(i);
+            }
+        }
+        // Nothing drawn on a layer (a fresh one) does not stretch the box.
+        targets.retain(|&i| {
+            stack.layers.get(i).is_some_and(|l| {
+                l.visible
+                    && crate::core::free_transform::transformable_layer(l)
+                    && !l.tiles.tiles.is_empty()
+            })
+        });
+        let drawn = |l: &crate::core::layer::Layer| {
+            matches!(l.layer_type, LayerType::Vector(_) | LayerType::Text(_))
+        };
+        if targets.is_empty() || !targets.iter().any(|&i| drawn(&stack.layers[i])) {
+            return None;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &i in &targets {
+            let l = &stack.layers[i];
+            // A path by its geometry (its raster may be padded); the rest by
+            // their raster, which the transform session's box is built on.
+            let b = match &l.layer_type {
+                LayerType::Vector(VectorGeometry::Path(_)) => self
+                    .path_canvas_bounds_of(i)
+                    .map(|r| (r.x, r.y, r.x + r.w, r.y + r.h)),
+                _ => Some((
+                    l.offset.0 as f32,
+                    l.offset.1 as f32,
+                    (l.offset.0 + l.width as i32) as f32,
+                    (l.offset.1 + l.height as i32) as f32,
+                )),
+            };
+            if let Some((bx0, by0, bx1, by1)) = b {
+                x0 = x0.min(bx0.floor());
+                y0 = y0.min(by0.floor());
+                x1 = x1.max(bx1.ceil());
+                y1 = y1.max(by1.ceil());
+            }
+        }
         if x1 <= x0 || y1 <= y0 {
             return None;
         }
@@ -1054,194 +209,17 @@ impl App {
             self.move_selection_transform_box()
                 .map(|(corners, _, _)| (corners[0], corners[3]))
         };
-        let canvas = &self.docs.active().canvas;
-        let active_idx = canvas.layer_stack.active_idx;
-
-        let candidates: Vec<usize> = {
-            let sel: Vec<usize> = canvas
-                .layer_stack
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| l.selected && !l.locked && !l.is_background)
-                .map(|(i, _)| i)
-                .collect();
-            if sel.is_empty() {
-                match canvas.layer_stack.layers.get(active_idx) {
-                    Some(l) if !l.locked && !l.is_background => vec![active_idx],
-                    _ => return,
-                }
-            } else {
-                sel
-            }
+        let doc = self.docs.active_mut();
+        let session = crate::core::free_transform::session(
+            &doc.canvas,
+            &mut doc.transform_lineage,
+            None,
+            move_box,
+        );
+        self.edit.transform_state = match session {
+            Ok(ts) => Some(ts),
+            Err(NoSession::NothingToTransform) => return,
         };
-
-        // Path geometry owns an affine model and must never enter the raster
-        // Free Transform worker. Scale/rotate it with the Move-tool handles;
-        // skew/projective requires an explicit Rasterize decision. A mixed
-        // selection is blocked as a whole instead of silently transforming only
-        // the raster members and tearing the selection apart.
-        let selection_contains_path =
-            candidates.iter().any(|&idx| {
-                canvas.layer_stack.layers.get(idx).is_some_and(|layer| {
-                    matches!(layer.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
-                        || (layer.is_group()
-                            && canvas
-                                .layer_stack
-                                .group_member_range(idx)
-                                .any(|member_idx| {
-                                    canvas.layer_stack.layers.get(member_idx).is_some_and(
-                                        |member| {
-                                            matches!(
-                                                member.layer_type,
-                                                LayerType::Vector(VectorGeometry::Path(_))
-                                            )
-                                        },
-                                    )
-                                }))
-                })
-            });
-        if selection_contains_path {
-            self.shell.status_msg =
-                "Path uses affine Move handles; rasterize explicitly for skew/projective"
-                    .to_string();
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-            return;
-        }
-
-        let mut target_indices = Vec::new();
-        let mut seen_targets = std::collections::HashSet::new();
-        let mut preview_layer_states = Vec::new();
-        for idx in candidates {
-            let Some(layer) = canvas.layer_stack.layers.get(idx) else {
-                continue;
-            };
-            if layer.is_group() {
-                preview_layer_states.push(layer_orig_state(layer, idx));
-                for member_idx in canvas.layer_stack.group_member_range(idx) {
-                    let Some(member) = canvas.layer_stack.layers.get(member_idx) else {
-                        continue;
-                    };
-                    if transformable_layer(member) && seen_targets.insert(member_idx) {
-                        target_indices.push(member_idx);
-                    }
-                }
-            } else if transformable_layer(layer) && seen_targets.insert(idx) {
-                target_indices.push(idx);
-            }
-        }
-
-        let mut layer_states: Vec<LayerOrigState> = Vec::with_capacity(target_indices.len());
-        for pass in 0..2 {
-            for &idx in &target_indices {
-                let is_primary = idx == active_idx;
-                if (pass == 0) != is_primary {
-                    continue;
-                }
-                let l = &canvas.layer_stack.layers[idx];
-                if let Some(ls) = inked_layer_orig_state(l, idx) {
-                    layer_states.push(ls);
-                }
-            }
-        }
-        if layer_states.is_empty() {
-            return;
-        }
-
-        let (u_x0, u_y0, u_x1, u_y1) = match move_box {
-            Some((top_left, bottom_right)) => (
-                top_left.0 as i32,
-                top_left.1 as i32,
-                bottom_right.0 as i32,
-                bottom_right.1 as i32,
-            ),
-            None => layer_states.iter().fold(
-                (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
-                |(x0, y0, x1, y1), ls| {
-                    (
-                        x0.min(ls.content_offset.0),
-                        y0.min(ls.content_offset.1),
-                        x1.max(ls.content_offset.0 + ls.content_w as i32),
-                        y1.max(ls.content_offset.1 + ls.content_h as i32),
-                    )
-                },
-            ),
-        };
-        let orig_offset = (u_x0, u_y0);
-        let orig_w = (u_x1 - u_x0).max(1) as u32;
-        let orig_h = (u_y1 - u_y0).max(1) as u32;
-        let pivot_cx = u_x0 as f32 + orig_w as f32 / 2.0;
-        let pivot_cy = u_y0 as f32 + orig_h as f32 / 2.0;
-
-        // Reuse the untouched raster source from preceding Free Transform
-        // commits. The current layer bounds above remain the UI box for this
-        // session, while the worker receives the original pixels plus the
-        // accumulated source→current mapping. Any intervening pixel or mask edit
-        // changes a fingerprint and automatically breaks the lineage.
-        let doc_id = self.docs.active().id;
-        for ls in &mut layer_states {
-            if !matches!(ls.layer_type, LayerType::Raster) {
-                continue;
-            }
-            let key = (doc_id, ls.layer_id);
-            let current_fp = tile_content_fingerprint(&ls.tiles);
-            let current_mask_fp = ls.mask.as_ref().map(|m| tile_content_fingerprint(&m.tiles));
-            match self.edit.raster_transform_lineage.get(&key) {
-                Some(lineage)
-                    if lineage.rendered_fingerprint == current_fp
-                        && lineage.rendered_mask_fingerprint == current_mask_fp =>
-                {
-                    // A plain move since that commit (Move tool, arrow keys,
-                    // Align, a drag-only Free Transform) shifted the offset but
-                    // not the pixels. Carry the shift, or this commit would
-                    // render the layer back where the last one left it.
-                    let dx = (ls.offset.0 - lineage.rendered_offset.0) as f32;
-                    let dy = (ls.offset.1 - lineage.rendered_offset.1) as f32;
-                    let shift = [1.0, 0.0, dx, 0.0, 1.0, dy, 0.0, 0.0, 1.0];
-                    let layer_idx = ls.layer_idx;
-                    *ls = lineage.source.clone();
-                    ls.layer_idx = layer_idx;
-                    ls.source_to_current = mat3_mul(shift, lineage.source_to_current);
-                }
-                Some(_) => {
-                    self.edit.raster_transform_lineage.remove(&key);
-                }
-                None => {}
-            }
-        }
-
-        let layer_id = layer_states[0].layer_id;
-        let layer_idx = layer_states[0].layer_idx;
-
-        self.edit.transform_state = Some(TransformState {
-            layer_states,
-            preview_layer_states,
-            layer_idx,
-            layer_id,
-            orig_offset,
-            orig_w,
-            orig_h,
-            scale_x: 1.0,
-            scale_y: 1.0,
-            angle_deg: 0.0,
-            translate_x: 0.0,
-            translate_y: 0.0,
-            pivot_cx,
-            pivot_cy,
-            drag_handle: None,
-            drag_start_cx: 0.0,
-            drag_start_cy: 0.0,
-            drag_start_sx: 1.0,
-            drag_start_sy: 1.0,
-            drag_start_angle: 0.0,
-            drag_start_tx: 0.0,
-            drag_start_ty: 0.0,
-            quad: None,
-            drag_start_quad: [(0.0, 0.0); 4],
-            mode: crate::app::state::TransformMode::Free,
-        });
 
         self.update_transform_preview();
         if select_transform_tool {
@@ -1312,153 +290,99 @@ impl App {
         true
     }
 
+    /// Commit the session with `layer.free_transform`, the command an agent
+    /// runs: a plain move at once, anything else as a job the frame loop takes
+    /// in (`on_free_transform_finished`).
     pub fn commit_transform(&mut self) {
-        let ts = match self.edit.transform_state.as_ref() {
-            Some(t) => t.clone(),
-            None => return,
-        };
-
-        if let Some((dx, dy)) = translate_only(&ts) {
-            let Some(ts) = self.edit.transform_state.take() else {
-                return;
-            };
-            self.edit.transform_snap_guides.clear();
-            self.clear_transform_preview();
-
-            if dx == 0 && dy == 0 {
-                self.sync_compositor_viewport();
-                self.recomposite();
-                self.edit.tools.select(crate::tools::ToolId::Move);
-                self.shell.status_msg = "Transform unchanged".to_string();
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-                return;
-            }
-
-            let layer_ids: Vec<u32> = ts.layer_states.iter().map(|ls| ls.layer_id).collect();
-            {
-                let layers = &mut self.docs.active_mut().canvas.layer_stack.layers;
-                for layer in layers.iter_mut() {
-                    if layer_ids.contains(&layer.id) {
-                        layer.offset.0 = layer.offset.0.saturating_add(dx);
-                        layer.offset.1 = layer.offset.1.saturating_add(dy);
-                    }
-                }
-            }
-            let cmd = crate::core::command::TranslateLayerCommand::from_applied_move(
-                layer_ids,
-                dx,
-                dy,
-                &self.docs.active().canvas.layer_stack,
-            );
-            self.docs.active_mut().canvas.record(Box::new(cmd));
-            self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-            self.edit.tools.select(crate::tools::ToolId::Move);
-            self.shell.status_msg = "Transform applied".to_string();
-            return;
-        }
-
         let Some(ts) = self.edit.transform_state.take() else {
             return;
         };
         self.edit.transform_snap_guides.clear();
-        let doc_id = self.docs.active().id;
-        let interpolation = self.shell.ui.transform_interpolation;
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.edit.pending_transform_commit = Some(rx);
-        self.edit.tools.select(crate::tools::ToolId::Move);
-        self.shell.status_msg = "Applying transform...".to_string();
-        rayon::spawn(move || {
-            let t0 = std::time::Instant::now();
-            let result = bake_transform_commit(doc_id, ts, interpolation);
-            // Diagnostic: the modal lock holds until this bake lands.
-            let text = format!(
-                "transform bake {} ms (ok={})",
-                t0.elapsed().as_millis(),
-                result.is_ok()
-            );
-            eprintln!("iai[perf]: {text}");
-            crate::diag::note("perf", &text);
-            let _ = tx.send(result);
+        let interpolation = match self.shell.ui.transform_interpolation {
+            crate::core::geometry::InterpolationMode::Bilinear => "bilinear",
+            crate::core::geometry::InterpolationMode::NearestNeighbor => "nearest",
+        };
+        let (x0, y0) = (ts.orig_offset.0 as f32, ts.orig_offset.1 as f32);
+        let mut args = serde_json::json!({
+            "doc": self.docs.active().id.0,
+            "layers": ts.layer_states.iter().map(|ls| ls.layer_id).collect::<Vec<_>>(),
+            "scaleX": ts.scale_x,
+            "scaleY": ts.scale_y,
+            "angle": ts.angle_deg,
+            "dx": ts.translate_x,
+            "dy": ts.translate_y,
+            "pivot": [ts.pivot_cx, ts.pivot_cy],
+            "bounds": [x0, y0, x0 + ts.orig_w as f32, y0 + ts.orig_h as f32],
+            "resample": interpolation,
         });
+        if let Some(quad) = ts.quad {
+            args["corners"] = quad.map(|(x, y)| [x, y]).to_vec().into();
+        }
+        self.edit.tools.select(crate::tools::ToolId::Move);
+        match self.start_command("layer.free_transform", args) {
+            Some(iai_engine::Reply::Started { job }) => {
+                self.edit.pending_transform_commit = Some(job);
+                self.shell.status_msg = "Applying transform...".to_string();
+            }
+            Some(iai_engine::Reply::Done { .. }) => {
+                // A plain move, or none: no resample to wait for.
+                self.clear_transform_preview();
+                self.sync_compositor_viewport();
+                self.recomposite();
+                self.edit.warp_after_transform_commit = false;
+            }
+            None => {
+                self.edit.warp_after_transform_commit = false;
+                self.clear_transform_preview();
+                self.recomposite();
+            }
+        }
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
     }
 
+    /// Take in a finished commit (the frame loop does this as it polls the
+    /// engine); kept for callers that wait on `pending_transform_commit`.
     pub fn poll_transform_commit(&mut self) {
-        let Some(rx) = self.edit.pending_transform_commit.take() else {
+        if self.edit.pending_transform_commit.is_some() {
+            self.poll_engine();
+        }
+    }
+
+    /// The commit's job has ended: the preview goes before its result lands.
+    /// Left on, the redraw of the landed layers would draw them through the
+    /// preview's transform once more, and that picture stayed on screen until
+    /// the next redraw.
+    pub(in crate::app) fn before_transform_lands(
+        &mut self,
+        ended: &[(iai_engine::JobId, &'static str)],
+    ) {
+        let ours = self.edit.pending_transform_commit;
+        if ended.iter().any(|(job, _)| Some(*job) == ours) {
+            self.clear_transform_preview();
+        }
+    }
+
+    /// `layer.free_transform` ended: the preview gives way to the result, and
+    /// a Warp asked for meanwhile starts.
+    pub(in crate::app) fn on_free_transform_finished(
+        &mut self,
+        job: iai_engine::JobId,
+        error: Option<&iai_engine::CmdError>,
+    ) {
+        if self.edit.pending_transform_commit != Some(job) {
             return;
-        };
-        match rx.try_recv() {
-            Ok(Ok(result)) => {
-                self.clear_transform_preview();
-                if self.docs.active().id == result.doc_id {
-                    for update in result.layers {
-                        let layer_id = update.layer_id;
-                        let lineage = update.lineage.clone();
-                        if let Some(layer) = self
-                            .docs
-                            .active_mut()
-                            .canvas
-                            .layer_stack
-                            .layers
-                            .iter_mut()
-                            .find(|l| l.id == update.layer_id)
-                        {
-                            layer.tiles = update.tiles;
-                            layer.mask = update.mask;
-                            layer.width = update.width;
-                            layer.height = update.height;
-                            layer.offset = update.offset;
-                            layer.layer_type = update.layer_type;
-                        }
-                        let key = (result.doc_id, layer_id);
-                        if let Some(lineage) = lineage {
-                            self.edit.raster_transform_lineage.insert(key, lineage);
-                        } else {
-                            self.edit.raster_transform_lineage.remove(&key);
-                        }
-                    }
-                    self.docs
-                        .active_mut()
-                        .canvas
-                        .record(Box::new(result.command));
-                    self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-                    self.shell.status_msg = if result.rasterized_text {
-                        "Transform applied — chu da chuyen thanh anh (khong sua lai duoc bang Type)"
-                            .to_string()
-                    } else {
-                        "Transform applied".to_string()
-                    };
-                    if self.edit.warp_after_transform_commit {
-                        self.edit.warp_after_transform_commit = false;
-                        self.begin_warp();
-                    }
-                } else {
-                    self.edit.warp_after_transform_commit = false;
-                    self.shell.status_msg = "Transform finished for another document".to_string();
-                }
-            }
-            Ok(Err(err)) => {
-                self.edit.warp_after_transform_commit = false;
-                self.clear_transform_preview();
-                self.recomposite();
-                self.shell.status_msg = err;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.edit.pending_transform_commit = Some(rx);
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.edit.warp_after_transform_commit = false;
-                self.clear_transform_preview();
-                self.recomposite();
-                self.shell.status_msg = "Transform worker stopped".to_string();
-            }
+        }
+        self.edit.pending_transform_commit = None;
+        self.clear_transform_preview();
+        if error.is_some() {
+            self.edit.warp_after_transform_commit = false;
+            self.recomposite();
+            return;
+        }
+        if std::mem::take(&mut self.edit.warp_after_transform_commit) {
+            self.begin_warp();
         }
     }
 
@@ -2107,6 +1031,13 @@ impl App {
         let Some(ts) = self.edit.transform_state.as_mut() else {
             return;
         };
+        // A path stays a path only under scale, turn and move.
+        if mode != crate::app::state::TransformMode::Free && ts.has_path() {
+            self.shell.status_msg = "Có đường path trong vùng chọn: Skew / Distort / Perspective \
+                 sẽ biến path thành ảnh — Rasterize path trước nếu muốn kéo méo"
+                .to_string();
+            return;
+        }
         if mode != crate::app::state::TransformMode::Free && ts.quad.is_none() {
             let c = ts.corners();
             ts.quad = Some([c[0], c[1], c[3], c[2]]);
@@ -2282,7 +1213,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::canvas::Canvas;
+    use crate::core::shape::ShapeData;
     use crate::core::shape::ShapeKind;
+    use crate::core::text::rasterize_placed;
 
     #[test]
     fn shift_constrains_transform_move_to_horizontal_axis() {
@@ -2444,6 +1378,7 @@ mod tests {
             content_w: 2,
             content_h: 2,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2516,6 +1451,7 @@ mod tests {
             content_w: 8,
             content_h: 8,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         let make_state = |ls: LayerOrigState, offset, w, h, angle| TransformState {
             layer_states: vec![ls],
@@ -2608,6 +1544,7 @@ mod tests {
             content_w,
             content_h,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2856,6 +1793,7 @@ mod tests {
             content_w,
             content_h,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2951,6 +1889,7 @@ mod tests {
             content_w,
             content_h,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -3029,6 +1968,7 @@ mod tests {
             content_w,
             content_h,
             source_to_current: MAT3_IDENTITY,
+            before: None,
         };
         (sd, ls)
     }
@@ -3453,6 +2393,14 @@ mod tests {
             layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(sd));
             layer.selected = true;
             canvas.layer_stack.active_idx = idx;
+            // A second shape picked with it, down and to the right: the Move
+            // box frames both (one alone has the path box), its top-left
+            // corner the thick shape's.
+            let second = canvas.layer_stack.layers[idx].duplicate(9001);
+            let mut second = second;
+            second.offset = (off.0 + 300, off.1 + 300);
+            second.selected = true;
+            canvas.layer_stack.layers.push(second);
         }
         app.edit.tools.select(crate::tools::ToolId::Move);
         app.edit.view.zoom = 4.0;

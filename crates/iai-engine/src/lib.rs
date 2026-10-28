@@ -27,7 +27,7 @@ pub use events::EngineEvent;
 pub use jobs::{JobCtx, JobId, JobState, catching_panics};
 pub use policy::{Policy, Source};
 pub use session::{BatchFailure, BatchReply, CommandCall, Engine, MAX_BATCH, Reply, Session};
-pub use workspace::{HeadlessWorkspace, Workspace};
+pub use workspace::{HeadlessWorkspace, Tabs, Workspace};
 
 #[cfg(test)]
 mod tests;

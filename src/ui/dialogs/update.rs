@@ -5,6 +5,32 @@ use super::*;
 use crate::ui::{UpdateStage, UpdateView};
 
 const UPDATE_DIALOG_WIDTH: f32 = 380.0;
+/// The list of what is new scrolls past this height.
+const NEWS_HEIGHT: f32 = 260.0;
+
+/// What the update brings, entry by entry, before the person decides.
+fn news_list(ui: &mut egui::Ui, news: &[crate::update::News]) {
+    if news.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Bản mới có gì").strong());
+    egui::ScrollArea::vertical()
+        .id_salt("update_news")
+        .max_height(NEWS_HEIGHT)
+        .show(ui, |ui| {
+            for entry in news {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&entry.date).small().weak());
+                for point in &entry.points {
+                    ui.horizontal_top(|ui| {
+                        ui.label("•");
+                        ui.add(egui::Label::new(point).wrap());
+                    });
+                }
+            }
+        });
+}
 
 /// What the title bar's button says while the update has something to show.
 pub(crate) fn update_button_label(update: &UpdateView) -> Option<String> {
@@ -72,6 +98,7 @@ pub(crate) fn update_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                         "Bản mới: {}   ·   Bản đang dùng: {}",
                         update.new_day, update.this_day
                     )));
+                    news_list(ui, &update.news);
                     ui.add_space(8.0);
                     ui.label(format!(
                         "Bấm «Cập nhật»: app tải bản mới (khoảng {} MB) rồi tự mở lại. \
@@ -96,6 +123,7 @@ pub(crate) fn update_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                         "Khởi động lại để dùng ngay. Nếu chưa tiện, bản mới sẽ tự được dùng \
                          ở lần mở app sau.",
                     );
+                    news_list(ui, &update.news);
                 }
                 UpdateStage::CheckFailed(why) | UpdateStage::DownloadFailed(why) => {
                     let heading = match update.stage {
@@ -168,8 +196,52 @@ mod tests {
             this_day: "07/10/2026 12:53".to_string(),
             new_day: "12/10/2026 10:59".to_string(),
             megabytes: 51,
+            news: vec![crate::update::News {
+                date: "12/10/2026".to_string(),
+                points: vec!["Xếp ảnh in có thêm cỡ 5×5".to_string()],
+            }],
         };
         data
+    }
+
+    /// The texts the dialog shows for `data`.
+    fn texts(data: &UiData) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut shown = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 700.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                update_dialog(ui.ctx(), data, &mut UiActions::default())
+            });
+            shown = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+        shown
+    }
+
+    /// The offer says what the new build brings before anything is fetched,
+    /// and says nothing of it when the build on offer carries no word.
+    #[test]
+    fn the_offer_says_what_is_new_before_the_update_is_asked_for() {
+        let offered = texts(&view(UpdateStage::Available));
+        assert!(offered.iter().any(|t| t == "Bản mới có gì"), "{offered:?}");
+        assert!(offered.iter().any(|t| t == "Xếp ảnh in có thêm cỡ 5×5"));
+        assert!(offered.iter().any(|t| t.contains("Cập nhật")));
+        let mut silent = view(UpdateStage::Available);
+        silent.chrome.update.news.clear();
+        assert!(!texts(&silent).iter().any(|t| t == "Bản mới có gì"));
     }
 
     /// The dialog drawn twice, a click on the button labelled `button` sent,

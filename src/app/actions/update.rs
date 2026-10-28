@@ -41,12 +41,17 @@ fn view(status: Status, show_dialog: bool) -> UpdateView {
         Status::CheckFailed(why) => (UpdateStage::CheckFailed(why), None),
         Status::DownloadFailed(why) => (UpdateStage::DownloadFailed(why), None),
     };
+    let own = crate::update::news_of(crate::update::OWN_NEWS);
     UpdateView {
         stage,
         show_dialog,
         this_day: crate::update::this_build().day(),
         new_day: release.as_ref().map(|r| r.day()).unwrap_or_default(),
         megabytes: release.as_ref().map_or(0, |r| r.megabytes()),
+        news: release
+            .as_ref()
+            .map(|r| crate::update::news_unseen(&r.notes, &own))
+            .unwrap_or_default(),
     }
 }
 
@@ -202,6 +207,7 @@ mod tests {
                 bytes: 28_521_630,
                 sha256: String::new(),
             }],
+            notes: Vec::new(),
         }
     }
 

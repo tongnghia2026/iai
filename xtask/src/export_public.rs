@@ -96,10 +96,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             out.display()
         ));
     }
-    if !git(&root, &["status", "--porcelain"])?
-        .trim_ascii()
-        .is_empty()
-    {
+    if !worktree_clean(&root)? {
         return Err("commit or stash first: the export is of HEAD".to_owned());
     }
 
@@ -221,9 +218,24 @@ struct File {
     executable: bool,
 }
 
+/// `git args` in `root`, files read as stored: no line endings turned.
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    run_git(root, &["-c", "core.autocrlf=false"], args)
+}
+
+/// Whether nothing is changed or new in the checkout at `root`. Asked as
+/// the checkout is set up: one whose line endings were turned on the way
+/// out (Windows, `core.autocrlf`) is no change, and with the setting
+/// forced off git would call every text file changed.
+fn worktree_clean(root: &Path) -> Result<bool, String> {
+    Ok(run_git(root, &[], &["status", "--porcelain"])?
+        .trim_ascii()
+        .is_empty())
+}
+
+fn run_git(root: &Path, config: &[&str], args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
-        .args(["-c", "core.autocrlf=false"])
+        .args(config)
         .args(args)
         .current_dir(root)
         .output()
@@ -506,6 +518,49 @@ fn settle_lock(out: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 27/10: on the release builder (Windows, `core.autocrlf` on) every
+    /// file was checked out with CRLF; asked with the setting forced off,
+    /// git called all 649 of them changed and the export would not run.
+    #[test]
+    fn a_checkout_with_its_line_endings_turned_is_clean() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("xtask-crlf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let run = |args: &[&str]| -> Result<(), String> {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=x", "-c", "user.email=x@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .map_err(|e| e.to_string())?
+                .status
+                .success();
+            if ok {
+                Ok(())
+            } else {
+                Err(format!("git {}", args.join(" ")))
+            }
+        };
+        let file = dir.join("a.txt");
+        let write = |text: &str| std::fs::write(&file, text).map_err(|e| e.to_string());
+        run(&["init", "-q"])?;
+        write("one\ntwo\n")?;
+        run(&["add", "a.txt"])?;
+        run(&["commit", "-q", "-m", "a"])?;
+        // Checked out again as a Windows clone writes it.
+        run(&["config", "core.autocrlf", "true"])?;
+        std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        run(&["checkout", "--", "a.txt"])?;
+        let crlf = std::fs::read(&file).map_err(|e| e.to_string())?;
+        assert_eq!(crlf, b"one\r\ntwo\r\n");
+        assert!(worktree_clean(&dir)?);
+        write("one\r\nthree\r\n")?;
+        assert!(!worktree_clean(&dir)?);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     #[test]
     fn a_pro_module_is_found_behind_its_cfg_and_other_attributes() {

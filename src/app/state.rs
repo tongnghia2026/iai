@@ -41,286 +41,10 @@ pub struct ViewState {
     pub zoom: f32,
 }
 
-/// Which of the 8 edge/corner handles (or center) is being dragged.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TransformHandle {
-    TopLeft,
-    TopCenter,
-    TopRight,
-    MiddleLeft,
-    MiddleRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-    Center,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TransformMode {
-    #[default]
-    Free,
-    Skew,
-    Distort,
-    Perspective,
-}
-
-/// Snapshot of one layer's state before a free transform.
-#[derive(Clone)]
-pub struct LayerOrigState {
-    pub layer_id: u32,
-    pub layer_idx: usize,
-    pub layer_type: crate::core::layer::LayerType,
-    pub tiles: crate::core::tile::TileMap,
-    pub mask: Option<crate::core::layer::LayerMask>,
-    pub offset: (i32, i32),
-    pub width: u32,
-    pub height: u32,
-    pub content_offset: (i32, i32),
-    pub content_w: u32,
-    pub content_h: u32,
-    /// Original-source canvas to the layer's canvas placement at the start of
-    /// this session. Identity for the first transform; accumulated for later
-    /// raster transforms so commits never resample an already filtered result.
-    pub source_to_current: [f32; 9],
-}
-
-#[derive(Clone)]
-pub struct RasterTransformLineage {
-    pub source: LayerOrigState,
-    pub source_to_current: [f32; 9],
-    pub rendered_fingerprint: u64,
-    /// Where the rendered pixels were placed. A later plain move changes only
-    /// the layer offset, so the next session adds that shift to
-    /// `source_to_current` instead of rendering at the old place.
-    pub rendered_offset: (i32, i32),
-    /// The mask the commit produced. Painting the mask afterwards leaves the
-    /// pixel fingerprint alone, so this is what tells the stored source's mask
-    /// is out of date.
-    pub rendered_mask_fingerprint: Option<u64>,
-}
-
-/// All state for an ongoing Ctrl+T free-transform session.
-/// Lives in App and is None when no transform is active.
-#[derive(Clone)]
-pub struct TransformState {
-    pub layer_states: Vec<LayerOrigState>,
-    pub preview_layer_states: Vec<LayerOrigState>,
-    #[allow(dead_code)]
-    pub layer_idx: usize,
-    #[allow(dead_code)]
-    pub layer_id: u32,
-    pub orig_offset: (i32, i32),
-    pub orig_w: u32,
-    pub orig_h: u32,
-    pub scale_x: f32,
-    pub scale_y: f32,
-    pub angle_deg: f32,
-    pub translate_x: f32,
-    pub translate_y: f32,
-    pub pivot_cx: f32,
-    pub pivot_cy: f32,
-    pub drag_handle: Option<Option<TransformHandle>>,
-    pub drag_start_cx: f32,
-    pub drag_start_cy: f32,
-    pub drag_start_sx: f32,
-    pub drag_start_sy: f32,
-    pub drag_start_angle: f32,
-    pub drag_start_tx: f32,
-    pub drag_start_ty: f32,
-    /// Destination corners in TL, TR, BR, BL order for non-affine modes.
-    pub quad: Option<[(f32, f32); 4]>,
-    pub drag_start_quad: [(f32, f32); 4],
-    pub mode: TransformMode,
-}
-
-pub struct TransformCommitLayer {
-    pub layer_id: u32,
-    pub layer_type: crate::core::layer::LayerType,
-    pub tiles: crate::core::tile::TileMap,
-    pub mask: Option<crate::core::layer::LayerMask>,
-    pub width: u32,
-    pub height: u32,
-    pub offset: (i32, i32),
-    pub lineage: Option<RasterTransformLineage>,
-}
-
-pub struct TransformCommitResult {
-    pub doc_id: crate::core::document::DocumentId,
-    pub command: crate::core::command::FreeTransformCommand,
-    pub layers: Vec<TransformCommitLayer>,
-    /// A Text layer had to give up its editable type because the gesture (skew,
-    /// a distort on rotated text, a size past the font limits) cannot be
-    /// described by `TextData`. The status bar says so instead of letting the
-    /// user discover it when the Type tool refuses to reopen the layer.
-    pub rasterized_text: bool,
-}
-
-impl TransformState {
-    /// Forward-transform a canvas point through the current transform.
-    pub fn transform_point(&self, cx: f32, cy: f32) -> (f32, f32) {
-        if let Some(quad) = self.quad {
-            let w = self.orig_w.max(1) as f32;
-            let h = self.orig_h.max(1) as f32;
-            let u = (cx - self.orig_offset.0 as f32) / w;
-            let v = (cy - self.orig_offset.1 as f32) / h;
-            if let Some(map) = crate::core::geometry::Homography::square_to_quad(
-                quad.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
-            ) {
-                let p = map.apply(u, v);
-                return (p.x, p.y);
-            }
-        }
-        let rad = self.angle_deg.to_radians();
-        let c = rad.cos();
-        let s = rad.sin();
-        let dx = cx - self.pivot_cx;
-        let dy = cy - self.pivot_cy;
-        let nx = self.pivot_cx + self.translate_x + c * self.scale_x * dx - s * self.scale_y * dy;
-        let ny = self.pivot_cy + self.translate_y + s * self.scale_x * dx + c * self.scale_y * dy;
-        (nx, ny)
-    }
-
-    /// Inverse map from destination canvas coordinates back to original canvas.
-    pub fn inverse_canvas_point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
-        if let Some(quad) = self.quad {
-            let map = crate::core::geometry::Homography::square_to_quad(
-                quad.map(|(x, y)| crate::core::geometry::Point::new(x, y)),
-            )?;
-            let uv = map.inverse()?.apply(x, y);
-            return Some((
-                self.orig_offset.0 as f32 + uv.x * self.orig_w as f32,
-                self.orig_offset.1 as f32 + uv.y * self.orig_h as f32,
-            ));
-        }
-        let (a, b, c, d) = self.inv_matrix();
-        let dx = x - (self.pivot_cx + self.translate_x);
-        let dy = y - (self.pivot_cy + self.translate_y);
-        Some((
-            self.pivot_cx + a * dx + b * dy,
-            self.pivot_cy + c * dx + d * dy,
-        ))
-    }
-
-    /// Inverse canvas-to-canvas homography used by GPU preview and CPU commit.
-    pub fn inverse_homography(&self) -> Option<[f32; 9]> {
-        let src = [
-            crate::core::geometry::Point::new(self.orig_offset.0 as f32, self.orig_offset.1 as f32),
-            crate::core::geometry::Point::new(
-                self.orig_offset.0 as f32 + self.orig_w as f32,
-                self.orig_offset.1 as f32,
-            ),
-            crate::core::geometry::Point::new(
-                self.orig_offset.0 as f32 + self.orig_w as f32,
-                self.orig_offset.1 as f32 + self.orig_h as f32,
-            ),
-            crate::core::geometry::Point::new(
-                self.orig_offset.0 as f32,
-                self.orig_offset.1 as f32 + self.orig_h as f32,
-            ),
-        ];
-        let dst = if let Some(q) = self.quad {
-            q.map(|(x, y)| crate::core::geometry::Point::new(x, y))
-        } else {
-            src.map(|p| {
-                let (x, y) = self.transform_point(p.x, p.y);
-                crate::core::geometry::Point::new(x, y)
-            })
-        };
-        let unit_to_src = crate::core::geometry::Homography::square_to_quad(src)?;
-        let dst_to_unit = crate::core::geometry::Homography::square_to_quad(dst)?.inverse()?;
-        let a = dst_to_unit.m;
-        let b = unit_to_src.m;
-        let mut out = [0.0; 9];
-        for r in 0..3 {
-            for c in 0..3 {
-                out[r * 3 + c] = (0..3).map(|k| b[r * 3 + k] * a[k * 3 + c]).sum();
-            }
-        }
-        Some(out)
-    }
-
-    /// Inverse matrix coefficients used by the GPU shader.
-    /// inv = M⁻¹ where M = [[cos*sx, -sin*sy], [sin*sx, cos*sy]].
-    pub fn inv_matrix(&self) -> (f32, f32, f32, f32) {
-        let rad = self.angle_deg.to_radians();
-        let c = rad.cos();
-        let s = rad.sin();
-        let sx = if self.scale_x.abs() < 1e-6 {
-            1e-6_f32
-        } else {
-            self.scale_x
-        };
-        let sy = if self.scale_y.abs() < 1e-6 {
-            1e-6_f32
-        } else {
-            self.scale_y
-        };
-        (c / sx, s / sx, -s / sy, c / sy)
-    }
-
-    /// Positions of the 8 handles in canvas space.
-    /// Order: TL, TC, TR, ML, MR, BL, BC, BR.
-    pub fn handle_positions(&self) -> [(f32, f32); 8] {
-        if let Some([tl, tr, br, bl]) = self.quad {
-            let mid = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
-            return [
-                tl,
-                mid(tl, tr),
-                tr,
-                mid(tl, bl),
-                mid(tr, br),
-                bl,
-                mid(bl, br),
-                br,
-            ];
-        }
-        let ox = self.orig_offset.0 as f32;
-        let oy = self.orig_offset.1 as f32;
-        let w = self.orig_w as f32;
-        let h = self.orig_h as f32;
-        [
-            self.transform_point(ox, oy),
-            self.transform_point(ox + w / 2.0, oy),
-            self.transform_point(ox + w, oy),
-            self.transform_point(ox, oy + h / 2.0),
-            self.transform_point(ox + w, oy + h / 2.0),
-            self.transform_point(ox, oy + h),
-            self.transform_point(ox + w / 2.0, oy + h),
-            self.transform_point(ox + w, oy + h),
-        ]
-    }
-
-    /// Bounding box corners in canvas space (TL, TR, BL, BR).
-    pub fn corners(&self) -> [(f32, f32); 4] {
-        let ox = self.orig_offset.0 as f32;
-        let oy = self.orig_offset.1 as f32;
-        let w = self.orig_w as f32;
-        let h = self.orig_h as f32;
-        [
-            self.transform_point(ox, oy),
-            self.transform_point(ox + w, oy),
-            self.transform_point(ox, oy + h),
-            self.transform_point(ox + w, oy + h),
-        ]
-    }
-
-    /// Local coords (relative to pivot) for each handle — used in scale math.
-    pub fn handle_local(&self, handle: TransformHandle) -> (f32, f32) {
-        let hw = self.orig_w as f32 / 2.0;
-        let hh = self.orig_h as f32 / 2.0;
-        match handle {
-            TransformHandle::TopLeft => (-hw, -hh),
-            TransformHandle::TopCenter => (0.0, -hh),
-            TransformHandle::TopRight => (hw, -hh),
-            TransformHandle::MiddleLeft => (-hw, 0.0),
-            TransformHandle::MiddleRight => (hw, 0.0),
-            TransformHandle::BottomLeft => (-hw, hh),
-            TransformHandle::BottomCenter => (0.0, hh),
-            TransformHandle::BottomRight => (hw, hh),
-            TransformHandle::Center => (0.0, 0.0),
-        }
-    }
-}
+pub use crate::core::free_transform::{
+    LayerOrigState, RasterTransformLineage, TransformCommitLayer, TransformCommitResult,
+    TransformHandle, TransformMode, TransformState,
+};
 
 pub struct InputState {
     pub mouse_x: f32,
@@ -1452,15 +1176,8 @@ impl App {
         let settings_snap = settings.snap_default;
         Self {
             docs: DocumentSession {
-                documents: vec![Document::new(
-                    DocumentId(1),
-                    crate::core::DEFAULT_W,
-                    crate::core::DEFAULT_H,
-                )],
-                active_doc_idx: 0,
-                doc_mru: vec![DocumentId(1)],
+                tabs: iai_engine::Tabs::window(crate::core::DEFAULT_W, crate::core::DEFAULT_H),
                 current_file: None,
-                next_doc_id: 2,
                 pending_close_doc_idx: None,
                 pending_exit_docs: std::collections::VecDeque::new(),
                 next_pdf_group_id: 1,
@@ -1587,7 +1304,7 @@ impl App {
                 selected_guide: None,
                 transform_snap_guides: Vec::new(),
                 pending_transform_commit: None,
-                raster_transform_lineage: std::collections::HashMap::new(),
+                pending_crop_job: None,
                 warp_after_transform_commit: false,
                 clipboard: None,
                 clipboard_mirror_rect: None,
@@ -1665,6 +1382,7 @@ impl App {
                 raw_preview_failures: std::collections::HashMap::new(),
                 cancelled_raw_loads: std::collections::HashSet::new(),
                 loading_keys: std::collections::HashSet::new(),
+                open_jobs: Vec::new(),
                 pending_raw_drafts: Vec::new(),
                 raw_decode_jobs: std::collections::HashMap::new(),
                 raw_prefetch: None,
@@ -1910,6 +1628,7 @@ impl App {
                 adjustment_preview_pending: None,
                 adjustment_preview_last: None,
                 adjustment_preview_cost: std::time::Duration::ZERO,
+                levels_clip: None,
                 filter_preview: None,
                 scan_preview: None,
                 #[cfg(feature = "pro")]
@@ -1939,6 +1658,13 @@ impl App {
                 adjustment_presets: std::sync::Arc::new(
                     crate::core::presets::AdjustmentPresets::load(),
                 ),
+                last_adjustments: crate::ui::dialogs::load_pref::<Vec<serde_json::Value>>(
+                    crate::app::ui_shell::LAST_ADJUSTMENTS_PREF,
+                )
+                .unwrap_or_default()
+                .iter()
+                .filter_map(iai_formats::iai::json_to_adjustment)
+                .collect(),
             },
             lib: crate::app::library::LibraryShell::new(),
             engine: crate::app::engine::new_engine(),
@@ -2909,7 +2635,8 @@ impl App {
 
     /// Anchor the active document to "clean" after a successful write.
     pub fn mark_active_saved(&mut self) {
-        if let Some(doc) = self.docs.documents.get_mut(self.docs.active_doc_idx) {
+        let tabs = &mut self.docs.tabs;
+        if let Some(doc) = tabs.documents.get_mut(tabs.active_doc_idx) {
             doc.mark_saved();
         }
     }

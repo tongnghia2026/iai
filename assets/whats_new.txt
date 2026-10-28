@@ -2,6 +2,37 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+28/10/2026
+- Cắt ảnh (Crop) ra cỡ in trên file nhiều layer nhanh hơn nhiều và không còn làm đứng hình: trong lúc cắt khung cắt vẫn hiện, bấm Esc để hủy. Đổi cỡ ảnh (Image Size) cũng chạy ngầm như vậy.
+- Đổi cỡ ảnh (Image Size) giữ đường vẽ, hình và chữ sắc nét; trước đây chúng mờ đi như ảnh và sửa lại thì nhảy về cỡ cũ.
+- Xuất PDF: ảnh nằm xen giữa các lớp đường vẽ và chữ không còn biến phần bên dưới thành ảnh; mỗi ảnh chỉ chiếm đúng chỗ của nó nên file nhẹ hơn. Cả khi xuất theo màu in (CMYK) cũng vậy.
+- Xuất PDF trang nhiều giấy trắng (sơ đồ, bản vẽ): không còn kèm theo một tấm ảnh trắng to bằng cả trang, nên phóng to trên Foxit Reader mượt như các file PDF khác.
+- Cắt ảnh (Crop): giữ Shift khi kéo khung thì khung chỉ đi thẳng ngang hoặc dọc; phím mũi tên dời khung từng điểm ảnh, Shift + mũi tên mười điểm ảnh.
+- Ô số trong các cửa sổ chỉnh: Shift + mũi tên lên / xuống đổi mười nấc một lần.
+- Các cửa sổ chỉnh (Levels, Curves, Hue/Saturation, Color Balance, Filter, Image Size, Canvas Size…): giữ phím Alt thì nút Cancel thành Reset, bấm vào là số trở về như lúc vừa mở cửa sổ, như Photoshop.
+- Ctrl+Alt+L / M / U / B mở Levels / Curves / Hue/Saturation / Color Balance với đúng số đã dùng lần trước.
+- Thêm phím tắt như Photoshop: Shift+Ctrl+B tự cân màu, Alt+Shift+Ctrl+L tự cân tương phản, Alt+Shift+Ctrl+B Black & White, Ctrl+Alt+C Canvas Size, Shift+Ctrl+N layer mới, Shift+Ctrl+I đảo vùng chọn, Ctrl+[ / Ctrl+] đưa layer xuống / lên, Alt+[ / Alt+] chọn layer dưới / trên.
+- Ctrl+Shift+E nay gộp các layer đang hiện thành một như Photoshop (layer đang ẩn giữ nguyên); muốn giữ các layer cũ và có thêm một layer gộp thì bấm Ctrl+Shift+Alt+E.
+- Hue/Saturation: thêm ô Colorize (tô một màu cho cả ảnh) và chỉnh riêng từng màu đỏ, vàng, xanh lá, xanh lơ, xanh dương, tím hồng; file PSD có lớp như vậy nay mở ra đúng màu.
+- Levels: giữ Alt khi kéo nút đen hay nút trắng để thấy chỗ bị bệt đen, cháy trắng, trên từng kênh màu riêng như Photoshop. Levels và Curves: Alt+2 … Alt+5 đổi kênh. Curves: phím mũi tên dời điểm, Delete xóa điểm, Ctrl+bấm lên ảnh thêm điểm đúng màu chỗ đó.
+- Nạp được preset của Photoshop cho Curves (.acv), Levels (.alv), Hue/Saturation (.ahu), và lưu số đang chỉnh thành preset như vậy để dùng ở Photoshop hay máy khác.
+- Preferences ▸ Shortcuts: đổi được cả phím của Group, Ungroup, Clipping Mask, các lệnh gộp layer, Convert to Curves, Image Size, Warp, Refine Selection, Proof Colors (trước đây cố định).
+- Canvas Size: chọn ô neo để ảnh nằm giữa, ở góc hay ở cạnh khung mới; phần thêm ra trên layer nền được tô màu nền.
+- Preset Develop: áp preset không còn làm mất vùng tô (mask) của ảnh đang chỉnh. Xóa preset (Develop, Levels, Curves) qua một cửa sổ riêng, không còn lỡ tay xóa khi bấm cạnh tên.
+
+27/10/2026
+- Làm ảnh thẻ nền xanh trên tab mới (Ctrl+N rồi dán ảnh): màn hình nay hiện đúng nền xanh, không còn trắng.
+- Xếp ảnh in: ảnh nền trắng luôn có dấu đỏ nhỏ ở bốn góc để cắt, kể cả khi vai, tóc chạm mép ảnh hay nền hơi ngả xám.
+- Thêm ba cỡ ảnh khi làm ảnh thẻ và xếp ảnh in: 3,3×4,8 cm, 3,5×4,5 cm và 5×5 cm.
+- Nhận diện vùng mặt (môi, răng, kính, chân tóc) trên ảnh chân dung và ảnh thẻ nét hơn; bước nhận diện lâu thêm khoảng một, hai giây.
+- Quét chọn nhiều đối tượng bằng Move (đường path, hình, chữ, ảnh): hiện một khung chung để kéo giãn, phóng to, thu nhỏ, xoay tất cả cùng lúc như CorelDRAW; đường path vẫn giữ nét vector. Ctrl+T cũng dùng được khi trong vùng chọn có path.
+- Xuất PDF (và In ▸ Lưu thành PDF): khi có ảnh nhỏ nằm trên cùng (con dấu, logo), đường vẽ và chữ bên dưới vẫn giữ nét vector, phóng to không vỡ; trước đây cả trang thành một tấm ảnh.
+- Chữ in đậm (nút B) trong PDF: phóng to không còn bậc nhỏ ở đầu nét và chỗ nhọn ở đỉnh nét cong.
+- Bớt đứng hình lúc máy đang bận đọc ghi ổ đĩa.
+- Khi có bản mới, hộp «Cập nhật iAi» cho đọc trước bản mới có gì rồi mới bấm cập nhật (từ lần cập nhật sau bản này).
+- Biến đổi một layer ảnh lần thứ hai (Ctrl+T) rồi bấm Ctrl+Z: layer giờ quay về đúng như sau lần biến đổi trước, không nhảy về ảnh lúc chưa biến đổi.
+- Preferences ▸ Shortcuts: gán được phím tắt cho thêm các lệnh menu như xoay, lật ảnh, Grayscale, 8 / 16 bit, thêm Artboard, layer mới, gộp layer, PowerClip; phím đã gán hiện ngay cạnh tên lệnh trong menu.
+
 27/10/2026
 - Bấm Print là cửa sổ in đóng ngay để làm việc khác, lệnh in chạy ngầm. In thêm tờ khác khi tờ trước chưa gửi xong thì tờ sau tự xếp hàng, không phải chờ.
 - Làm ảnh thẻ tự động: bấm chạy xong có thể sang tab khác làm việc khác, hoặc mở ảnh của khách khác (Ctrl+O) và bấm làm tiếp — máy làm lần lượt từng ảnh, ảnh sau tự chờ tới lượt. Tab đang làm có vòng quay, tab đang chờ có đồng hồ.

@@ -1,5 +1,5 @@
 use super::{UiActions, UiData};
-use crate::app::commands::Command;
+use crate::app::commands::{Command, menu};
 use crate::formats::ExportFormat;
 use egui;
 use egui_phosphor::regular as ph;
@@ -128,7 +128,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     });
 
                     ui.menu_button("Filter", |ui| {
-                        filter_menu(ui, actions);
+                        filter_menu(ui, data, actions);
                     });
 
                     ui.menu_button("View", |ui| {
@@ -672,7 +672,13 @@ fn image_menu(
         actions.dialogs.show_resize_dialog = Some(true);
         ui.close();
     }
-    if ui.add(menu_item("Image Size...", "Ctrl+Alt+I")).clicked() {
+    if ui
+        .add(menu_item(
+            "Image Size...",
+            &data.keymap.label_for(Command::ImageSize),
+        ))
+        .clicked()
+    {
         actions.dialogs.show_image_size_dialog = Some(true);
         ui.close();
     }
@@ -707,32 +713,25 @@ fn image_menu(
         ui.separator();
         // Bit depth applies to RGB documents (CMYK ink is 8-bit).
         ui.add_enabled_ui(!data.doc.is_cmyk, |ui| {
-            if ui
-                .selectable_label(data.doc.canvas_bit_depth == 8, "8 Bits/Channel")
-                .clicked()
-            {
-                actions.run("image.mode", serde_json::json!({"bits": 8}));
-                ui.close();
-            }
-            if ui
-                .selectable_label(data.doc.canvas_bit_depth == 16, "16 Bits/Channel")
-                .clicked()
-            {
-                actions.run("image.mode", serde_json::json!({"bits": 16}));
-                ui.close();
+            for (item, bits) in [(&menu::BITS_8, 8), (&menu::BITS_16, 16)] {
+                let text = with_shortcut(item.label, &data.keymap.label_for(Command::Menu(item)));
+                if ui
+                    .selectable_label(data.doc.canvas_bit_depth == bits, text)
+                    .clicked()
+                {
+                    actions.run(item.command, item.params());
+                    ui.close();
+                }
             }
         });
         ui.separator();
-        if ui
-            .add_enabled(
-                data.doc.has_doc && !data.doc.is_cmyk,
-                egui::Button::new("Grayscale"),
-            )
-            .clicked()
-        {
-            actions.run("image.grayscale", serde_json::json!({}));
-            ui.close();
-        }
+        command_item(
+            ui,
+            data,
+            actions,
+            &menu::GRAYSCALE,
+            data.doc.has_doc && !data.doc.is_cmyk,
+        );
     });
     ui.menu_button("Color Profile", |ui| {
         ui.label(
@@ -773,35 +772,17 @@ fn image_menu(
     });
     ui.separator();
     ui.menu_button("Rotate Canvas", |ui| {
-        if ui.button("90° Clockwise").clicked() {
-            actions.run("image.rotate", serde_json::json!({"angle": "90"}));
-            ui.close();
-        }
-        if ui.button("90° Counter-Clockwise").clicked() {
-            actions.run("image.rotate", serde_json::json!({"angle": "-90"}));
-            ui.close();
-        }
+        command_item(ui, data, actions, &menu::ROTATE_CW, true);
+        command_item(ui, data, actions, &menu::ROTATE_CCW, true);
     });
     ui.menu_button("Flip Canvas", |ui| {
-        if ui.button("Flip Horizontal").clicked() {
-            actions.run("image.flip", serde_json::json!({"axis": "horizontal"}));
-            ui.close();
-        }
-        if ui.button("Flip Vertical").clicked() {
-            actions.run("image.flip", serde_json::json!({"axis": "vertical"}));
-            ui.close();
-        }
+        command_item(ui, data, actions, &menu::FLIP_H, true);
+        command_item(ui, data, actions, &menu::FLIP_V, true);
     });
     ui.menu_button("Trang · Artboard", |ui| {
         let en = data.doc.has_doc;
-        if ui
-            .add_enabled(en, egui::Button::new("Thêm Artboard"))
-            .on_hover_text("Thêm một trang mới cạnh phải (mở rộng vùng làm việc)")
-            .clicked()
-        {
-            actions.run("page.add", serde_json::json!({}));
-            ui.close();
-        }
+        command_item(ui, data, actions, &menu::ADD_ARTBOARD, en)
+            .on_hover_text("Thêm một trang mới cạnh phải (mở rộng vùng làm việc)");
         ui.separator();
         // Bleed / safe-margin are drawn as guides on the page
         // sheet. Presets cover the print-standard 3 mm bleed;
@@ -937,11 +918,8 @@ fn image_menu(
             ))
             .clicked()
         {
-            actions.dialogs.open_adjustment_dialog = Some(AdjustmentType::HueSaturation {
-                hue: 0.0,
-                saturation: 0.0,
-                lightness: 0.0,
-            });
+            actions.dialogs.open_adjustment_dialog =
+                Some(AdjustmentType::hue_saturation(0.0, 0.0, 0.0));
             ui.close();
         }
         if ui
@@ -1043,10 +1021,7 @@ fn image_menu(
 }
 
 fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    if ui.button("New Layer").clicked() {
-        actions.run("layer.new", serde_json::json!({}));
-        ui.close();
-    }
+    command_item(ui, data, actions, &menu::NEW_LAYER, true);
     if ui
         .add(menu_item_enabled(
             "Duplicate Layer",
@@ -1112,7 +1087,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(menu_item_enabled(
             "Convert to Curves",
-            "Ctrl+Q",
+            &data.keymap.label_for(Command::ConvertToCurves),
             data.layers
                 .layer_types
                 .get(data.layers.active_layer_idx)
@@ -1189,25 +1164,12 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             .count();
         let place_enabled = sel_total >= 2 && sel_vector >= 1;
         ui.menu_button("PowerClip", |ui| {
-            if ui
-                .add(menu_item_enabled("Place Inside Frame", "", place_enabled))
-                .on_hover_text(
-                    "Place the selected content inside the topmost vector \
-                     shape (content is clipped to the frame)",
-                )
-                .clicked()
-            {
-                actions.run("vector.powerclip", serde_json::json!({"op": "place"}));
-                ui.close();
-            }
-            if ui
-                .button("Extract From Frame")
-                .on_hover_text("Remove the clip: release the selected content")
-                .clicked()
-            {
-                actions.run("vector.powerclip", serde_json::json!({"op": "extract"}));
-                ui.close();
-            }
+            command_item(ui, data, actions, &menu::POWERCLIP_PLACE, place_enabled).on_hover_text(
+                "Place the selected content inside the topmost vector \
+                 shape (content is clipped to the frame)",
+            );
+            command_item(ui, data, actions, &menu::POWERCLIP_EXTRACT, true)
+                .on_hover_text("Remove the clip: release the selected content");
             // Edit the content in place (unclip → edit → re-clip).
             let edit_label = if data.layers.powerclip_editing {
                 "Finish Editing Contents"
@@ -1292,7 +1254,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(menu_item_enabled(
             "Clipping Mask",
-            "Ctrl+Alt+G",
+            &data.keymap.label_for(Command::ClippingMask),
             data.layers.layer_count > 1,
         ))
         .on_hover_text(
@@ -1317,11 +1279,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             ),
             (
                 "Hue/Saturation",
-                AdjustmentType::HueSaturation {
-                    hue: 0.0,
-                    saturation: 0.0,
-                    lightness: 0.0,
-                },
+                AdjustmentType::hue_saturation(0.0, 0.0, 0.0),
             ),
             ("Levels", AdjustmentType::default_levels()),
             ("Curves", AdjustmentType::default_curves()),
@@ -1382,12 +1340,21 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     });
     ui.separator();
-    if ui.add(menu_item("Group Layers", "Ctrl+G")).clicked() {
+    if ui
+        .add(menu_item(
+            "Group Layers",
+            &data.keymap.label_for(Command::Group),
+        ))
+        .clicked()
+    {
         actions.run("layer.group", serde_json::json!({}));
         ui.close();
     }
     if ui
-        .add(menu_item("Ungroup Layers", "Ctrl+Shift+G"))
+        .add(menu_item(
+            "Ungroup Layers",
+            &data.keymap.label_for(Command::Ungroup),
+        ))
         .clicked()
     {
         actions.run_on_layer(
@@ -1402,7 +1369,7 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(menu_item_enabled(
             "Merge Selected",
-            "Ctrl+E",
+            &data.keymap.label_for(Command::MergeLayers),
             data.layers.layer_count > 1,
         ))
         .clicked()
@@ -1410,25 +1377,34 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.run("layer.merge", serde_json::json!({"what": "picked"}));
         ui.close();
     }
+    command_item(
+        ui,
+        data,
+        actions,
+        &menu::MERGE_DOWN,
+        data.layers.active_layer_idx > 0,
+    );
     if ui
-        .add(menu_item_enabled(
-            "Merge Down",
-            "",
-            data.layers.active_layer_idx > 0,
+        .add(menu_item(
+            "Merge Visible",
+            &data.keymap.label_for(Command::MergeVisible),
         ))
         .clicked()
     {
-        actions.run("layer.merge_down", serde_json::json!({}));
+        actions.run("layer.merge", serde_json::json!({"what": "merge_visible"}));
         ui.close();
     }
-    if ui.add(menu_item("Stamp Visible", "Ctrl+Shift+E")).clicked() {
+    if ui
+        .add(menu_item(
+            "Stamp Visible",
+            &data.keymap.label_for(Command::StampVisible),
+        ))
+        .clicked()
+    {
         actions.run("layer.merge", serde_json::json!({"what": "visible"}));
         ui.close();
     }
-    if ui.button("Merge All").clicked() {
-        actions.run("layer.flatten", serde_json::json!({}));
-        ui.close();
-    }
+    command_item(ui, data, actions, &menu::MERGE_ALL, true);
     ui.separator();
     ui.menu_button("Layer Mask", |ui| {
         if ui.button("Add Mask (Reveal All)").clicked() {
@@ -1526,7 +1502,7 @@ fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(menu_item_enabled(
             "Convert Text to Curves",
-            "Ctrl+Q",
+            &data.keymap.label_for(Command::ConvertToCurves),
             data.layers
                 .layer_types
                 .get(data.layers.active_layer_idx)
@@ -1590,7 +1566,7 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(menu_item_enabled(
             "Refine Selection...",
-            "Ctrl+Alt+R",
+            &data.keymap.label_for(Command::RefineSelection),
             data.doc.has_doc,
         ))
         .on_hover_text("Tinh chỉnh mép vùng chọn: tóc, lông, làm mềm, dời mép")
@@ -1659,9 +1635,12 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     });
 }
 
-fn filter_menu(ui: &mut egui::Ui, actions: &mut UiActions) {
+fn filter_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     use crate::core::filters::FilterType;
-    if ui.add(menu_item("Warp...", "Ctrl+Shift+X")).clicked() {
+    if ui
+        .add(menu_item("Warp...", &data.keymap.label_for(Command::Warp)))
+        .clicked()
+    {
         actions.dialogs.open_warp_dialog = true;
         ui.close();
     }
@@ -1767,7 +1746,7 @@ fn view_menu(
     if ui
         .checkbox(
             &mut data.print.proof_enabled.clone(),
-            "Proof Colors  (Ctrl+Y)",
+            with_shortcut("Proof Colors", &data.keymap.label_for(Command::ProofColors)),
         )
         .clicked()
     {
@@ -1776,7 +1755,10 @@ fn view_menu(
     if ui
         .checkbox(
             &mut data.print.proof_gamut_warn.clone(),
-            "Gamut Warning  (Ctrl+Shift+Y)",
+            with_shortcut(
+                "Gamut Warning",
+                &data.keymap.label_for(Command::GamutWarning),
+            ),
         )
         .clicked()
     {
@@ -2042,6 +2024,23 @@ fn help_menu(
 }
 
 /// `"Rulers  (Ctrl+R)"`, or just the name when the command has no key.
+/// A menu item that runs `item`'s command, showing the key the person gave it.
+fn command_item(
+    ui: &mut egui::Ui,
+    data: &UiData,
+    actions: &mut UiActions,
+    item: &'static crate::app::commands::MenuCommand,
+    enabled: bool,
+) -> egui::Response {
+    let key = data.keymap.label_for(Command::Menu(item));
+    let response = ui.add(menu_item_enabled(item.label, &key, enabled));
+    if response.clicked() {
+        actions.run(item.command, item.params());
+        ui.close();
+    }
+    response
+}
+
 fn with_shortcut(name: &str, shortcut: &str) -> String {
     if shortcut.is_empty() {
         name.to_string()
@@ -2108,6 +2107,10 @@ fn keyboard_shortcuts_list(
                     .show(ui, |ui| {
                         for cmd in Command::in_group(group) {
                             let keys = keymap.label_for(cmd);
+                            // Menu commands have no key until given one.
+                            if keys.is_empty() && cmd.default_chord().is_none() {
+                                continue;
+                            }
                             let keys = if keys.is_empty() {
                                 "—".to_string()
                             } else {

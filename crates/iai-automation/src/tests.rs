@@ -260,6 +260,7 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
             "layer.distribute",
             "layer.duplicate",
             "layer.flatten",
+            "layer.free_transform",
             "layer.from_background",
             "layer.group",
             "layer.invert",

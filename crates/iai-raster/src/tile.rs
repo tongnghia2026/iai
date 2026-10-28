@@ -110,11 +110,13 @@ impl Tile {
             px[2] = b;
             px[3] = a;
         });
+        // A fresh revision: the GPU atlas and the compositor caches key on it,
+        // so a white Background later filled blue must not read as unchanged.
         Self {
             pixels,
             pixels16: None,
             ink: None,
-            revision: 1,
+            revision: next_tile_revision(),
         }
     }
 
@@ -135,7 +137,7 @@ impl Tile {
             pixels,
             pixels16: Some(px16),
             ink: None,
-            revision: 1,
+            revision: next_tile_revision(),
         }
     }
 
@@ -2703,5 +2705,19 @@ mod tests {
         assert!(map.has_hdr());
         map.set_pixel(0, 0, 1, 2, 3, 255);
         assert!(!map.has_hdr(), "8-bit edit must drop the HDR master");
+    }
+
+    /// The GPU atlas reloads a tile only when its revision moves: a white
+    /// Background replaced by a blue one must not look unchanged.
+    #[test]
+    fn a_solid_fill_replacing_another_is_a_new_revision() {
+        let white = TileMap::new_white(300, 300);
+        let blue = TileMap::new_solid(300, 300, 0, 90, 200, 255);
+        let pos = TilePos { x: 0, y: 0 };
+        let rev = |m: &TileMap| m.get_tile(pos).map(|t| t.revision);
+        assert_ne!(rev(&white), rev(&blue));
+        assert_ne!(white.revision_fingerprint(), blue.revision_fingerprint());
+        let again = TileMap::new_white(300, 300);
+        assert_ne!(rev(&white), rev(&again));
     }
 }

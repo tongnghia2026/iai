@@ -151,6 +151,13 @@ pub struct OpenParams {
     /// inch; 300 when omitted. Lower only where a page would be too large.
     #[schemars(range(min = 18, max = 600))]
     pub dpi: Option<u32>,
+    /// Show it (the default); false opens it as a tab behind the one shown.
+    #[serde(default = "yes")]
+    pub show: bool,
+    /// An image file of several pictures (a multi-page TIFF): a tab for
+    /// each, named "file - Page N", rather than one document of pages.
+    #[serde(default)]
+    pub pages_as_tabs: bool,
 }
 
 impl Validate for OpenParams {
@@ -498,6 +505,12 @@ impl Command for OpenFile {
             pages: p.pages,
             dpi: p.dpi,
         });
+        let is_iai = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("iai"));
+        let as_tabs = p.pages_as_tabs && pdf.is_none() && !is_iai;
+        let show = p.show;
         Ok(Plan::Job(Job {
             doc: None,
             label_vi: format!("Mở {}", file_name(&path)),
@@ -514,6 +527,12 @@ impl Command for OpenFile {
                 };
                 cx.check_cancelled()?;
                 Ok(Box::new(move |s: &mut Session<'_>| {
+                    let decoded = match decoded {
+                        Decoded::Pages { pages, .. } if as_tabs && pages.len() > 1 => {
+                            return open_as_tabs(s, &path, pages, show);
+                        }
+                        other => other,
+                    };
                     let id = s.new_document_id();
                     let mut doc = match decoded {
                         Decoded::Text(backing) => {
@@ -554,7 +573,11 @@ impl Command for OpenFile {
                     }
                     doc.mark_saved();
                     let out = opened(&doc);
-                    s.add_document(doc);
+                    if show {
+                        s.add_document(doc);
+                    } else {
+                        s.add_document_behind(doc);
+                    }
                     s.notice(
                         format!("Đã mở {}", file_name(&path)),
                         format!("Opened {}", file_name(&path)),
@@ -566,6 +589,38 @@ impl Command for OpenFile {
     }
 }
 
+/// The pictures of one file, a tab each; the first is the one answered.
+fn open_as_tabs(
+    s: &mut Session<'_>,
+    path: &Path,
+    pages: Vec<Canvas>,
+    show: bool,
+) -> Result<Opened, CmdError> {
+    let name = file_name(path);
+    let count = pages.len();
+    let mut first = None;
+    for (index, canvas) in pages.into_iter().enumerate() {
+        let id = s.new_document_id();
+        let mut doc = Document::from_canvas(id, canvas, Some(path.to_path_buf()));
+        doc.file_modified_at = file_modified_at(path);
+        doc.title = format!("{name} - Page {}", index.saturating_add(1));
+        doc.mark_saved();
+        if first.is_none() {
+            first = Some(opened(&doc));
+        }
+        if show && index.saturating_add(1) == count {
+            s.add_document(doc);
+        } else {
+            s.add_document_behind(doc);
+        }
+    }
+    s.notice(
+        format!("Đã mở {name} ({count} trang)"),
+        format!("Opened {name} ({count} pages)"),
+    );
+    first.ok_or_else(|| CmdError::internal("no page"))
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SaveParams {
@@ -575,6 +630,17 @@ pub struct SaveParams {
     /// several pages, or of text, is written as .iai only.
     #[schemars(length(min = 1, max = 4096))]
     pub path: Option<String>,
+    /// An image file: embed the colour profile (default).
+    #[serde(default = "yes")]
+    pub embed_icc: bool,
+    /// An image file: fit the longer side to this many pixels (only ever
+    /// smaller).
+    #[schemars(range(min = 16, max = 30000))]
+    pub long_edge_px: Option<u32>,
+    /// An image file: sharpen for the output size, 0 (off) to 100.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 100))]
+    pub sharpen: u8,
 }
 impl Validate for SaveParams {}
 
@@ -608,6 +674,13 @@ enum Content {
         master: Option<Canvas>,
     },
     Text(FlowTextBacking),
+}
+
+/// What a document held when it was written, to tell after whether the
+/// file holds all of it.
+enum Mark {
+    Content(u64),
+    History(iai_history::command::Checkpoint),
 }
 
 fn detached(canvas: &Canvas) -> Canvas {
@@ -695,16 +768,33 @@ impl Command for SaveFile {
                 "a .iai file: this document has several pages or is text",
             ));
         }
-        let marks: Vec<_> = std::iter::once(d.canvas.history_checkpoint()).collect();
+        // What the file will hold: a single image by its content, the others
+        // by their history.
+        let mark = match &content {
+            Content::Image(_) => Mark::Content(d.canvas.content_fingerprint()),
+            _ => Mark::History(d.canvas.history_checkpoint()),
+        };
+        let opts = if is_iai {
+            ExportOptions::default()
+        } else {
+            ExportOptions {
+                embed_icc: p.embed_icc,
+                resize_long_edge: p.long_edge_px,
+                output_sharpen: p.sharpen.min(100),
+                ..ExportOptions::default()
+            }
+        };
         Ok(Plan::Job(Job {
-            doc: Some(doc),
+            // The file is written from a snapshot: work goes on meanwhile,
+            // and is told apart when the file lands.
+            doc: None,
             label_vi: format!("Lưu {}", file_name(&path)),
             work: Box::new(move |cx| {
                 cx.progress(0.1, format!("Đang lưu {}…", file_name(&path)));
                 if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
                     std::fs::create_dir_all(dir)?;
                 }
-                write(&content, &path, &ExportOptions::default()).map_err(|e| {
+                write(&content, &path, &opts).map_err(|e| {
                     CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
                         .vi(format!("Không lưu được {}: {e}", file_name(&path)))
                 })?;
@@ -714,18 +804,36 @@ impl Command for SaveFile {
                     d.path = Some(path.clone());
                     d.file_modified_at = file_modified_at(&path);
                     // Saved only if nothing changed while it was written.
-                    if marks.first() == Some(&d.canvas.history_checkpoint()) {
+                    let complete = match mark {
+                        Mark::Content(content) => d.canvas.content_fingerprint() == content,
+                        Mark::History(at) => d.canvas.history_checkpoint() == at,
+                    };
+                    if complete {
                         d.mark_saved();
                     }
                     let shown = path.display().to_string();
                     s.emit(EngineEvent::Saved {
                         doc,
                         path: shown.clone(),
+                        complete,
                     });
-                    s.notice(
-                        format!("Đã lưu {}", file_name(&path)),
-                        format!("Saved {}", file_name(&path)),
-                    );
+                    if complete {
+                        s.notice(
+                            format!("Đã lưu {}", file_name(&path)),
+                            format!("Saved {}", file_name(&path)),
+                        );
+                    } else {
+                        s.notice(
+                            format!(
+                                "Đã lưu {} — phần sửa sau lúc bấm lưu chưa nằm trong file",
+                                file_name(&path)
+                            ),
+                            format!(
+                                "Saved {}; what was changed while it was written is not in it",
+                                file_name(&path)
+                            ),
+                        );
+                    }
                     Ok(Saved {
                         doc,
                         path: shown,
@@ -743,7 +851,7 @@ pub struct ExportParams {
     /// Document id (see `doc.list`); the document shown when omitted.
     pub doc: Option<u32>,
     /// Where to write; the format comes from the ending: .png, .jpg, .tif,
-    /// .webp, .bmp.
+    /// .webp, .bmp, or .iai for a copy that keeps the page's layers.
     #[schemars(length(min = 1, max = 4096))]
     pub path: String,
     /// Fit the longer side to this many pixels (only ever smaller).
@@ -768,9 +876,10 @@ static EXPORT: CommandMeta = CommandMeta {
     id: "file.export",
     label_vi: "Xuất ảnh",
     label_en: "Export Image",
-    doc: "Write the shown page, flattened, to an image file (.png, .jpg, .tif, .webp, .bmp), \
-          optionally made smaller and sharpened for the web. The document is left as it is. For \
-          PDF use `export.pdf`.",
+    doc: "Write the shown page, flattened over its master page if it has one, to an image file \
+          (.png, .jpg, .tif, .webp, .bmp), optionally made smaller and sharpened for the web; or \
+          a copy of it as .iai, with its layers. The document is left as it is. For PDF use \
+          `export.pdf`.",
     effects: &[Effect::WriteFiles],
     featured: false,
 };
@@ -791,27 +900,45 @@ impl Command for ExportImage {
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        if !matches!(
-            ext.as_str(),
-            "png" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "bmp"
-        ) {
+        let is_iai = ext == "iai";
+        if !is_iai
+            && !matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "bmp"
+            )
+        {
             return Err(CmdError::bad_param(
                 "path",
-                "a file ending in .png, .jpg, .tif, .webp or .bmp",
+                "a file ending in .png, .jpg, .tif, .webp, .bmp or .iai",
             ));
         }
-        let canvas = detached(s.canvas(Some(doc))?);
+        // Refused where layer commands are (a PDF opened page by page).
+        s.canvas(Some(doc))?;
+        let d = s.document(Some(doc))?;
+        // A picture shows the master page beneath; a .iai copy keeps the
+        // page's own layers.
+        let merged = (!is_iai)
+            .then(|| d.page_render_canvas(d.active_artboard))
+            .flatten();
+        let canvas = match merged {
+            Some(canvas) => canvas,
+            None => detached(&d.canvas),
+        };
         if canvas.width > MAX_DIMENSION || canvas.height > MAX_DIMENSION {
             return Err(CmdError::new(
                 ErrorCode::TooLarge,
                 "the page is too large to export",
             ));
         }
-        let opts = ExportOptions {
-            embed_icc: p.embed_icc,
-            resize_long_edge: p.long_edge_px,
-            output_sharpen: p.sharpen.min(100),
-            ..ExportOptions::default()
+        let opts = if is_iai {
+            ExportOptions::default()
+        } else {
+            ExportOptions {
+                embed_icc: p.embed_icc,
+                resize_long_edge: p.long_edge_px,
+                output_sharpen: p.sharpen.min(100),
+                ..ExportOptions::default()
+            }
         };
         Ok(Plan::Job(Job {
             doc: None,

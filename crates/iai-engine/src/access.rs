@@ -58,6 +58,14 @@ impl Session<'_> {
         id
     }
 
+    /// Add `doc` as a new tab behind the one shown; its id.
+    pub fn add_document_behind(&mut self, doc: Document) -> u32 {
+        let id = doc.id.0;
+        self.ws.add_behind(doc);
+        self.emit(EngineEvent::Opened { doc: id });
+        id
+    }
+
     /// Close document `doc`; the id of the one shown after.
     pub fn close_document(&mut self, doc: u32) -> Result<Option<u32>, CmdError> {
         let index = self.index_of(doc).ok_or_else(|| no_such_document(doc))?;

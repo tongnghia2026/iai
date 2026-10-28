@@ -27,6 +27,10 @@ pub(crate) fn filter_dialog_std(ctx: &egui::Context, data: &UiData, actions: &mu
     }
 
     let mut filter = data.dialogs.filter_dialog;
+    // What Alt + Cancel (Reset) puts back.
+    let opened = opening_values(ctx, egui::Id::new("filter_dialog"), &filter, |a, b| {
+        std::mem::discriminant(a) == std::mem::discriminant(b)
+    });
     let mut preview_enabled = data.dialogs.filter_preview_enabled;
     let mut value_changed = false;
     let mut commit_preview = false;
@@ -69,11 +73,16 @@ pub(crate) fn filter_dialog_std(ctx: &egui::Context, data: &UiData, actions: &mu
                     {
                         apply = true;
                     }
-                    if ui
-                        .add_sized([76.0, 24.0], egui::Button::new("Cancel"))
-                        .clicked()
-                    {
-                        cancel = true;
+                    match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| {
+                        ui.add_sized([76.0, 24.0], egui::Button::new(text))
+                    }) {
+                        CancelPress::Cancel => cancel = true,
+                        CancelPress::Reset => {
+                            filter = opened;
+                            value_changed = true;
+                            commit_preview = preview_enabled;
+                        }
+                        CancelPress::None => {}
                     }
                     if ui.checkbox(&mut preview_enabled, "Preview").changed() {
                         actions.dialogs.set_filter_preview_enabled = Some(preview_enabled);
@@ -83,7 +92,7 @@ pub(crate) fn filter_dialog_std(ctx: &egui::Context, data: &UiData, actions: &mu
                     }
                     ui.add_space(4.0);
                     if ui
-                        .add_sized([76.0, 22.0], egui::Button::new("Reset"))
+                        .add_sized([76.0, 22.0], egui::Button::new("Default"))
                         .clicked()
                     {
                         filter = default_filter_like(&filter);
@@ -127,6 +136,9 @@ pub(crate) fn filter_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     }
 
     let mut filter = data.dialogs.filter_dialog;
+    let opened = opening_values(ctx, egui::Id::new("filter_dialog"), &filter, |a, b| {
+        std::mem::discriminant(a) == std::mem::discriminant(b)
+    });
     let title = filter.name().to_string();
     let mut value_changed = false;
     let mut commit_preview = false;
@@ -250,13 +262,18 @@ pub(crate) fn filter_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
             );
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Reset").clicked() {
+                if ui.button("Default").clicked() {
                     actions.dialogs.set_filter_dialog = Some(default_filter_like(&filter));
                     actions.dialogs.apply_filter_preview = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
+                    match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| ui.button(text)) {
+                        CancelPress::Cancel => cancel = true,
+                        CancelPress::Reset => {
+                            actions.dialogs.set_filter_dialog = Some(opened);
+                            actions.dialogs.apply_filter_preview = true;
+                        }
+                        CancelPress::None => {}
                     }
                     if ui.button("OK").clicked() {
                         apply = true;

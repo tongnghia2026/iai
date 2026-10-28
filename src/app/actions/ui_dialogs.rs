@@ -27,17 +27,25 @@ impl App {
         if let Some(idx) = actions.dialogs.edit_adjustment_layer.take() {
             self.begin_adjustment_layer_edit(idx);
         }
+        let previewing = self.shell.ui.show_adjustment_dialog
+            && self.shell.ui.adjustment_preview_enabled
+            && (self.shell.adjustment_preview.is_some()
+                || self.edit.adjustment_layer_edit.is_some());
         if let Some(adj) = actions.dialogs.set_adjustment_dialog.take() {
             // Store params immediately (cheap → the dialog/handles stay real-time),
             // but defer the expensive full-layer apply + recomposite to a throttled
             // flush so dragging never stalls on large images.
-            self.shell.ui.adjustment_dialog = adj.clone();
-            if self.shell.ui.show_adjustment_dialog
-                && self.shell.ui.adjustment_preview_enabled
-                && (self.shell.adjustment_preview.is_some()
-                    || self.edit.adjustment_layer_edit.is_some())
-            {
-                self.shell.adjustment_preview_pending = Some(adj);
+            let before = std::mem::replace(&mut self.shell.ui.adjustment_dialog, adj.clone());
+            self.note_levels_clip(&before, &adj);
+            if previewing {
+                self.shell.adjustment_preview_pending = Some(self.levels_clip_view(adj));
+            }
+        } else if self.shell.levels_clip.is_some() && !self.levels_clip_held() {
+            // Alt or the button let go: the preview shows the Levels again.
+            self.shell.levels_clip = None;
+            if previewing {
+                self.shell.adjustment_preview_pending =
+                    Some(self.shell.ui.adjustment_dialog.clone());
             }
         }
         if let Some(options) = actions.dialogs.set_adjustment_options.take() {
@@ -52,6 +60,11 @@ impl App {
             self.shell.ui.adj_eyedropper = eyedropper;
         }
         if actions.dialogs.apply_adjustment_dialog {
+            // A clipping view under way is a view only: the Levels go in.
+            if self.shell.levels_clip.take().is_some() {
+                self.shell.adjustment_preview_pending =
+                    Some(self.shell.ui.adjustment_dialog.clone());
+            }
             // Make sure the committed pixels reflect the very latest params, not a
             // throttled-stale preview.
             if let Some(adj) = self.shell.adjustment_preview_pending.take() {
@@ -67,9 +80,11 @@ impl App {
             if self.edit.adjustment_layer_edit.is_some() {
                 if self.commit_adjustment_layer_edit(&adj) {
                     self.shell.status_msg = format!("Edited {}", adj.name());
+                    self.remember_last_adjustment(&adj);
                 }
             } else if self.commit_adjustment_preview(&adj) {
                 self.shell.status_msg = format!("Applied {}", adj.name());
+                self.remember_last_adjustment(&adj);
             } else {
                 self.shell.status_msg = "No adjustment changes applied".to_string();
             }
@@ -81,6 +96,7 @@ impl App {
             self.shell.ui.show_adjustment_dialog = false;
             self.shell.ui.adj_eyedropper = None;
             self.shell.adjustment_preview_pending = None;
+            self.shell.levels_clip = None;
             if self.edit.adjustment_layer_edit.is_some() {
                 self.cancel_adjustment_layer_edit();
             } else {
@@ -260,9 +276,12 @@ impl App {
         if let Some(name) = actions.develop.save_develop_preset.take() {
             let name = name.trim().to_string();
             if !name.is_empty() {
+                // The look, not this photo's masks: those were drawn for it.
+                let mut settings = self.shell.ui.develop_settings.clone();
+                settings.locals.clear();
                 let preset = crate::core::presets::DevelopPreset {
                     name: name.clone(),
-                    settings: self.shell.ui.develop_settings.clone(),
+                    settings,
                 };
                 let list = std::sync::Arc::make_mut(&mut self.shell.develop_presets);
                 // Same name overwrites: re-saving a tweaked look must not duplicate.
@@ -271,14 +290,23 @@ impl App {
                 } else {
                     list.push(preset);
                 }
-                crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
+                self.shell.status_msg = match crate::core::presets::DevelopPreset::save_all(
+                    &self.shell.develop_presets,
+                ) {
+                    Ok(()) => format!("Đã lưu preset {name}"),
+                    Err(e) => format!("Không lưu được preset {name}: {e}"),
+                };
             }
         }
         if let Some(idx) = actions.develop.delete_develop_preset.take()
             && idx < self.shell.develop_presets.len()
         {
-            std::sync::Arc::make_mut(&mut self.shell.develop_presets).remove(idx);
-            crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets);
+            let gone = std::sync::Arc::make_mut(&mut self.shell.develop_presets).remove(idx);
+            self.shell.status_msg =
+                match crate::core::presets::DevelopPreset::save_all(&self.shell.develop_presets) {
+                    Ok(()) => format!("Đã xóa preset {}", gone.name),
+                    Err(e) => format!("Không ghi được danh sách preset: {e}"),
+                };
         }
         if let Some(arm) = actions.develop.arm_develop_local.take() {
             self.shell.ui.develop_local_arm = Some(arm);
@@ -854,24 +882,122 @@ impl App {
             presets.upsert_levels(name, channels);
             presets.save();
         }
-        if let Some(idx) = actions.dialogs.delete_levels_preset.take() {
-            let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
-            if idx < presets.levels.len() {
-                presets.levels.remove(idx);
-                presets.save();
-            }
-        }
         if let Some((name, channels)) = actions.dialogs.save_curves_preset.take() {
             let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
             presets.upsert_curves(name, channels);
             presets.save();
         }
-        if let Some(idx) = actions.dialogs.delete_curves_preset.take() {
+        if let Some((list, idx)) = actions.dialogs.delete_adjustment_preset.take() {
+            use crate::ui::AdjustmentPresetList;
             let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
-            if idx < presets.curves.len() {
-                presets.curves.remove(idx);
+            let removed = match list {
+                AdjustmentPresetList::Levels => {
+                    (idx < presets.levels.len()).then(|| presets.levels.remove(idx).name)
+                }
+                AdjustmentPresetList::Curves => {
+                    (idx < presets.curves.len()).then(|| presets.curves.remove(idx).name)
+                }
+            };
+            if let Some(name) = removed {
+                presets.save();
+                self.shell.status_msg = format!("Đã xóa preset {name}");
+            }
+        }
+        match actions.dialogs.adjustment_preset_file.take() {
+            Some(crate::ui::PresetFile::Load) => self.import_adjustment_preset(),
+            Some(crate::ui::PresetFile::Save) => self.export_adjustment_preset(),
+            None => {}
+        }
+    }
+
+    /// Save the adjustment dialog's values as a Photoshop preset file (Levels
+    /// .alv, Curves .acv, Hue/Saturation .ahu), for Photoshop or another iAi.
+    fn export_adjustment_preset(&mut self) {
+        let adj = &self.shell.ui.adjustment_dialog;
+        let Some((extension, bytes)) = iai_formats::psd_adjust::write_preset_file(adj) else {
+            return;
+        };
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter(format!("{} preset", adj.name()), &[extension])
+            .set_file_name(format!("{}.{extension}", adj.name().replace('/', "-")));
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(mut path) = dialog.save_file() else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension(extension);
+        }
+        self.shell.status_msg = match crate::core::atomic_file::write_bytes_atomic(&path, &bytes) {
+            Ok(()) => format!("Đã lưu preset {}", path.display()),
+            Err(e) => format!("Không lưu được preset: {e}"),
+        };
+    }
+
+    /// Load a Photoshop preset file into the adjustment dialog open (Levels
+    /// .alv, Curves .acv, Hue/Saturation .ahu); a Levels or Curves one is
+    /// kept among the user's presets too, under the file's name.
+    fn import_adjustment_preset(&mut self) {
+        use crate::core::layer::AdjustmentType;
+        let (label, extension) = match &self.shell.ui.adjustment_dialog {
+            AdjustmentType::Levels { .. } => ("Levels preset", "alv"),
+            AdjustmentType::Curves { .. } => ("Curves preset", "acv"),
+            AdjustmentType::HueSaturation { .. } => ("Hue/Saturation preset", "ahu"),
+            _ => return,
+        };
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new().add_filter(label, &[extension]);
+        if let Some(parent) = crate::file_io::dialog_parent(window) {
+            dialog = dialog.set_parent(&parent);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let read = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| iai_formats::psd_adjust::parse_preset_file(extension, &bytes));
+        let same_kind = |adj: &AdjustmentType| {
+            std::mem::discriminant(adj) == std::mem::discriminant(&self.shell.ui.adjustment_dialog)
+        };
+        let Some(adj) = read.filter(same_kind) else {
+            self.shell.status_msg = "Không đọc được file preset này".to_string();
+            return;
+        };
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Preset")
+            .to_string();
+        let presets = std::sync::Arc::make_mut(&mut self.shell.adjustment_presets);
+        match &adj {
+            AdjustmentType::Levels { channels } => {
+                presets.upsert_levels(name.clone(), *channels);
                 presets.save();
             }
+            AdjustmentType::Curves { channels } => {
+                presets.upsert_curves(name.clone(), channels.clone());
+                presets.save();
+            }
+            _ => {}
+        }
+        self.shell.ui.adjustment_dialog = adj.clone();
+        self.shell.adjustment_preview_pending = None;
+        if self.shell.ui.adjustment_preview_enabled {
+            if self.shell.adjustment_preview.is_some() {
+                self.update_adjustment_preview(adj);
+            } else if self.edit.adjustment_layer_edit.is_some() {
+                self.update_adjustment_layer_edit(adj);
+            }
+        }
+        self.shell.status_msg = format!("Đã nạp preset {name}");
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
         }
     }
 

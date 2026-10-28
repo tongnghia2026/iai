@@ -25,8 +25,16 @@ pub enum EngineEvent {
     Shown { doc: u32 },
     /// Another page of the document is shown (or one was added).
     PageShown { doc: u32 },
-    /// The document was written to `path`.
-    Saved { doc: u32, path: String },
+    /// The document was written to `path`; `complete` unless it was changed
+    /// while the file was written (it then stays unsaved).
+    Saved {
+        doc: u32,
+        path: String,
+        complete: bool,
+    },
+    /// A step the person made with a tool of the window (a brush stroke, a
+    /// move, a selection), already done: what the undo list calls it.
+    Stepped { doc: u32, label: String },
     /// A line for the status bar.
     Notice { vi: String, en: String },
     JobStarted {

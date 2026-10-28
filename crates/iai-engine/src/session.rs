@@ -318,6 +318,8 @@ impl Session<'_> {
         if let Some(expected) = call.expect_revision {
             self.check_revision(&call.args, expected)?;
         }
+        // What the window's tools did before this call is theirs.
+        self.take_window_steps();
         let source = self.engine.source.as_str();
         iai_diag::note(
             "cmd",
@@ -361,6 +363,8 @@ impl Session<'_> {
             }
             Err(e) => Err(e),
         };
+        // The steps it recorded are its own: its line in the journal says them.
+        self.drop_recorded_steps();
 
         match outcome {
             Ok(Outcome::Started(job)) => {
@@ -442,6 +446,29 @@ impl Session<'_> {
 
     /// Apply the jobs whose work has ended. The GUI calls it every frame;
     /// returns how many ended.
+    /// The steps the person made with the window's tools (a brush stroke, a
+    /// move, a selection: changes already done, not commands) since this was
+    /// last asked: a line each in the journal, and a `Stepped` event, so every
+    /// change to a document reaches the engine, whoever made it.
+    pub fn take_window_steps(&mut self) {
+        let mut steps = Vec::new();
+        for d in self.ws.documents_mut().iter_mut() {
+            for label in d.canvas.take_recorded_steps() {
+                steps.push((d.id.0, label));
+            }
+        }
+        for (doc, label) in steps {
+            iai_diag::note("step", &format!("gui {label} (doc {doc})"));
+            self.engine.events.push(EngineEvent::Stepped { doc, label });
+        }
+    }
+
+    fn drop_recorded_steps(&mut self) {
+        for d in self.ws.documents_mut().iter_mut() {
+            d.canvas.take_recorded_steps();
+        }
+    }
+
     pub fn poll(&mut self) -> usize {
         let mut ended = std::mem::take(&mut self.engine.ready);
         ended.extend(self.engine.jobs.take_ended());
@@ -452,6 +479,7 @@ impl Session<'_> {
             } else {
                 match job.outcome {
                     Ok(apply) => {
+                        self.take_window_steps();
                         let txn = self.begin();
                         let applied = match jobs::guarded(|| apply(self)) {
                             Ok(out) => out,
@@ -460,6 +488,7 @@ impl Session<'_> {
                                 &jobs::panic_text(payload.as_ref()),
                             )),
                         };
+                        self.drop_recorded_steps();
                         match applied {
                             Ok(result) => {
                                 let revision = self.active_revision();

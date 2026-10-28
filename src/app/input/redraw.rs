@@ -43,7 +43,6 @@ impl App {
 
         self.poll_file_dialog(event_loop);
         self.poll_pdf_export();
-        self.poll_save_jobs();
         self.poll_print_job();
         self.poll_flow_text_image();
         self.poll_mail_merge_data();
@@ -127,6 +126,7 @@ impl App {
         self.poll_agent_link();
         self.poll_errands();
         self.poll_quick_tasks();
+        self.hand_steps_to_engine();
         self.poll_engine();
         self.poll_repair_ai();
         if self.edit.tools.active_id() == crate::tools::ToolId::Repair {

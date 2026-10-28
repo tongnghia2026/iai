@@ -891,6 +891,12 @@ pub struct Document {
     /// The decoded RAW parked on disk, so reactivating a deferred document is a
     /// read instead of a new decode. Session-only.
     pub raw_spill: Option<std::sync::Arc<crate::raw_spill::RawSpill>>,
+    /// Free Transform's sources, by layer id: for a pixel layer a commit
+    /// resampled, the pixels it was resampled from and the mapping since, so
+    /// the next transform starts from those rather than from an already
+    /// filtered result. Session-only; any other edit to the layer breaks it.
+    pub transform_lineage:
+        std::collections::HashMap<u32, crate::free_transform::RasterTransformLineage>,
 }
 
 impl Document {
@@ -943,6 +949,7 @@ impl Document {
             deferred_raw: false,
             raw_draft: false,
             raw_spill: None,
+            transform_lineage: std::collections::HashMap::new(),
         }
     }
 
@@ -975,6 +982,7 @@ impl Document {
             deferred_raw: false,
             raw_draft: false,
             raw_spill: None,
+            transform_lineage: std::collections::HashMap::new(),
         }
     }
 

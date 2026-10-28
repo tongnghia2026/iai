@@ -189,7 +189,7 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                                 ui,
                                 "quick_size",
                                 &mut form.size,
-                                &[("3x4", "3×4"), ("2x3", "2×3"), ("4x6", "4×6")],
+                                super::ai_errand::ID_PHOTO_SIZES,
                                 78.0,
                             );
                             ui.label("Nền");

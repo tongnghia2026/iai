@@ -66,6 +66,43 @@ impl Canvas {
         &self,
         hidden: &std::collections::HashSet<u32>,
     ) -> Option<Vec<u8>> {
+        self.composite_ink(|id| !hidden.contains(&id), None)
+    }
+
+    /// The ink of the layers in `only` alone, over no paper: a CMYK8 buffer
+    /// (as [`Self::flatten_ink`]'s) and how much of each pixel they cover
+    /// (0 to 255), the ink as it shows where they cover it. A PDF draws it as
+    /// a picture with that coverage for its mask, among the page's vectors.
+    /// `None` when they are not ink-exact (see [`Self::flatten_ink`]).
+    pub fn flatten_ink_of(
+        &self,
+        only: &std::collections::HashSet<u32>,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let pixels =
+            Self::pixel_count(self.width, self.height).and_then(|n| usize::try_from(n).ok())?;
+        let mut cover = vec![0.0f32; pixels];
+        let mut ink = self.composite_ink(|id| only.contains(&id), Some(&mut cover))?;
+        let alpha: Vec<u8> = cover.iter().map(|&c| (c * 255.0).round() as u8).collect();
+        // Composited over no ink, the planes hold ink × coverage: what shows
+        // where they cover is that over the coverage.
+        for (px, &c) in ink.chunks_exact_mut(4).zip(&cover) {
+            if c > 0.0 {
+                for v in px.iter_mut() {
+                    *v = (*v as f32 / c).round().min(255.0) as u8;
+                }
+            }
+        }
+        Some((ink, alpha))
+    }
+
+    /// Per-channel source-over of the ink of the visible layers `take`
+    /// accepts (by id), from no ink; `cover`, when given, gathers each
+    /// pixel's coverage the same way.
+    fn composite_ink(
+        &self,
+        take: impl Fn(u32) -> bool,
+        mut cover: Option<&mut Vec<f32>>,
+    ) -> Option<Vec<u8>> {
         use iai_raster::tile::TILE_SIZE;
         if !self.is_cmyk() {
             return None;
@@ -82,7 +119,7 @@ impl Canvas {
         let len = Self::checked_rgba_len(self.width, self.height)?;
         let mut out = vec![0u8; len];
         for layer in &self.layer_stack.layers {
-            if !layer.visible || hidden.contains(&layer.id) {
+            if !layer.visible || !take(layer.id) {
                 continue;
             }
             if matches!(layer.layer_type, iai_doc::layer::LayerType::Adjustment(_)) {
@@ -119,10 +156,16 @@ impl Canvas {
                     if eff <= 0.0 {
                         continue;
                     }
-                    let o = ((cy as u64 * self.width as u64 + cx as u64) * 4) as usize;
+                    let at = (cy as u64 * self.width as u64 + cx as u64) as usize;
+                    let o = at * 4;
                     for c in 0..4 {
                         out[o + c] = (ink[i + c] as f32 * eff + out[o + c] as f32 * (1.0 - eff))
                             .round() as u8;
+                    }
+                    if let Some(cover) = cover.as_deref_mut()
+                        && let Some(c) = cover.get_mut(at)
+                    {
+                        *c = eff + *c * (1.0 - eff);
                     }
                 }
             }

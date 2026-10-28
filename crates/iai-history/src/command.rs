@@ -994,6 +994,15 @@ impl CommandHistory {
         self.evict_if_needed();
     }
 
+    /// Take every step off the undo stack, oldest first, the redo branch
+    /// dropped: the history of a copy of a document, handed to the document.
+    pub fn take_undo_steps(&mut self) -> Vec<Box<dyn Command>> {
+        self.redo_stack.clear();
+        self.total_memory_bytes = 0;
+        self.revision += 1;
+        self.undo_stack.drain(..).map(|entry| entry.cmd).collect()
+    }
+
     /// Push a new command. If inside a group → add to the group instead of the stack.
     pub fn push(&mut self, cmd: Box<dyn Command>) {
         if let Some((_, ref mut cmds)) = self.pending_group {

@@ -59,6 +59,7 @@ fn status_cell() -> &'static parking_lot::Mutex<LamaStatus> {
 }
 
 fn set_status(s: LamaStatus) {
+    forget_available();
     *status_cell().lock() = s;
 }
 
@@ -68,7 +69,31 @@ pub fn status() -> LamaStatus {
 
 /// True once the model file exists on disk (it may still need loading on first use).
 pub fn is_available() -> bool {
-    model_path().exists()
+    // Asked by the window every frame: the disk is asked at most every few
+    // seconds. A busy disk once held the window 1.8 s on this question.
+    let now = std::time::Instant::now();
+    let mut kept = available_cell().lock();
+    match *kept {
+        Some((at, yes)) if now.duration_since(at) < AVAILABLE_KEPT => yes,
+        _ => {
+            let yes = model_path().exists();
+            *kept = Some((now, yes));
+            yes
+        }
+    }
+}
+
+/// How long the answer of [`is_available`] stands without asking the disk.
+const AVAILABLE_KEPT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn available_cell() -> &'static parking_lot::Mutex<Option<(std::time::Instant, bool)>> {
+    static KEPT: OnceLock<parking_lot::Mutex<Option<(std::time::Instant, bool)>>> = OnceLock::new();
+    KEPT.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// The model came or went: ask the disk again next time.
+fn forget_available() {
+    *available_cell().lock() = None;
 }
 
 /// True while a background download is in progress (used to keep the UI repainting

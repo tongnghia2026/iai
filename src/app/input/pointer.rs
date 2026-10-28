@@ -61,6 +61,21 @@ impl App {
             return;
         }
         if self.shell.ui.show_adjustment_dialog
+            && self.shell.ui.adj_eyedropper.is_none()
+            && button == MouseButton::Left
+            && pressed
+            && self.edit.input.ctrl_held
+            && !self.edit.input.is_over_ui
+            && matches!(
+                self.shell.ui.adjustment_dialog,
+                crate::core::layer::AdjustmentType::Curves { .. }
+            )
+        {
+            let ev = self.tool_event();
+            self.add_curve_point_at(ev.canvas_x, ev.canvas_y);
+            return;
+        }
+        if self.shell.ui.show_adjustment_dialog
             && self.shell.ui.adj_eyedropper.is_some()
             && button == MouseButton::Left
         {
@@ -74,6 +89,15 @@ impl App {
             return;
         }
         if self.is_blocking_modal() {
+            return;
+        }
+        if pressed
+            && matches!(button, MouseButton::Left | MouseButton::Right)
+            && !self.edit.input.is_over_ui
+            && !self.edit.input.space_held
+            && self.page_job_holds_shown_tab()
+        {
+            self.shell.status_msg = "Ảnh này đang được xử lý, đợi xong rồi làm tiếp".to_string();
             return;
         }
         // Warp is modal: route left-drag to the warp brush, keep Middle /
@@ -986,9 +1010,7 @@ impl App {
                                     if let Some(pending) =
                                         self.edit.tools.patch_mut().take_pending()
                                     {
-                                        let canvas = &mut self.docs.documents
-                                            [self.docs.active_doc_idx]
-                                            .canvas;
+                                        let canvas = &mut self.docs.active_mut().canvas;
                                         let ok = match pending {
                                             PatchPending::Clone { dx, dy } => {
                                                 canvas.patch_clone(dx, dy)

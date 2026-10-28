@@ -87,6 +87,13 @@ pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut 
     if current_radius == 0.0 {
         current_radius = 5.0;
     }
+    // What Alt + Cancel (Reset) puts back.
+    let opened = opening_values(
+        ctx,
+        egui::Id::new("feather_dialog"),
+        &current_radius,
+        |_, _| true,
+    );
 
     modal_overlay(ctx, "feather_dialog_overlay");
 
@@ -105,8 +112,10 @@ pub(crate) fn feather_dialog(ctx: &egui::Context, _data: &UiData, actions: &mut 
                 if ui.button("OK").clicked() {
                     do_feather = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    do_cancel = true;
+                match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| ui.button(text)) {
+                    CancelPress::Cancel => do_cancel = true,
+                    CancelPress::Reset => current_radius = opened,
+                    CancelPress::None => {}
                 }
             });
         });
@@ -143,6 +152,13 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     if amount == 0.0 {
         amount = 5.0;
     }
+    // What Alt + Cancel (Reset) puts back.
+    let (_, opened) = opening_values(
+        ctx,
+        egui::Id::new("modify_dialog"),
+        &(kind, amount),
+        |a, b| a.0 == b.0,
+    );
 
     modal_overlay(ctx, "modify_dialog_overlay");
 
@@ -166,8 +182,10 @@ pub(crate) fn modify_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                 if ui.button("OK").clicked() {
                     apply = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+                match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| ui.button(text)) {
+                    CancelPress::Cancel => cancel = true,
+                    CancelPress::Reset => amount = opened,
+                    CancelPress::None => {}
                 }
             });
         });
@@ -239,6 +257,12 @@ pub(crate) fn color_range_dialog(ctx: &egui::Context, data: &UiData, actions: &m
 
             ui.add_space(8.0);
             let mut fuzz = data.dialogs.color_range_fuzziness as f32;
+            let opened = opening_values(
+                ctx,
+                egui::Id::new("color_range_dialog"),
+                &data.dialogs.color_range_fuzziness,
+                |_, _| true,
+            );
             if ui
                 .add(egui::Slider::new(&mut fuzz, 0.0..=200.0).text("Fuzziness"))
                 .changed()
@@ -261,11 +285,12 @@ pub(crate) fn color_range_dialog(ctx: &egui::Context, data: &UiData, actions: &m
                 {
                     do_apply = true;
                 }
-                if ui
-                    .add(egui::Button::new("Cancel").min_size(egui::vec2(72.0, 24.0)))
-                    .clicked()
-                {
-                    do_cancel = true;
+                match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| {
+                    ui.add(egui::Button::new(text).min_size(egui::vec2(72.0, 24.0)))
+                }) {
+                    CancelPress::Cancel => do_cancel = true,
+                    CancelPress::Reset => actions.sel.set_color_range_fuzziness = Some(opened),
+                    CancelPress::None => {}
                 }
             });
         });
@@ -374,6 +399,13 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
     let mut color = ctx
         .data_mut(|d| d.get_temp::<egui::Color32>(col_id))
         .unwrap_or_else(|| egui::Color32::from_rgb(fg[0], fg[1], fg[2]));
+    // What Alt + Cancel (Reset) puts back.
+    let opened = opening_values(
+        ctx,
+        egui::Id::new("stroke_dialog"),
+        &(width, loc_idx, opacity, color),
+        |_, _| true,
+    );
 
     modal_overlay(ctx, "stroke_dialog_overlay");
 
@@ -435,8 +467,10 @@ pub(crate) fn stroke_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                 {
                     do_apply = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    do_cancel = true;
+                match cancel_or_reset(ui, "Cancel", "Reset", |ui, text| ui.button(text)) {
+                    CancelPress::Cancel => do_cancel = true,
+                    CancelPress::Reset => (width, loc_idx, opacity, color) = opened,
+                    CancelPress::None => {}
                 }
             });
             if !data.sel.has_selection {

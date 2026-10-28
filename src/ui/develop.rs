@@ -321,37 +321,48 @@ pub(crate) fn develop_panel_contents(
             let out = section(ui, data, SEC_PRESETS, ph::BOOKMARKS, "Presets", |ui| {
                 ui.horizontal(|ui| {
                     let mut apply_idx: Option<usize> = None;
-                    let mut del_idx: Option<usize> = None;
+                    let presets = &data.develop.develop_presets;
                     egui::ComboBox::from_id_salt("develop_preset_select")
                         .selected_text("Saved presets…")
                         .width(170.0)
                         .show_ui(ui, |ui| {
-                            if data.develop.develop_presets.is_empty() {
+                            if presets.is_empty() {
                                 ui.label("No presets yet");
                             }
-                            for (i, preset) in data.develop.develop_presets.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(false, &preset.name).clicked() {
-                                        apply_idx = Some(i);
-                                    }
-                                    if ui
-                                        .small_button(ph::X)
-                                        .on_hover_text("Delete preset")
-                                        .clicked()
-                                    {
-                                        del_idx = Some(i);
-                                    }
-                                });
+                            for (i, preset) in presets.iter().enumerate() {
+                                if ui.selectable_label(false, &preset.name).clicked() {
+                                    apply_idx = Some(i);
+                                }
+                            }
+                            // Deleting is a window of its own: nothing is
+                            // lost to a click beside a name.
+                            if !presets.is_empty() {
+                                ui.separator();
+                                if ui
+                                    .selectable_label(false, crate::ui::dialogs::DELETE_PRESET)
+                                    .clicked()
+                                {
+                                    crate::ui::dialogs::open_preset_deleter(ui.ctx(), "develop");
+                                }
                             }
                         });
                     if let Some(i) = apply_idx {
-                        // The mixer tab is view state, not part of the look.
+                        // The look only: the mixer tab is view state, and the
+                        // masks were drawn for this photo, not the preset's.
                         let mixer_mode = settings.mixer_mode;
-                        settings = data.develop.develop_presets[i].settings.clone();
+                        let locals = std::mem::take(&mut settings.locals);
+                        settings = presets[i].settings.clone();
                         settings.mixer_mode = mixer_mode;
+                        settings.locals = locals;
                         changed = true;
                     }
-                    if let Some(i) = del_idx {
+                    let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+                    if let Some(i) = crate::ui::dialogs::preset_deleter(
+                        ui.ctx(),
+                        "develop",
+                        "Delete Develop Preset",
+                        &names,
+                    ) {
                         actions.develop.delete_develop_preset = Some(i);
                     }
                 });

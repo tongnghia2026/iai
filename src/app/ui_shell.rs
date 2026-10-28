@@ -83,6 +83,10 @@ pub struct UiShell {
     /// adapt the throttle interval to the image size.
     pub(in crate::app) adjustment_preview_last: Option<std::time::Instant>,
     pub(in crate::app) adjustment_preview_cost: std::time::Duration,
+    /// Alt held while a Levels input black (`false`) or white (`true`) point
+    /// is dragged, on channel 0 (all) to 3, at a level: the preview shows what
+    /// it clips (see `App::levels_clip_view`).
+    pub(in crate::app) levels_clip: Option<(bool, usize, u8)>,
     pub(in crate::app) filter_preview: Option<FilterPreviewSession>,
     /// Live-preview session for the "Làm sạch bản scan" dialog.
     pub(in crate::app) scan_preview: Option<ScanPreviewSession>,
@@ -121,4 +125,10 @@ pub struct UiShell {
     pub(in crate::app) develop_presets: std::sync::Arc<Vec<crate::core::presets::DevelopPreset>>,
     /// User-saved Levels/Curves presets (adjustment_presets.json).
     pub(in crate::app) adjustment_presets: std::sync::Arc<crate::core::presets::AdjustmentPresets>,
+    /// The values each kind of adjustment was last applied with, one per
+    /// kind (Ctrl+Alt+L / M / U / B open with them); kept in prefs.json.
+    pub(in crate::app) last_adjustments: Vec<crate::core::layer::AdjustmentType>,
 }
+
+/// Where `UiShell::last_adjustments` is kept in prefs.json.
+pub(in crate::app) const LAST_ADJUSTMENTS_PREF: &str = "last_adjustments";

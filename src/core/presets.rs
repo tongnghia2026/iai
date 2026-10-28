@@ -165,12 +165,15 @@ impl DevelopPreset {
         Some(dir.join("develop_presets.json"))
     }
 
-    pub fn save_all(presets: &[DevelopPreset]) {
-        if let Some(path) = Self::presets_path()
-            && let Ok(json) = serde_json::to_string_pretty(presets)
-        {
-            let _ = crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes());
+    /// Write every preset; why not, when it could not be written (a full
+    /// disk, a folder it may not write to).
+    pub fn save_all(presets: &[DevelopPreset]) -> Result<(), String> {
+        if cfg!(test) {
+            return Ok(());
         }
+        let path = Self::presets_path().ok_or_else(|| "no folder for the presets".to_string())?;
+        let json = serde_json::to_string_pretty(presets).map_err(|e| e.to_string())?;
+        crate::core::atomic_file::write_bytes_atomic(&path, json.as_bytes())
     }
 
     pub fn load_all() -> Vec<DevelopPreset> {

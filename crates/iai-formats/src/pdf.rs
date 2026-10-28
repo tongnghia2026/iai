@@ -1504,14 +1504,22 @@ impl Exporter for PdfExporter {
             // paths over an ink raster base — crisp at any size (no "răng cưa"),
             // colour-managed via the embedded CMYK profile so the PDF matches the
             // app's preview. Mirrors the RGB path below.
-            let selection = iai_canvas::print::collect_pdf_vectors(canvas);
+            // Pictures between the vectors go among them, composited in ink;
+            // a run of them that is not ink-exact keeps the single-image order.
+            let layered = iai_canvas::print::collect_pdf_vectors_layered(canvas);
+            let (selection, overlays) = match iai_canvas::print::pdf_ink_overlays(canvas, &layered)
+            {
+                Some(overlays) => (layered, overlays),
+                None => (iai_canvas::print::collect_pdf_vectors(canvas), Vec::new()),
+            };
             if let Some(ink) = iai_canvas::print::pdf_ink_base(canvas, &selection) {
                 let page = iai_canvas::print::encode_pdf_page_cmyk(
                     &ink,
                     canvas.width,
                     canvas.height,
                     canvas.metadata.resolution_ppi,
-                )?;
+                )?
+                .with_overlays(overlays);
                 let profile = canvas.cmyk_pdf_profile();
                 let pdf = iai_canvas::print::build_pdf_encoded_with_vectors(
                     &page,
@@ -1539,13 +1547,14 @@ impl Exporter for PdfExporter {
             )?;
             return std::fs::write(path, &pdf).map_err(|e| e.to_string());
         }
-        // `_layered` keeps a Path/Text run crisp even when opaque image layers
-        // sit above it: those come back in `above_layer_ids` and are re-drawn as
-        // a transparent overlay ON TOP of the native vectors (correct z-order),
-        // instead of flattening the vectors into the raster (which went jagged).
+        // `_layered` keeps Path/Text layers crisp even when image layers sit
+        // above or between them: each run of those comes back in `bands` and
+        // is drawn as a transparent picture at its place among the native
+        // vectors, instead of flattening the vectors into the raster (which
+        // went jagged).
         let selection = iai_canvas::print::collect_pdf_vectors_layered(canvas);
         let rgba = iai_canvas::print::pdf_raster_base(canvas, &selection);
-        let overlay = iai_canvas::print::pdf_overlay_raster(canvas, &selection);
+        let overlays = iai_canvas::print::pdf_overlays(canvas, &selection);
         let icc = super::export_icc_bytes(canvas);
         let pdf = iai_canvas::print::build_pdf_with_vectors_overlay(
             &rgba,
@@ -1553,7 +1562,7 @@ impl Exporter for PdfExporter {
             canvas.height,
             canvas.metadata.resolution_ppi,
             &selection.objects,
-            overlay,
+            overlays,
             &layout,
             Some(&icc),
         )?;
@@ -1623,9 +1632,7 @@ mod tests {
         // transparent overlay ON TOP — not flattened into the raster (which is
         // what made the vectors go jagged when a couple of image layers sat over
         // them). File ▸ Export ▸ PDF path.
-        use iai_canvas::print::{
-            collect_pdf_vectors, collect_pdf_vectors_layered, pdf_overlay_raster,
-        };
+        use iai_canvas::print::{collect_pdf_vectors, collect_pdf_vectors_layered, pdf_overlays};
         use iai_doc::vector::color::ColorValue;
         use iai_doc::vector::object::VectorObjectData;
         use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
@@ -1654,7 +1661,16 @@ mod tests {
                 AffineTransform::IDENTITY,
             ),
         );
-        let img_idx = canvas.add_layer(); // an opaque pixel layer ON TOP of the vector
+        let img_idx = canvas.add_layer(); // a pixel layer ON TOP of the vector
+        let mut stamp = vec![0u8; 16 * 16 * 4];
+        for y in 10..14 {
+            for x in 9..13 {
+                let i = (y * 16 + x) * 4;
+                stamp[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        canvas.layer_stack.layers[img_idx].tiles =
+            iai_raster::tile::TileMap::from_rgba(&stamp, 16, 16);
         let above_id = canvas.layer_stack.layers[img_idx].id;
 
         // The conservative collector stops at the image on top and promotes
@@ -1669,7 +1685,11 @@ mod tests {
             "layered collector must keep the vector native despite the image above it"
         );
         assert_eq!(layered.above_layer_ids, vec![above_id]);
-        assert!(pdf_overlay_raster(&canvas, &layered).is_some());
+        let overlays = pdf_overlays(&canvas, &layered);
+        assert_eq!(overlays.len(), 1);
+        // Only where the stamp has pixels, not the whole page.
+        assert_eq!(overlays[0].rect, [9, 10, 4, 4]);
+        assert_eq!(overlays[0].after_objects, layered.objects.len());
 
         let output = temp_pdf_path("crisp-under-pixels");
         PdfExporter

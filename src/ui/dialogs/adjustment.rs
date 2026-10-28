@@ -16,13 +16,17 @@ pub(crate) fn adjustment_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
     }
 
     let mut adj = data.dialogs.adjustment_dialog.clone();
+    // What Alt + Cancel (Reset) puts back.
+    let opened = opening_values(ctx, egui::Id::new("adjustment_dialog"), &adj, |a, b| {
+        std::mem::discriminant(a) == std::mem::discriminant(b)
+    });
     let title = adj.name().to_string();
     let is_levels = matches!(adj, AdjustmentType::Levels { .. });
     let is_curves = matches!(adj, AdjustmentType::Curves { .. });
     let is_color_balance = matches!(adj, AdjustmentType::ColorBalance { .. });
     let mut changed = false;
     let mut apply = enter_pressed;
-    let mut cancel = false;
+    let mut cancel = CancelPress::None;
     let mut custom_footer = false;
 
     let dialog_width = if is_levels {
@@ -68,36 +72,27 @@ pub(crate) fn adjustment_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                     hue,
                     saturation,
                     lightness,
+                    colorize,
+                    ranges,
                 } => {
-                    let hue_colors: Vec<egui::Color32> = (0..=12)
-                        .map(|i| hsv_to_color32(i as f32 / 12.0, 1.0, 1.0))
-                        .collect();
-                    changed |=
-                        color_slider_f32(ui, hue, -180.0..=180.0, "Hue", &hue_colors).changed();
-                    changed |= color_slider_f32(
+                    changed |= hue_saturation_editor_ui(
                         ui,
-                        saturation,
-                        -100.0..=100.0,
-                        "Saturation",
-                        &[
-                            egui::Color32::from_gray(130),
-                            hsv_to_color32(0.0, 0.55, 0.85),
-                            hsv_to_color32(0.0, 1.0, 1.0),
-                        ],
-                    )
-                    .changed();
-                    changed |= color_slider_f32(
-                        ui,
-                        lightness,
-                        -100.0..=100.0,
-                        "Lightness",
-                        &[
-                            egui::Color32::BLACK,
-                            egui::Color32::GRAY,
-                            egui::Color32::WHITE,
-                        ],
-                    )
-                    .changed();
+                        [hue, saturation, lightness],
+                        colorize,
+                        ranges,
+                        data.tool.brush_color,
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Load Photoshop preset (.ahu)\u{2026}").clicked() {
+                            actions.dialogs.adjustment_preset_file =
+                                Some(crate::ui::PresetFile::Load);
+                        }
+                        if ui.button("Save as .ahu\u{2026}").clicked() {
+                            actions.dialogs.adjustment_preset_file =
+                                Some(crate::ui::PresetFile::Save);
+                        }
+                    });
                 }
                 AdjustmentType::ColorBalance {
                     shadows,
@@ -252,12 +247,14 @@ pub(crate) fn adjustment_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                 ui.add_space(12.0);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Reset").clicked() {
+                    if ui.button("Default").clicked() {
                         actions.dialogs.set_adjustment_dialog = Some(default_adjustment_like(&adj));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
+                        let pressed =
+                            cancel_or_reset(ui, "Cancel", "Reset", |ui, text| ui.button(text));
+                        if pressed != CancelPress::None {
+                            cancel = pressed;
                         }
                         if ui.button("OK").clicked() {
                             apply = true;
@@ -268,14 +265,22 @@ pub(crate) fn adjustment_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
             }
         });
 
+    match cancel {
+        CancelPress::Cancel => {
+            actions.dialogs.cancel_adjustment_dialog = true;
+            return;
+        }
+        CancelPress::Reset => {
+            actions.dialogs.set_adjustment_dialog = Some(opened);
+            return;
+        }
+        CancelPress::None => {}
+    }
     if apply {
         if changed {
             actions.dialogs.set_adjustment_dialog = Some(adj);
         }
         actions.dialogs.apply_adjustment_dialog = true;
-    }
-    if cancel {
-        actions.dialogs.cancel_adjustment_dialog = true;
     }
 }
 
@@ -971,7 +976,7 @@ pub(crate) fn curves_editor_ui(
     preview_enabled: bool,
     armed_eyedropper: Option<AdjEyedropperKind>,
     apply: &mut bool,
-    cancel: &mut bool,
+    cancel: &mut CancelPress,
     actions: &mut UiActions,
 ) -> bool {
     let mut changed = false;
@@ -984,6 +989,9 @@ pub(crate) fn curves_editor_ui(
         .data(|data| data.get_temp::<usize>(selected_id))
         .unwrap_or(0)
         .min(3);
+    if let Some(channel) = channel_shortcut(ui) {
+        selected = channel;
+    }
 
     ui.horizontal_top(|ui| {
         ui.add_space(14.0);
@@ -999,36 +1007,53 @@ pub(crate) fn curves_editor_ui(
                             .selected_text("Default")
                             .width(206.0)
                             .show_ui(ui, |ui| {
+                                // The user's own first, then the built-in ones.
+                                let user = &data.dialogs.adjustment_presets.curves;
+                                for preset in user.iter() {
+                                    if ui.selectable_label(false, &preset.name).clicked() {
+                                        *channels = preset.channels.clone();
+                                        changed = true;
+                                    }
+                                }
+                                if !user.is_empty() {
+                                    ui.separator();
+                                }
                                 for (name, preset) in builtin_curves_presets() {
                                     if ui.selectable_label(false, name).clicked() {
                                         *channels = preset;
                                         changed = true;
                                     }
                                 }
-                                let user = &data.dialogs.adjustment_presets.curves;
-                                if !user.is_empty() {
-                                    ui.separator();
-                                    let mut del_idx: Option<usize> = None;
-                                    for (i, preset) in user.iter().enumerate() {
-                                        ui.horizontal(|ui| {
-                                            if ui.selectable_label(false, &preset.name).clicked() {
-                                                *channels = preset.channels.clone();
-                                                changed = true;
-                                            }
-                                            if ui
-                                                .small_button(ph::X)
-                                                .on_hover_text("Delete preset")
-                                                .clicked()
-                                            {
-                                                del_idx = Some(i);
-                                            }
-                                        });
-                                    }
-                                    if let Some(i) = del_idx {
-                                        actions.dialogs.delete_curves_preset = Some(i);
-                                    }
+                                ui.separator();
+                                if ui.selectable_label(false, LOAD_ACV).clicked() {
+                                    actions.dialogs.adjustment_preset_file =
+                                        Some(crate::ui::PresetFile::Load);
+                                }
+                                if ui.selectable_label(false, SAVE_ACV).clicked() {
+                                    actions.dialogs.adjustment_preset_file =
+                                        Some(crate::ui::PresetFile::Save);
+                                }
+                                // Deleting is a window of its own: nothing is
+                                // lost to a click beside a name.
+                                if !user.is_empty()
+                                    && ui.selectable_label(false, DELETE_PRESET).clicked()
+                                {
+                                    open_preset_deleter(ui.ctx(), "curves");
                                 }
                             });
+                        let names: Vec<&str> = data
+                            .dialogs
+                            .adjustment_presets
+                            .curves
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect();
+                        if let Some(i) =
+                            preset_deleter(ui.ctx(), "curves", "Delete Curves Preset", &names)
+                        {
+                            actions.dialogs.delete_adjustment_preset =
+                                Some((crate::ui::AdjustmentPresetList::Curves, i));
+                        }
                         ui.end_row();
 
                         ui.label("Save as:");
@@ -1081,8 +1106,9 @@ pub(crate) fn curves_editor_ui(
             if levels_side_button(ui, "OK").clicked() {
                 *apply = true;
             }
-            if levels_side_button(ui, "Cancel").clicked() {
-                *cancel = true;
+            let pressed = cancel_or_reset(ui, "Cancel", "Reset", levels_side_button);
+            if pressed != CancelPress::None {
+                *cancel = pressed;
             }
             if !cmyk {
                 if levels_side_button(ui, "Auto").clicked() {
@@ -1215,15 +1241,14 @@ pub(crate) fn curves_point_values_ui(
             let last = points.len().saturating_sub(1);
             let mut input = points[idx].0 * 255.0;
             let input_enabled = idx != 0 && idx != last;
-            if ui
-                .add_enabled(
-                    input_enabled,
-                    egui::DragValue::new(&mut input)
-                        .range(0.0..=255.0)
-                        .speed(1.0),
-                )
-                .changed()
-            {
+            let r = ui.add_enabled(
+                input_enabled,
+                egui::DragValue::new(&mut input)
+                    .range(0.0..=255.0)
+                    .speed(1.0),
+            );
+            let tens = crate::ui::widgets::shift_arrow_tens(ui, &r, &mut input, 1.0, 0.0..=255.0);
+            if r.changed() || tens {
                 let lo = points[idx - 1].0 + 0.001;
                 let hi = points[idx + 1].0 - 0.001;
                 points[idx].0 = (input / 255.0).clamp(lo, hi);
@@ -1237,14 +1262,13 @@ pub(crate) fn curves_point_values_ui(
         ui.label("Output");
         if let Some(idx) = active {
             let mut output = points[idx].1 * 255.0;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut output)
-                        .range(0.0..=255.0)
-                        .speed(1.0),
-                )
-                .changed()
-            {
+            let r = ui.add(
+                egui::DragValue::new(&mut output)
+                    .range(0.0..=255.0)
+                    .speed(1.0),
+            );
+            let tens = crate::ui::widgets::shift_arrow_tens(ui, &r, &mut output, 1.0, 0.0..=255.0);
+            if r.changed() || tens {
                 points[idx].1 = (output / 255.0).clamp(0.0, 1.0);
                 changed = true;
             }
@@ -1311,9 +1335,20 @@ pub(crate) fn curve_graph_ui(
         }
     }
 
+    // Alt+click on the graph: a grid of four or of ten, as in Photoshop.
+    let fine_id = egui::Id::new("curves_fine_grid");
+    let mut fine = ui
+        .memory(|m| m.data.get_temp::<bool>(fine_id))
+        .unwrap_or(false);
+    let alt = ui.input(|i| i.modifiers.alt);
+    if response.clicked() && alt {
+        fine = !fine;
+        ui.memory_mut(|m| m.data.insert_temp(fine_id, fine));
+    }
+    let cells = if fine { 10 } else { 4 };
     let grid = Stroke::new(1.0_f32, Color32::from_gray(48));
-    for k in 1..4 {
-        let t = k as f32 / 4.0;
+    for k in 1..cells {
+        let t = k as f32 / cells as f32;
         let gx = rect.left() + t * size;
         let gy = rect.top() + t * size;
         painter.line_segment(
@@ -1363,10 +1398,59 @@ pub(crate) fn curve_graph_ui(
         .flatten();
 
     if response.clicked()
+        && !alt
         && let Some(pos) = response.interact_pointer_pos()
     {
         active = nearest(pos, points);
         ui.memory_mut(|m| m.data.insert_temp(active_id, active));
+    }
+
+    // The point picked moves with the arrow keys (Shift: ten levels) and
+    // goes with Delete, as in Photoshop; not while a number is being typed.
+    if let Some(i) = active.filter(|&i| i < points.len())
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        let step = if ui.input(|inp| inp.modifiers.shift) {
+            10.0
+        } else {
+            1.0
+        } / 255.0;
+        let mut moved = (0.0f32, 0.0f32);
+        for (key, d) in [
+            (egui::Key::ArrowLeft, (-step, 0.0)),
+            (egui::Key::ArrowRight, (step, 0.0)),
+            (egui::Key::ArrowUp, (0.0, step)),
+            (egui::Key::ArrowDown, (0.0, -step)),
+        ] {
+            let pressed = ui.input_mut(|inp| {
+                inp.consume_key(egui::Modifiers::NONE, key)
+                    || inp.consume_key(egui::Modifiers::SHIFT, key)
+            });
+            if pressed {
+                moved = (moved.0 + d.0, moved.1 + d.1);
+            }
+        }
+        if moved != (0.0, 0.0) {
+            let last = points.len() - 1;
+            let (lo, hi) = match i {
+                0 => (0.0, 0.0),
+                _ if i == last => (1.0, 1.0),
+                _ => (points[i - 1].0 + 0.001, points[i + 1].0 - 0.001),
+            };
+            let (x, y) = points[i];
+            points[i] = ((x + moved.0).clamp(lo, hi), (y + moved.1).clamp(0.0, 1.0));
+            changed = true;
+        }
+        let delete = ui.input_mut(|inp| {
+            inp.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                || inp.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+        });
+        if delete && i != 0 && i != points.len() - 1 {
+            points.remove(i);
+            active = None;
+            ui.memory_mut(|m| m.data.insert_temp(active_id, active));
+            changed = true;
+        }
     }
 
     if response.drag_started()
@@ -1434,6 +1518,19 @@ pub(crate) fn curve_graph_ui(
     changed
 }
 
+/// Alt+2 … Alt+5 in Levels and Curves pick the channel, as in Photoshop: the
+/// composite (or C on a CMYK page), then the three (or M, Y, K) after it.
+fn channel_shortcut(ui: &mut egui::Ui) -> Option<usize> {
+    let keys = [
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+    ];
+    keys.into_iter()
+        .position(|key| ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, key)))
+}
+
 pub(crate) fn levels_editor_ui(
     ui: &mut egui::Ui,
     data: &UiData,
@@ -1443,7 +1540,7 @@ pub(crate) fn levels_editor_ui(
     preview_enabled: bool,
     armed_eyedropper: Option<AdjEyedropperKind>,
     apply: &mut bool,
-    cancel: &mut bool,
+    cancel: &mut CancelPress,
     actions: &mut UiActions,
 ) -> bool {
     let mut changed = false;
@@ -1457,6 +1554,9 @@ pub(crate) fn levels_editor_ui(
         .data(|data| data.get_temp::<usize>(selected_id))
         .unwrap_or(0)
         .min(3);
+    if let Some(channel) = channel_shortcut(ui) {
+        selected = channel;
+    }
 
     ui.horizontal_top(|ui| {
         ui.add_space(14.0);
@@ -1472,36 +1572,53 @@ pub(crate) fn levels_editor_ui(
                             .selected_text("Default")
                             .width(206.0)
                             .show_ui(ui, |ui| {
+                                // The user's own first, then the built-in ones.
+                                let user = &data.dialogs.adjustment_presets.levels;
+                                for preset in user.iter() {
+                                    if ui.selectable_label(false, &preset.name).clicked() {
+                                        *channels = preset.channels;
+                                        changed = true;
+                                    }
+                                }
+                                if !user.is_empty() {
+                                    ui.separator();
+                                }
                                 for (name, preset) in builtin_levels_presets() {
                                     if ui.selectable_label(false, name).clicked() {
                                         *channels = preset;
                                         changed = true;
                                     }
                                 }
-                                let user = &data.dialogs.adjustment_presets.levels;
-                                if !user.is_empty() {
-                                    ui.separator();
-                                    let mut del_idx: Option<usize> = None;
-                                    for (i, preset) in user.iter().enumerate() {
-                                        ui.horizontal(|ui| {
-                                            if ui.selectable_label(false, &preset.name).clicked() {
-                                                *channels = preset.channels;
-                                                changed = true;
-                                            }
-                                            if ui
-                                                .small_button(ph::X)
-                                                .on_hover_text("Delete preset")
-                                                .clicked()
-                                            {
-                                                del_idx = Some(i);
-                                            }
-                                        });
-                                    }
-                                    if let Some(i) = del_idx {
-                                        actions.dialogs.delete_levels_preset = Some(i);
-                                    }
+                                ui.separator();
+                                if ui.selectable_label(false, LOAD_ALV).clicked() {
+                                    actions.dialogs.adjustment_preset_file =
+                                        Some(crate::ui::PresetFile::Load);
+                                }
+                                if ui.selectable_label(false, SAVE_ALV).clicked() {
+                                    actions.dialogs.adjustment_preset_file =
+                                        Some(crate::ui::PresetFile::Save);
+                                }
+                                // Deleting is a window of its own: nothing is
+                                // lost to a click beside a name.
+                                if !user.is_empty()
+                                    && ui.selectable_label(false, DELETE_PRESET).clicked()
+                                {
+                                    open_preset_deleter(ui.ctx(), "levels");
                                 }
                             });
+                        let names: Vec<&str> = data
+                            .dialogs
+                            .adjustment_presets
+                            .levels
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect();
+                        if let Some(i) =
+                            preset_deleter(ui.ctx(), "levels", "Delete Levels Preset", &names)
+                        {
+                            actions.dialogs.delete_adjustment_preset =
+                                Some((crate::ui::AdjustmentPresetList::Levels, i));
+                        }
                         ui.end_row();
 
                         ui.label("Save as:");
@@ -1561,8 +1678,9 @@ pub(crate) fn levels_editor_ui(
             if levels_side_button(ui, "OK").clicked() {
                 *apply = true;
             }
-            if levels_side_button(ui, "Cancel").clicked() {
-                *cancel = true;
+            let pressed = cancel_or_reset(ui, "Cancel", "Reset", levels_side_button);
+            if pressed != CancelPress::None {
+                *cancel = pressed;
             }
             if !cmyk {
                 if levels_side_button(ui, "Auto").clicked() {
@@ -1888,22 +2006,20 @@ pub(crate) fn levels_input_values(
     gamma: &mut f32,
     in_white: &mut u8,
 ) -> bool {
+    use crate::ui::widgets::shift_arrow_tens;
     let mut changed = false;
     ui.horizontal(|ui| {
-        changed |= ui
-            .add_sized([44.0, 20.0], egui::DragValue::new(in_black).range(0..=254))
-            .changed();
+        let r = ui.add_sized([44.0, 20.0], egui::DragValue::new(in_black).range(0..=254));
+        changed |= r.changed() | shift_arrow_tens(ui, &r, in_black, 1.0, 0.0..=254.0);
         ui.add_space(44.0);
-        changed |= ui
-            .add_sized(
-                [52.0, 20.0],
-                egui::DragValue::new(gamma).range(0.10..=9.99).speed(0.01),
-            )
-            .changed();
+        let r = ui.add_sized(
+            [52.0, 20.0],
+            egui::DragValue::new(gamma).range(0.10..=9.99).speed(0.01),
+        );
+        changed |= r.changed() | shift_arrow_tens(ui, &r, gamma, 0.01, 0.10..=9.99);
         ui.add_space(36.0);
-        changed |= ui
-            .add_sized([44.0, 20.0], egui::DragValue::new(in_white).range(1..=255))
-            .changed();
+        let r = ui.add_sized([44.0, 20.0], egui::DragValue::new(in_white).range(1..=255));
+        changed |= r.changed() | shift_arrow_tens(ui, &r, in_white, 1.0, 1.0..=255.0);
     });
     changed
 }
@@ -1969,16 +2085,15 @@ pub(crate) fn levels_output_values(
     out_black: &mut u8,
     out_white: &mut u8,
 ) -> bool {
+    use crate::ui::widgets::shift_arrow_tens;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        changed |= ui
-            .add_sized([44.0, 20.0], egui::DragValue::new(out_black).range(0..=254))
-            .changed();
+        let r = ui.add_sized([44.0, 20.0], egui::DragValue::new(out_black).range(0..=254));
+        changed |= r.changed() | shift_arrow_tens(ui, &r, out_black, 1.0, 0.0..=254.0);
         ui.add_space(136.0);
-        changed |= ui
-            .add_sized([44.0, 20.0], egui::DragValue::new(out_white).range(1..=255))
-            .changed();
+        let r = ui.add_sized([44.0, 20.0], egui::DragValue::new(out_white).range(1..=255));
+        changed |= r.changed() | shift_arrow_tens(ui, &r, out_white, 1.0, 1.0..=255.0);
     });
     changed
 }
@@ -2093,6 +2208,171 @@ pub(crate) fn auto_levels_channels_from_histogram(
     )
 }
 
+/// The preset lists' row that loads a Photoshop preset file.
+const LOAD_ACV: &str = "Load Photoshop preset (.acv)\u{2026}";
+const LOAD_ALV: &str = "Load Photoshop preset (.alv)\u{2026}";
+const SAVE_ACV: &str = "Save as Photoshop preset (.acv)\u{2026}";
+const SAVE_ALV: &str = "Save as Photoshop preset (.alv)\u{2026}";
+
+/// Photoshop's Hue/Saturation: what is edited (Master, or one colour of six:
+/// Alt+2 … Alt+8 pick them), its three sliders, Colorize (seeded from the
+/// foreground colour) and two hue bars, the colours as they are and as they
+/// come out, the colour edited marked on the first. Returns true when
+/// anything changed.
+pub(crate) fn hue_saturation_editor_ui(
+    ui: &mut egui::Ui,
+    master: [&mut f32; 3],
+    colorize: &mut Option<[f32; 3]>,
+    ranges: &mut [[f32; 3]; 6],
+    foreground: [u8; 4],
+) -> bool {
+    use crate::core::layer::{HUE_RANGE_NAMES, hue_range_weight};
+    let edit_id = egui::Id::new("hue_saturation_edit");
+    let mut edit = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<usize>(edit_id))
+        .unwrap_or(0)
+        .min(6);
+    let keys = [
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+        egui::Key::Num6,
+        egui::Key::Num7,
+        egui::Key::Num8,
+    ];
+    for (i, key) in keys.into_iter().enumerate() {
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::ALT, key)) {
+            edit = i;
+        }
+    }
+    let name = |i: usize| {
+        if i == 0 {
+            "Master"
+        } else {
+            HUE_RANGE_NAMES[i - 1]
+        }
+    };
+    let master_hue = *master[0];
+    let mut changed = false;
+
+    ui.add_enabled_ui(colorize.is_none(), |ui| {
+        ui.horizontal(|ui| {
+            ui.add_sized([112.0, 18.0], egui::Label::new("Edit"));
+            egui::ComboBox::from_id_salt("hue_saturation_edit_combo")
+                .selected_text(name(edit))
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for i in 0..7 {
+                        ui.selectable_value(&mut edit, i, format!("{}    Alt+{}", name(i), i + 2));
+                    }
+                });
+        });
+    });
+    ui.add_space(4.0);
+
+    let spectrum: Vec<egui::Color32> = (0..=12)
+        .map(|i| hsv_to_color32(i as f32 / 12.0, 1.0, 1.0))
+        .collect();
+    let light = [
+        egui::Color32::BLACK,
+        egui::Color32::GRAY,
+        egui::Color32::WHITE,
+    ];
+    if let Some(c) = colorize.as_mut() {
+        changed |= color_slider_f32(ui, &mut c[0], 0.0..=360.0, "Hue", &spectrum).changed();
+        let tint = hsv_to_color32(c[0] / 360.0, 1.0, 1.0);
+        changed |= color_slider_f32(
+            ui,
+            &mut c[1],
+            0.0..=100.0,
+            "Saturation",
+            &[egui::Color32::from_gray(130), tint],
+        )
+        .changed();
+        changed |= color_slider_f32(ui, &mut c[2], -100.0..=100.0, "Lightness", &light).changed();
+    } else {
+        let [hue, saturation, lightness] = if edit == 0 {
+            master
+        } else {
+            let [h, s, l] = &mut ranges[edit - 1];
+            [h, s, l]
+        };
+        changed |= color_slider_f32(ui, hue, -180.0..=180.0, "Hue", &spectrum).changed();
+        changed |= color_slider_f32(
+            ui,
+            saturation,
+            -100.0..=100.0,
+            "Saturation",
+            &[
+                egui::Color32::from_gray(130),
+                hsv_to_color32(0.0, 0.55, 0.85),
+                hsv_to_color32(0.0, 1.0, 1.0),
+            ],
+        )
+        .changed();
+        changed |= color_slider_f32(ui, lightness, -100.0..=100.0, "Lightness", &light).changed();
+    }
+
+    ui.add_space(4.0);
+    let mut on = colorize.is_some();
+    if ui.checkbox(&mut on, "Colorize").changed() {
+        *colorize = on.then(|| {
+            let [r, g, b, _] = foreground.map(|v| v as f32 / 255.0);
+            let (h, s, _) = iai_color::color::rgb_to_hsl(r, g, b);
+            // A grey foreground gives Photoshop's red.
+            let hue = if s > 0.02 { h * 360.0 } else { 0.0 };
+            [hue, 25.0, 0.0]
+        });
+        changed = true;
+    }
+
+    // The colours as they are, and as they come out.
+    ui.add_space(6.0);
+    let width = ui.available_width().min(330.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let columns = 120;
+    let step = rect.width() / columns as f32;
+    let (top, bottom) = (
+        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.center().y - 1.0)),
+        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.center().y + 1.0), rect.max),
+    );
+    for i in 0..columns {
+        let h = (i as f32 + 0.5) / columns as f32;
+        let out = match *colorize {
+            Some([c_hue, c_sat, _]) => hsv_to_color32(c_hue / 360.0, c_sat / 100.0, 1.0),
+            None => {
+                let shift = master_hue
+                    + ranges
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| hue_range_weight(h, i) * r[0])
+                        .sum::<f32>();
+                hsv_to_color32((h + shift / 360.0).rem_euclid(1.0), 1.0, 1.0)
+            }
+        };
+        let x = rect.min.x + i as f32 * step;
+        let column = |r: egui::Rect| {
+            egui::Rect::from_min_max(egui::pos2(x, r.min.y), egui::pos2(x + step + 0.5, r.max.y))
+        };
+        painter.rect_filled(column(top), 0.0, hsv_to_color32(h, 1.0, 1.0));
+        painter.rect_filled(column(bottom), 0.0, out);
+        if colorize.is_none() && edit > 0 {
+            // Shade what the colour edited does not take.
+            let w = hue_range_weight(h, edit - 1);
+            if w < 1.0 {
+                let shade = ((1.0 - w) * 150.0) as u8;
+                painter.rect_filled(column(top), 0.0, egui::Color32::from_black_alpha(shade));
+            }
+        }
+    }
+
+    ui.ctx().data_mut(|d| d.insert_temp(edit_id, edit));
+    changed
+}
+
 pub(crate) fn color_balance_editor_ui(
     ui: &mut egui::Ui,
     shadows: &mut [f32; 3],
@@ -2100,7 +2380,7 @@ pub(crate) fn color_balance_editor_ui(
     highlights: &mut [f32; 3],
     preserve_luminosity: &mut bool,
     apply: &mut bool,
-    cancel: &mut bool,
+    cancel: &mut CancelPress,
 ) -> bool {
     let tone_id = ui.make_persistent_id("color_balance_tone");
     let mut tone = ui
@@ -2185,8 +2465,9 @@ pub(crate) fn color_balance_editor_ui(
             if levels_side_button(ui, "OK").clicked() {
                 *apply = true;
             }
-            if levels_side_button(ui, "Cancel").clicked() {
-                *cancel = true;
+            let pressed = cancel_or_reset(ui, "Cancel", "Reset", levels_side_button);
+            if pressed != CancelPress::None {
+                *cancel = pressed;
             }
             ui.add_space(12.0);
             let mut preview = true;
@@ -2208,7 +2489,9 @@ pub(crate) fn color_balance_values_row(ui: &mut egui::Ui, values: &mut [f32; 3])
                 [42.0, 20.0],
                 egui::DragValue::new(&mut v).range(-100..=100).speed(1.0),
             );
-            if response.changed() {
+            let tens =
+                crate::ui::widgets::shift_arrow_tens(ui, &response, &mut v, 1.0, -100.0..=100.0);
+            if response.changed() || tens {
                 *value = v.clamp(-100, 100) as f32;
                 changed = true;
             }
@@ -2387,11 +2670,7 @@ pub(crate) fn hsv_to_color32(h: f32, s: f32, v: f32) -> egui::Color32 {
 pub(crate) fn default_adjustment_like(adj: &AdjustmentType) -> AdjustmentType {
     match adj {
         AdjustmentType::Levels { .. } => AdjustmentType::default_levels(),
-        AdjustmentType::HueSaturation { .. } => AdjustmentType::HueSaturation {
-            hue: 0.0,
-            saturation: 0.0,
-            lightness: 0.0,
-        },
+        AdjustmentType::HueSaturation { .. } => AdjustmentType::hue_saturation(0.0, 0.0, 0.0),
         AdjustmentType::ColorBalance { .. } => AdjustmentType::ColorBalance {
             shadows: [0.0; 3],
             midtones: [0.0; 3],

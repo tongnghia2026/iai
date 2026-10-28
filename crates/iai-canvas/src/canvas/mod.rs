@@ -110,6 +110,15 @@ pub(crate) fn fresh_layer_revision() -> u64 {
     (NEXT_CANVAS_BAND.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32) | 1
 }
 
+/// Where a page stands: its history, its layers' revision and its size (see
+/// [`Canvas::page_stamp`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageStamp {
+    history: u64,
+    layers: u64,
+    size: (u32, u32),
+}
+
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
@@ -358,6 +367,49 @@ impl Canvas {
             connector_fp: self.connector_fp,
             powerclip_edit_frame: self.powerclip_edit_frame,
         }
+    }
+
+    /// A copy of the page for a page-wide change (a crop, a resize) to run on
+    /// another thread: [`Self::export_snapshot`] with the selection too. Make
+    /// the change on the copy, then hand it back to
+    /// [`Self::adopt_page_change`].
+    pub fn page_work_copy(&self) -> Self {
+        let mut copy = self.export_snapshot();
+        copy.selection = self.selection.clone();
+        copy
+    }
+
+    /// What [`Self::adopt_page_change`] needs unchanged: a change made on a
+    /// copy belongs only on the page as it was copied.
+    pub fn page_stamp(&self) -> PageStamp {
+        PageStamp {
+            history: self.history_revision(),
+            layers: self.layer_revision,
+            size: (self.width, self.height),
+        }
+    }
+
+    /// Put in place a page-wide change made on `copy` (see
+    /// [`Self::page_work_copy`]): its layers, size, selection and settings,
+    /// and the undo steps it recorded there, recorded here. Only for the page
+    /// whose [`Self::page_stamp`] is the one it was copied at.
+    pub fn adopt_page_change(&mut self, mut copy: Canvas) {
+        self.width = copy.width;
+        self.height = copy.height;
+        self.layer_stack = std::mem::replace(&mut copy.layer_stack, LayerStack::new(1, 1));
+        self.selection = std::mem::replace(&mut copy.selection, Selection::new(0, 0));
+        self.metadata = copy.metadata.clone();
+        self.clip_fp = copy.clip_fp;
+        self.connector_fp = copy.connector_fp;
+        self.edge_cache = None;
+        self.layer_revision = self
+            .layer_revision
+            .max(copy.layer_revision)
+            .saturating_add(1);
+        for step in copy.cmd_history.take_steps() {
+            self.record_as(step, ChangeKind::LayerStructure);
+        }
+        self.flatten_full();
     }
 
     pub fn new_default() -> Self {
@@ -763,6 +815,12 @@ impl Canvas {
         kind.outcome(revision, is_dirty)
     }
 
+    /// The names of the steps recorded since the last call, oldest first:
+    /// how the engine hears of a change a tool of the window made.
+    pub fn take_recorded_steps(&mut self) -> Vec<String> {
+        self.cmd_history.take_recorded()
+    }
+
     /// Run a command and record it ONLY if it succeeds.
     ///
     /// A command that fails leaves the document untouched and never enters
@@ -870,6 +928,42 @@ impl Canvas {
             self.reconcile_path_ink();
             self.layer_revision += 1;
         }
+    }
+
+    /// Cheap identity of the content a save writes: its history position
+    /// plus the shared tile buffers of every layer, mask and alpha channel.
+    /// Any edit either moves the history or swaps tiles, and a canvas
+    /// replaced wholesale (reload, revert) carries new tiles even when its
+    /// history restarts at the same revision. Equal before and after a write
+    /// means the file holds everything the document does.
+    pub fn content_fingerprint(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn tiles_sum(map: &iai_raster::tile::TileMap) -> u64 {
+            map.tiles.iter().fold(0u64, |sum, (pos, tile)| {
+                let mut h = DefaultHasher::new();
+                pos.hash(&mut h);
+                (std::sync::Arc::as_ptr(tile) as usize).hash(&mut h);
+                tile.revision.hash(&mut h);
+                sum.wrapping_add(h.finish())
+            })
+        }
+
+        let mut h = DefaultHasher::new();
+        self.history_revision().hash(&mut h);
+        (self.width, self.height).hash(&mut h);
+        for layer in self.layer_stack.layers.iter() {
+            layer.id.hash(&mut h);
+            tiles_sum(&layer.tiles).hash(&mut h);
+            if let Some(mask) = &layer.mask {
+                tiles_sum(&mask.tiles).hash(&mut h);
+            }
+        }
+        for channel in &self.channels.alpha {
+            (channel.id, channel.revision).hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Monotonic stamp of the history stacks. The History panel keys its cache
@@ -1610,11 +1704,8 @@ mod hdr_adjust_tests {
             .expect("convert to CMYK");
         let before = canvas.layer_stack.layers[0].tiles.clone();
         assert!(
-            !canvas.apply_adjustment_to_active_layer(AdjustmentType::HueSaturation {
-                hue: 40.0,
-                saturation: 20.0,
-                lightness: 0.0,
-            }),
+            !canvas
+                .apply_adjustment_to_active_layer(AdjustmentType::hue_saturation(40.0, 20.0, 0.0)),
             "RGB-space adjustments must be refused on a CMYK document"
         );
         assert_eq!(

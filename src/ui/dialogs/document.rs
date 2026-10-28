@@ -506,8 +506,11 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         d.get_temp::<f32>(egui::Id::new("res_h"))
             .unwrap_or(data.doc.canvas_h as f32)
     });
-    let mut anchor_x = ctx.data_mut(|d| d.get_temp::<i32>(egui::Id::new("res_ax")).unwrap_or(0i32));
-    let mut anchor_y = ctx.data_mut(|d| d.get_temp::<i32>(egui::Id::new("res_ay")).unwrap_or(0i32));
+    // Where the picture stays, 0 to 8 across then down (4: the middle).
+    let mut anchor = ctx.data_mut(|d| {
+        d.get_temp::<usize>(egui::Id::new("res_anchor"))
+            .unwrap_or(0)
+    });
     let mut res_unit = ctx.data_mut(|d| {
         d.get_temp::<crate::core::units::Unit>(egui::Id::new("res_unit"))
             .unwrap_or(crate::core::units::Unit::Pixels)
@@ -607,12 +610,8 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                     );
                     ui.end_row();
 
-                    ui.label("Offset X:");
-                    ui.add(egui::DragValue::new(&mut anchor_x).suffix(" px").speed(1.0));
-                    ui.end_row();
-
-                    ui.label("Offset Y:");
-                    ui.add(egui::DragValue::new(&mut anchor_y).suffix(" px").speed(1.0));
+                    ui.label("Anchor:");
+                    anchor_grid(ui, &mut anchor);
                     ui.end_row();
                 });
 
@@ -629,8 +628,7 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
             ctx.data_mut(|d| {
                 d.insert_temp(egui::Id::new("res_w"), new_w_px);
                 d.insert_temp(egui::Id::new("res_h"), new_h_px);
-                d.insert_temp(egui::Id::new("res_ax"), anchor_x);
-                d.insert_temp(egui::Id::new("res_ay"), anchor_y);
+                d.insert_temp(egui::Id::new("res_anchor"), anchor);
                 d.insert_temp(egui::Id::new("res_unit"), res_unit);
                 d.insert_temp(egui::Id::new("res_dpi"), res_dpi);
             });
@@ -640,29 +638,101 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                 if ui.button("  Apply  ").clicked() {
                     do_resize = true;
                 }
-                if ui.button("  Cancel  ").clicked() {
-                    do_cancel = true;
+                match cancel_or_reset(ui, "  Cancel  ", "  Reset  ", |ui, text| ui.button(text)) {
+                    CancelPress::Cancel => do_cancel = true,
+                    CancelPress::Reset => forget_canvas_size_fields(ctx),
+                    CancelPress::None => {}
                 }
             });
             ui.add_space(4.0);
         });
 
     if do_resize {
-        // The picture stays at the top-left corner (the anchor fields are
-        // not applied yet).
-        let _ = (anchor_x, anchor_y);
-        actions.run(
-            "image.canvas_size",
-            serde_json::json!({
-                "widthPx": (new_w_px as u32).max(1),
-                "heightPx": (new_h_px as u32).max(1),
-            }),
-        );
+        // What the page gains on its Background takes the background colour,
+        // as Photoshop's Canvas Size does.
+        let mut args = serde_json::json!({
+            "widthPx": (new_w_px as u32).max(1),
+            "heightPx": (new_h_px as u32).max(1),
+            "anchor": ANCHORS[anchor.min(8)],
+        });
+        if data.layers.layer_is_background.iter().any(|&b| b) {
+            let [r, g, b, _] = data.tool.bg_color;
+            args["fill"] = format!("#{r:02X}{g:02X}{b:02X}").into();
+        }
+        actions.run("image.canvas_size", args);
         actions.dialogs.show_resize_dialog = Some(false);
     }
     if do_cancel {
         actions.dialogs.show_resize_dialog = Some(false);
     }
+    if do_resize || do_cancel {
+        // The next open starts from the page as it is then, not from these
+        // numbers (another tab, or this one just resized).
+        forget_canvas_size_fields(ctx);
+    }
+}
+
+/// The anchor names of `image.canvas_size`, across then down.
+const ANCHORS: [&str; 9] = [
+    "top_left",
+    "top",
+    "top_right",
+    "left",
+    "center",
+    "right",
+    "bottom_left",
+    "bottom",
+    "bottom_right",
+];
+
+/// Canvas Size's numbers go: the dialog shows the page as it is again.
+fn forget_canvas_size_fields(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove::<f32>(egui::Id::new("res_w"));
+        d.remove::<f32>(egui::Id::new("res_h"));
+        d.remove::<usize>(egui::Id::new("res_anchor"));
+    });
+}
+
+/// Photoshop's anchor: nine squares, the one picked is where the picture
+/// stays; the arrows round it show where the page grows.
+fn anchor_grid(ui: &mut egui::Ui, anchor: &mut usize) {
+    const ARROWS: [&str; 9] = [
+        ph::ARROW_UP_LEFT,
+        ph::ARROW_UP,
+        ph::ARROW_UP_RIGHT,
+        ph::ARROW_LEFT,
+        "",
+        ph::ARROW_RIGHT,
+        ph::ARROW_DOWN_LEFT,
+        ph::ARROW_DOWN,
+        ph::ARROW_DOWN_RIGHT,
+    ];
+    let (row, column) = ((*anchor / 3) as i32, (*anchor % 3) as i32);
+    egui::Grid::new("canvas_size_anchor")
+        .spacing([2.0, 2.0])
+        .show(ui, |ui| {
+            for i in 0..9usize {
+                let (r, c) = ((i / 3) as i32, (i % 3) as i32);
+                let (dr, dc) = (r - row, c - column);
+                let text = if i == *anchor {
+                    ph::CIRCLE.to_string()
+                } else if dr.abs() <= 1 && dc.abs() <= 1 {
+                    ARROWS[((dr + 1) * 3 + dc + 1) as usize].to_string()
+                } else {
+                    String::new()
+                };
+                let button = egui::Button::new(text)
+                    .min_size(egui::vec2(22.0, 22.0))
+                    .selected(i == *anchor);
+                if ui.add(button).clicked() {
+                    *anchor = i;
+                }
+                if c == 2 {
+                    ui.end_row();
+                }
+            }
+        });
 }
 
 pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
@@ -824,8 +894,14 @@ pub(crate) fn image_size_dialog(ctx: &egui::Context, data: &UiData, actions: &mu
                 if ui.button("  Apply  ").clicked() {
                     do_resize = true;
                 }
-                if ui.button("  Cancel  ").clicked() {
-                    do_cancel = true;
+                match cancel_or_reset(ui, "  Cancel  ", "  Reset  ", |ui, text| ui.button(text)) {
+                    CancelPress::Cancel => do_cancel = true,
+                    CancelPress::Reset => ctx.data_mut(|d| {
+                        d.remove::<f32>(egui::Id::new("img_size_w"));
+                        d.remove::<f32>(egui::Id::new("img_size_h"));
+                        d.remove::<f32>(egui::Id::new("img_size_dpi"));
+                    }),
+                    CancelPress::None => {}
                 }
             });
             ui.add_space(4.0);

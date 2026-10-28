@@ -210,39 +210,10 @@ fn claim_recovery_file(dir: &Path, path: &Path) -> Option<PathBuf> {
     Some(target)
 }
 
-/// Cheap identity of a single image's saved content: its history position plus
-/// the shared tile buffers of every layer, mask and alpha channel. Any edit
-/// either moves the history or swaps tiles, and a canvas replaced wholesale
-/// (reload, revert) carries new tiles even when its history restarts at the
-/// same revision.
+/// Cheap identity of a single image's saved content; see
+/// [`Canvas::content_fingerprint`].
 pub(in crate::app) fn content_fingerprint(canvas: &Canvas) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    fn tiles_sum(map: &crate::core::tile::TileMap) -> u64 {
-        map.tiles.iter().fold(0u64, |sum, (pos, tile)| {
-            let mut h = DefaultHasher::new();
-            pos.hash(&mut h);
-            (std::sync::Arc::as_ptr(tile) as usize).hash(&mut h);
-            tile.revision.hash(&mut h);
-            sum.wrapping_add(h.finish())
-        })
-    }
-
-    let mut h = DefaultHasher::new();
-    canvas.history_revision().hash(&mut h);
-    (canvas.width, canvas.height).hash(&mut h);
-    for layer in canvas.layer_stack.layers.iter() {
-        layer.id.hash(&mut h);
-        tiles_sum(&layer.tiles).hash(&mut h);
-        if let Some(mask) = &layer.mask {
-            tiles_sum(&mask.tiles).hash(&mut h);
-        }
-    }
-    for channel in &canvas.channels.alpha {
-        (channel.id, channel.revision).hash(&mut h);
-    }
-    h.finish()
+    canvas.content_fingerprint()
 }
 
 /// [`content_fingerprint`] for a multi-page document: every page and the
@@ -492,7 +463,7 @@ impl App {
     /// An image above the machine's ceiling is not mirrored. Say so once per
     /// document, so that nobody counts on a recovery that will not be there.
     fn tell_too_large_once(&mut self, idx: usize) {
-        let doc = &self.docs.documents[idx];
+        let doc = &self.docs.tabs.documents[idx];
         if !self.docs.autosave_health.too_large_told.insert(doc.id) {
             return;
         }

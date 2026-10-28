@@ -1,14 +1,61 @@
 //! The whole page: crop, straighten a card shot at a slant, resize, rotate,
 //! flip.
 
-use iai_canvas::canvas::MAX_DIMENSION;
+use std::sync::Arc;
+
+use iai_canvas::canvas::{Canvas, MAX_DIMENSION};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::common::{RectPx, not_enabled};
 use crate::{
-    CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Plan, Session, Validate,
+    Apply, CmdError, Command, CommandMeta, Effect, EngineEvent, ErrorCode, Job, Plan, Session,
+    Validate,
 };
+
+/// A change of the whole page, made on a copy of the page or on the page.
+type PageChange<T> = Arc<dyn Fn(&mut Canvas) -> Result<T, CmdError> + Send + Sync>;
+
+/// Run `change` as a job: on a worker, on a copy of the page (a crop or a
+/// resize resamples every layer, seconds on a big page), then put in place
+/// with the undo step it recorded there. Should the page have changed
+/// meanwhile, the change is made again on the page as it is now. `finish`
+/// says what came of it.
+fn page_job<T, O>(
+    s: &mut Session<'_>,
+    doc: u32,
+    label_vi: &'static str,
+    change: PageChange<T>,
+    finish: impl FnOnce(&mut Session<'_>, T) -> Result<O, CmdError> + Send + 'static,
+) -> Result<Plan<O>, CmdError>
+where
+    T: Send + 'static,
+    O: Send + 'static,
+{
+    let canvas = s.canvas_mut(Some(doc))?;
+    let copy = canvas.page_work_copy();
+    let stamp = canvas.page_stamp();
+    Ok(Plan::Job(Job {
+        doc: Some(doc),
+        label_vi: label_vi.into(),
+        work: Box::new(move |cx| {
+            cx.progress(0.05, format!("{label_vi}…"));
+            let mut copy = copy;
+            let made = change(&mut copy)?;
+            cx.check_cancelled()?;
+            Ok(Box::new(move |s: &mut Session<'_>| {
+                let canvas = s.canvas_mut(Some(doc))?;
+                let made = if canvas.page_stamp() == stamp {
+                    canvas.adopt_page_change(copy);
+                    made
+                } else {
+                    change(canvas)?
+                };
+                finish(s, made)
+            }) as Apply<O>)
+        }),
+    }))
+}
 
 /// The page's size after the change.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -132,7 +179,6 @@ impl Command for Crop {
             .as_deref()
             .map(|c| super::common::parse_color("fill", c))
             .transpose()?;
-        let canvas = s.canvas_mut(Some(doc))?;
         if let Some(f) = p.frame {
             let out_w = f.out_w.unwrap_or(f.w.round() as u32);
             let out_h = f.out_h.unwrap_or(f.h.round() as u32);
@@ -143,41 +189,48 @@ impl Command for Crop {
                 ));
             }
             let angle = f.angle.to_radians() as f32;
-            let done = match fill {
-                Some(color) => canvas.crop_transformed_with_background(
-                    f.x,
-                    f.y,
-                    f.w,
-                    f.h,
-                    out_w,
-                    out_h,
-                    f.dx,
-                    f.dy,
-                    angle,
-                    p.delete_cropped,
-                    color,
-                ),
-                None => canvas.crop_transformed(
-                    f.x,
-                    f.y,
-                    f.w,
-                    f.h,
-                    out_w,
-                    out_h,
-                    f.dx,
-                    f.dy,
-                    angle,
-                    p.delete_cropped,
-                ),
-            };
-            if !done {
-                return Err(not_enabled("the crop was refused", "Không cắt được"));
-            }
-            if let Some(dpi) = p.dpi {
-                canvas.metadata.resolution_ppi = dpi.max(1.0);
-            }
-            return sized(s, doc).map(Plan::Done);
+            let (delete_cropped, dpi) = (p.delete_cropped, p.dpi);
+            let change: PageChange<()> = Arc::new(move |canvas: &mut Canvas| {
+                let done = match fill {
+                    Some(color) => canvas.crop_transformed_with_background(
+                        f.x,
+                        f.y,
+                        f.w,
+                        f.h,
+                        out_w,
+                        out_h,
+                        f.dx,
+                        f.dy,
+                        angle,
+                        delete_cropped,
+                        color,
+                    ),
+                    None => canvas.crop_transformed(
+                        f.x,
+                        f.y,
+                        f.w,
+                        f.h,
+                        out_w,
+                        out_h,
+                        f.dx,
+                        f.dy,
+                        angle,
+                        delete_cropped,
+                    ),
+                };
+                if !done {
+                    return Err(not_enabled("the crop was refused", "Không cắt được"));
+                }
+                if let Some(dpi) = dpi {
+                    canvas.metadata.resolution_ppi = dpi.max(1.0);
+                }
+                Ok(())
+            });
+            return page_job(s, doc, "Đang cắt ảnh", change, move |s, ()| {
+                sized(s, doc)
+            });
         }
+        let canvas = s.canvas_mut(Some(doc))?;
         let rect = match p.rect {
             Some(r) => r,
             None => {
@@ -322,51 +375,64 @@ impl Command for PerspectiveCrop {
                 &format!("a result of at most {MAX_DIMENSION} pixels a side"),
             ));
         }
-        let canvas = s.canvas_mut(Some(doc))?;
-        let (w, h) = (canvas.width, canvas.height);
-        let rgba = canvas.flatten_for_export();
-        let (corners, found) = match &p.corners {
-            Some(given) => {
-                let rough = [0, 1, 2, 3].map(|i| {
-                    let c = given.get(i).copied().unwrap_or_default();
-                    (c[0], c[1])
-                });
-                (snap_corners(&rgba, w, h, rough), None)
-            }
-            None => {
-                let card = find_card(&rgba, w, h, aspect).ok_or_else(|| {
-                    CmdError::new(
-                        ErrorCode::NotFound,
-                        "no card found in the photo: give its `corners`, read off `doc.preview`",
-                    )
-                    .vi("Không tìm thấy thẻ trong ảnh")
-                })?;
-                (card.corners, Some(card.score))
-            }
-        };
-        // Long sides on top: a card asked for standing up starts at its
-        // top-right corner.
-        let quad = if width_mm >= height_mm {
-            corners
-        } else {
-            [corners[1], corners[2], corners[3], corners[0]]
-        };
-        if !canvas.crop_perspective(quad, out_w, out_h, true) {
-            return Err(not_enabled(
-                "the corners make no card shape",
-                "Bốn góc không tạo thành hình thẻ",
-            ));
-        }
-        canvas.metadata.resolution_ppi = p.dpi as f32;
-        let size = sized(s, doc)?;
-        Ok(Plan::Done(Straightened {
+        let (given, dpi) = (p.corners.clone(), p.dpi);
+        let change: PageChange<([(f32, f32); 4], Option<f32>)> =
+            Arc::new(move |canvas: &mut Canvas| {
+                let (w, h) = (canvas.width, canvas.height);
+                let rgba = canvas.flatten_for_export();
+                let (corners, found) = match &given {
+                    Some(given) => {
+                        let rough = [0, 1, 2, 3].map(|i| {
+                            let c = given.get(i).copied().unwrap_or_default();
+                            (c[0], c[1])
+                        });
+                        (snap_corners(&rgba, w, h, rough), None)
+                    }
+                    None => {
+                        let card = find_card(&rgba, w, h, aspect).ok_or_else(|| {
+                            CmdError::new(
+                                ErrorCode::NotFound,
+                                "no card found in the photo: give its `corners`, read off \
+                                 `doc.preview`",
+                            )
+                            .vi("Không tìm thấy thẻ trong ảnh")
+                        })?;
+                        (card.corners, Some(card.score))
+                    }
+                };
+                // Long sides on top: a card asked for standing up starts at
+                // its top-right corner.
+                let quad = if width_mm >= height_mm {
+                    corners
+                } else {
+                    [corners[1], corners[2], corners[3], corners[0]]
+                };
+                if !canvas.crop_perspective(quad, out_w, out_h, true) {
+                    return Err(not_enabled(
+                        "the corners make no card shape",
+                        "Bốn góc không tạo thành hình thẻ",
+                    ));
+                }
+                canvas.metadata.resolution_ppi = dpi as f32;
+                Ok((quad, found))
+            });
+        page_job(
+            s,
             doc,
-            width_px: size.width_px,
-            height_px: size.height_px,
-            dpi: size.dpi,
-            corners: quad.iter().map(|&(x, y)| [x, y]).collect(),
-            found,
-        }))
+            "Đang cắt phối cảnh",
+            change,
+            move |s, (quad, found)| {
+                let size = sized(s, doc)?;
+                Ok(Straightened {
+                    doc,
+                    width_px: size.width_px,
+                    height_px: size.height_px,
+                    dpi: size.dpi,
+                    corners: quad.iter().map(|&(x, y)| [x, y]).collect(),
+                    found,
+                })
+            },
+        )
     }
 }
 
@@ -431,6 +497,13 @@ impl Command for Resize {
             ));
         }
         let dpi = p.dpi.unwrap_or(canvas.metadata.resolution_ppi);
+        let resized = move |s: &mut Session<'_>, ()| {
+            s.notice(
+                format!("Image Size: {nw}×{nh} px"),
+                format!("Image Size: {nw}×{nh} px"),
+            );
+            sized(s, doc)
+        };
         if (nw, nh) == (w, h) {
             // Only the print size changes: no pixel is touched.
             let cmd = iai_history::command::ResolutionCommand::new(dpi.max(1.0));
@@ -440,14 +513,16 @@ impl Command for Resize {
                     iai_history::gateway::ChangeKind::DocumentMetadata,
                 )
                 .map_err(|e| CmdError::internal(e.message))?;
-        } else if !canvas.resize_image(nw, nh, dpi) {
-            return Err(not_enabled("the resize was refused", "Không đổi cỡ được"));
+            return resized(s, ()).map(Plan::Done);
         }
-        s.notice(
-            format!("Image Size: {nw}×{nh} px"),
-            format!("Image Size: {nw}×{nh} px"),
-        );
-        sized(s, doc).map(Plan::Done)
+        let change: PageChange<()> = Arc::new(move |canvas: &mut Canvas| {
+            if canvas.resize_image(nw, nh, dpi) {
+                Ok(())
+            } else {
+                Err(not_enabled("the resize was refused", "Không đổi cỡ được"))
+            }
+        });
+        page_job(s, doc, "Đang đổi cỡ ảnh", change, resized)
     }
 }
 
@@ -461,6 +536,46 @@ pub struct CanvasSizeParams {
     pub width_px: u32,
     #[schemars(range(min = 1, max = 30000))]
     pub height_px: u32,
+    /// Where the picture stays as the page grows or shrinks round it; the
+    /// top-left corner when left out.
+    #[serde(default)]
+    pub anchor: Anchor,
+    /// What is added to the Background is filled with this colour
+    /// ("#RRGGBB"); clear when left out.
+    pub fill: Option<String>,
+}
+
+/// Where the picture stays in a page made larger or smaller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    #[default]
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl Anchor {
+    /// How far across and down the picture sits: 0, a half or 1.
+    fn fractions(self) -> (f64, f64) {
+        let column = match self {
+            Anchor::TopLeft | Anchor::Left | Anchor::BottomLeft => 0.0,
+            Anchor::Top | Anchor::Center | Anchor::Bottom => 0.5,
+            Anchor::TopRight | Anchor::Right | Anchor::BottomRight => 1.0,
+        };
+        let row = match self {
+            Anchor::TopLeft | Anchor::Top | Anchor::TopRight => 0.0,
+            Anchor::Left | Anchor::Center | Anchor::Right => 0.5,
+            Anchor::BottomLeft | Anchor::Bottom | Anchor::BottomRight => 1.0,
+        };
+        (column, row)
+    }
 }
 
 impl Validate for CanvasSizeParams {}
@@ -470,8 +585,8 @@ static CANVAS_SIZE: CommandMeta = CommandMeta {
     label_vi: "Đổi khung ảnh",
     label_en: "Canvas Size",
     doc: "Make the page larger or smaller without resampling, as Image ▸ Canvas Size does: the \
-          picture stays at the top-left corner, what is added is clear, what falls outside is \
-          cut off. One undo step.",
+          picture stays where `anchor` says (the top-left corner by default), what is added is \
+          clear (on the Background: `fill`), what falls outside is cut off. One undo step.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -486,6 +601,11 @@ impl Command for CanvasSize {
     }
     fn plan(&self, s: &mut Session<'_>, p: CanvasSizeParams) -> Result<Plan<Sized>, CmdError> {
         let doc = s.doc_id(p.doc)?;
+        let fill = p
+            .fill
+            .as_deref()
+            .map(|c| super::common::parse_color("fill", c))
+            .transpose()?;
         let canvas = s.canvas_mut(Some(doc))?;
         if p.width_px > MAX_DIMENSION || p.height_px > MAX_DIMENSION {
             return Err(CmdError::bad_param(
@@ -493,7 +613,25 @@ impl Command for CanvasSize {
                 &format!("a size that keeps both sides at most {MAX_DIMENSION} pixels"),
             ));
         }
-        if !canvas.resize(p.width_px, p.height_px) {
+        let done = if p.anchor == Anchor::TopLeft && fill.is_none() {
+            canvas.resize(p.width_px, p.height_px)
+        } else {
+            // The page cut out of (or reaching past) the old one where the
+            // picture stays.
+            let (column, row) = p.anchor.fractions();
+            let at = |new: u32, old: u32, share: f64| {
+                ((f64::from(old) - f64::from(new)) * share).ceil() as i32
+            };
+            let x = at(p.width_px, canvas.width, column);
+            let y = at(p.height_px, canvas.height, row);
+            match fill {
+                Some(color) => {
+                    canvas.crop_with_background(x, y, p.width_px, p.height_px, true, color)
+                }
+                None => canvas.crop(x, y, p.width_px, p.height_px, true),
+            }
+        };
+        if !done {
             return Err(not_enabled(
                 "the canvas size was refused",
                 "Không đổi được khung ảnh",

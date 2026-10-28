@@ -1393,7 +1393,8 @@ fn add_curve_group(
 /// layer moved with the Move tool converts at its moved position, and the floored
 /// placement delta cancels out. The output reproduces the raster's appearance:
 /// per-glyph font/size (each glyph outlined at its own scale), per-glyph colour,
-/// faux-bold double strike, faux-italic shear, underline bars, and the layer's
+/// faux bold (the glyph swept 1px right, the area the raster's double strike
+/// paints), faux-italic shear, underline bars, and the layer's
 /// stretch / rotation / flip placement. `TextData::opacity` is deliberately NOT
 /// baked into the colour: the caller puts it on each object's
 /// `VectorStyle::opacity`, matching how the raster pipeline multiplies it in.
@@ -1412,7 +1413,7 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
     use ab_glyph::OutlineCurve;
     use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
     use iai_geom::geometry::Point;
-    use iai_vector::vector::from_text::{GlyphSegment, glyph_contours};
+    use iai_vector::vector::from_text::{GlyphSegment, glyph_contours, glyph_swept_right};
 
     let Some(base_font) = font_for(&td.font_family) else {
         return Vec::new();
@@ -1459,46 +1460,45 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
             let sh = sf.h_scale_factor();
             let sv = sf.v_scale_factor();
 
-            // A font-unit outline point (y-up) at pen `pen_x` → canvas: to
-            // upright-layout pixels first (matching `rasterize`), apply the
-            // faux-italic shear there, then place.
-            let to_canvas = |gp: ab_glyph::Point, pen_x: f32| -> Point {
-                let mut lx = pen_x + gp.x * sh;
+            // A font-unit outline point (y-up) → upright-layout pixels (matching
+            // `rasterize`), with the faux-italic shear applied there.
+            let to_layout = |gp: ab_glyph::Point| -> Point {
+                let mut lx = g.x + gp.x * sh;
                 let ly = baseline_y - gp.y * sv;
                 if g.italic {
                     lx += (baseline_y - ly) * 0.22;
                 }
-                place(lx, ly)
+                Point::new(lx, ly)
             };
 
             if let Some(outline) = font.outline(font.glyph_id(g.ch)) {
-                // Faux bold strikes the glyph again 1px to the right (matching the
-                // raster's two-pass max coverage); NonZero unions the copies.
-                let pens: &[f32] = if g.bold { &[0.0, 1.0] } else { &[0.0] };
-                let mut segs: Vec<GlyphSegment> = Vec::with_capacity(outline.curves.len());
-                for &pen_off in pens {
-                    let pen_x = g.x + pen_off;
-                    segs.clear();
-                    for curve in &outline.curves {
-                        segs.push(match *curve {
-                            OutlineCurve::Line(a, b) => {
-                                GlyphSegment::Line(to_canvas(a, pen_x), to_canvas(b, pen_x))
-                            }
-                            OutlineCurve::Quad(a, c, b) => GlyphSegment::Quad(
-                                to_canvas(a, pen_x),
-                                to_canvas(c, pen_x),
-                                to_canvas(b, pen_x),
-                            ),
-                            OutlineCurve::Cubic(a, c1, c2, b) => GlyphSegment::Cubic(
-                                to_canvas(a, pen_x),
-                                to_canvas(c1, pen_x),
-                                to_canvas(c2, pen_x),
-                                to_canvas(b, pen_x),
-                            ),
-                        });
-                    }
-                    add_curve_group(&mut groups, g.color, glyph_contours(&segs));
+                let mut segs: Vec<GlyphSegment> = outline
+                    .curves
+                    .iter()
+                    .map(|curve| match *curve {
+                        OutlineCurve::Line(a, b) => GlyphSegment::Line(to_layout(a), to_layout(b)),
+                        OutlineCurve::Quad(a, c, b) => {
+                            GlyphSegment::Quad(to_layout(a), to_layout(c), to_layout(b))
+                        }
+                        OutlineCurve::Cubic(a, c1, c2, b) => GlyphSegment::Cubic(
+                            to_layout(a),
+                            to_layout(c1),
+                            to_layout(c2),
+                            to_layout(b),
+                        ),
+                    })
+                    .collect();
+                // Faux bold: the raster strikes the glyph again 1px to the right;
+                // the outline is the glyph swept that far, one clean ring per
+                // contour rather than two copies whose edges cross.
+                if g.bold {
+                    segs = glyph_swept_right(&segs, 1.0);
                 }
+                let segs: Vec<GlyphSegment> = segs
+                    .into_iter()
+                    .map(|s| s.map(|p| place(p.x, p.y)))
+                    .collect();
+                add_curve_group(&mut groups, g.color, glyph_contours(&segs));
             }
 
             // Underline: an axis-aligned bar (no italic shear), placed like the
@@ -2030,5 +2030,37 @@ mod tests {
             ..TextData::default()
         };
         assert!(super::text_to_curves(&td, (0, 0)).is_empty());
+    }
+
+    /// The owner's map (28/10): bold "306,5" in a PDF showed steps at stroke
+    /// ends and kinks on the curves, where the two strikes of the faux bold
+    /// crossed. It is one outline per contour now, as wide as the raster's.
+    #[test]
+    fn bold_type_outlines_once_per_contour_a_pixel_wider() {
+        let regular = TextData {
+            content: "306,5".to_string(),
+            font_family: TextFontFamily::Arial,
+            font_px: 34.0,
+            ..TextData::default()
+        };
+        if rasterize_placed(&regular).is_none() {
+            return; // no font in this environment
+        }
+        let bold = TextData {
+            bold: true,
+            ..regular.clone()
+        };
+        let plain = super::text_to_curves(&regular, (0, 0));
+        let heavy = super::text_to_curves(&bold, (0, 0));
+        let (plain, heavy) = (&plain[0].path, &heavy[0].path);
+        assert_eq!(heavy.contours.len(), plain.contours.len());
+        assert!(heavy.validate().is_ok());
+        let (p, h) = (
+            plain.control_bounds().expect("bounds"),
+            heavy.control_bounds().expect("bounds"),
+        );
+        assert!((h.x - p.x).abs() < 0.5, "{} vs {}", h.x, p.x);
+        assert!(((h.x + h.w) - (p.x + p.w) - 1.0).abs() < 0.5);
+        assert!((h.y - p.y).abs() < 0.5 && (h.h - p.h).abs() < 0.5);
     }
 }

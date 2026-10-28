@@ -72,6 +72,8 @@ pub struct BackgroundJobs {
     /// and gets a tab (e.g. a fast double-click on a recent-files card). Cleared
     /// as each result is drained in `poll_loads`.
     pub(in crate::app) loading_keys: std::collections::HashSet<String>,
+    /// Pictures being opened by the engine's `file.open` jobs, and their files.
+    pub(in crate::app) open_jobs: Vec<(iai_engine::JobId, std::path::PathBuf)>,
     /// Early reduced-size RAW renders made by the same colour chain as the full
     /// decode; each replaces its file's placeholder while the demosaic runs.
     /// See `poll_raw_drafts`.

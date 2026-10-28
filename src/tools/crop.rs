@@ -624,6 +624,19 @@ impl CropTool {
         (self.crop_x1 - self.crop_x0).abs() > 1.0 && (self.crop_y1 - self.crop_y0).abs() > 1.0
     }
 
+    /// The arrow keys: the frame moved over the picture by `dx, dy` page
+    /// pixels, its size and turn kept. False with no frame up.
+    pub fn nudge(&mut self, dx: f32, dy: f32) -> bool {
+        if !self.has_selection() || self.is_dragging {
+            return false;
+        }
+        self.crop_x0 += dx;
+        self.crop_x1 += dx;
+        self.crop_y0 += dy;
+        self.crop_y1 += dy;
+        true
+    }
+
     /// Detect which handle (if any) is under the pointer at `(x, y)` in canvas space.
     ///
     /// Hit-testing is done in *un-rotated* box space: the pointer is
@@ -878,8 +891,17 @@ impl Tool for CropTool {
                 return ToolResponse::redraw();
             }
             CropHandle::Move => {
-                let total_dx = cx - self.drag_start_x;
-                let total_dy = cy - self.drag_start_y;
+                let mut total_dx = cx - self.drag_start_x;
+                let mut total_dy = cy - self.drag_start_y;
+                // Shift: along one straight line, the way the drag mostly
+                // goes, as Move + Shift takes a layer.
+                if event.shift {
+                    if total_dx.abs() >= total_dy.abs() {
+                        total_dy = 0.0;
+                    } else {
+                        total_dx = 0.0;
+                    }
+                }
                 self.image_tx = self.drag_start_image_tx + total_dx;
                 self.image_ty = self.drag_start_image_ty + total_dy;
             }
@@ -1496,6 +1518,48 @@ mod tests {
         assert!((crop.crop_y1 - 300.0).abs() < 0.01);
         assert!((crop.image_tx - 30.0).abs() < 0.01);
         assert!((crop.image_ty - 40.0).abs() < 0.01);
+    }
+
+    /// Shift held: the picture under the frame goes along one straight line,
+    /// the way the drag mostly goes, as Move + Shift takes a layer.
+    #[test]
+    fn a_shift_drag_inside_the_frame_keeps_to_a_straight_line() {
+        let mut crop = CropTool::new();
+        (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1) = (100.0, 100.0, 300.0, 300.0);
+        let mut document = Document::new(DocumentId(1), 500, 500);
+        let press = PointerEvent::new(200.0, 200.0);
+        let shifted = |x, y| {
+            let mut event = PointerEvent::new(x, y);
+            event.shift = true;
+            event
+        };
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_press(press, &mut ctx);
+            crop.on_drag(shifted(260.0, 215.0), &press, &mut ctx);
+        }
+        assert_eq!((crop.image_tx, crop.image_ty), (60.0, 0.0), "across");
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_drag(shifted(210.0, 120.0), &press, &mut ctx);
+        }
+        assert_eq!(
+            (crop.image_tx, crop.image_ty),
+            (0.0, -80.0),
+            "then down the page"
+        );
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_frame_and_keep_its_size() {
+        let mut crop = CropTool::new();
+        assert!(!crop.nudge(1.0, 0.0), "no frame, nothing to move");
+        (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1) = (100.0, 100.0, 300.0, 250.0);
+        assert!(crop.nudge(10.0, -1.0));
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (110.0, 99.0, 310.0, 249.0)
+        );
     }
 
     #[test]

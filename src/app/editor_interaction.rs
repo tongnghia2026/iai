@@ -25,13 +25,13 @@ pub struct EditorInteraction {
     /// Smart-guide lines from Free Transform snapping (④); drawn like the Move
     /// tool's. Cleared when no transform handle is being dragged.
     pub(in crate::app) transform_snap_guides: Vec<crate::core::snapping::SnapLine>,
-    pub(in crate::app) pending_transform_commit:
-        Option<std::sync::mpsc::Receiver<Result<TransformCommitResult, String>>>,
-    /// Non-destructive source retained between consecutive raster Free
-    /// Transforms. A fingerprint mismatch means another pixel operation touched
-    /// the layer and causes the entry to be discarded on the next Ctrl+T.
-    pub(in crate::app) raster_transform_lineage:
-        std::collections::HashMap<(crate::core::document::DocumentId, u32), RasterTransformLineage>,
+    /// The `layer.free_transform` job committing the last session. (The
+    /// sources kept between consecutive raster transforms are the document's
+    /// `transform_lineage`.)
+    pub(in crate::app) pending_transform_commit: Option<iai_engine::JobId>,
+    /// The `image.crop` job of the Crop tool's frame, and when it began. The
+    /// frame stays up until it lands; Esc cancels it.
+    pub(in crate::app) pending_crop_job: Option<(iai_engine::JobId, std::time::Instant)>,
     /// Continue into mesh Warp after an asynchronous transform bake.
     pub(in crate::app) warp_after_transform_commit: bool,
     /// Internal layer clipboard: whole cloned `Layer`s (preserving offset, opacity,

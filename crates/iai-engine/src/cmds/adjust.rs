@@ -101,6 +101,80 @@ fn full() -> u8 {
     255
 }
 
+/// Hue/Saturation's Colorize: every pixel in one hue.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Colorize {
+    /// 0 to 360 degrees.
+    #[schemars(range(min = 0.0, max = 360.0))]
+    pub hue: f32,
+    /// 0 to 100 (25 when left out, as Photoshop starts).
+    #[serde(default = "colorize_saturation")]
+    #[schemars(range(min = 0.0, max = 100.0))]
+    pub saturation: f32,
+    /// -100 (black) to 100 (white).
+    #[serde(default = "zero")]
+    #[schemars(range(min = -100.0, max = 100.0))]
+    pub lightness: f32,
+}
+
+fn colorize_saturation() -> f32 {
+    25.0
+}
+
+/// One colour's own Hue/Saturation sliders.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HueShift {
+    #[serde(default = "zero")]
+    #[schemars(range(min = -180.0, max = 180.0))]
+    pub hue: f32,
+    #[serde(default = "zero")]
+    #[schemars(range(min = -100.0, max = 100.0))]
+    pub saturation: f32,
+    #[serde(default = "zero")]
+    #[schemars(range(min = -100.0, max = 100.0))]
+    pub lightness: f32,
+}
+
+/// The colours Hue/Saturation moves on their own.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HueRanges {
+    #[serde(default)]
+    pub reds: HueShift,
+    #[serde(default)]
+    pub yellows: HueShift,
+    #[serde(default)]
+    pub greens: HueShift,
+    #[serde(default)]
+    pub cyans: HueShift,
+    #[serde(default)]
+    pub blues: HueShift,
+    #[serde(default)]
+    pub magentas: HueShift,
+}
+
+impl HueRanges {
+    fn sliders(&self) -> [[f32; 3]; 6] {
+        [
+            self.reds,
+            self.yellows,
+            self.greens,
+            self.cyans,
+            self.blues,
+            self.magentas,
+        ]
+        .map(|s| {
+            [
+                s.hue.clamp(-180.0, 180.0),
+                s.saturation.clamp(-100.0, 100.0),
+                s.lightness.clamp(-100.0, 100.0),
+            ]
+        })
+    }
+}
+
 /// An adjustment, as the dialogs of Image ▸ Adjustments set it.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -125,6 +199,12 @@ pub enum Adjustment {
         #[serde(default = "zero")]
         #[schemars(range(min = -100.0, max = 100.0))]
         lightness: f32,
+        /// Tint the whole picture one colour (Photoshop's Colorize); the
+        /// three sliders above are not used then.
+        colorize: Option<Colorize>,
+        /// The pixels of one colour moved on their own, on top of the three
+        /// sliders above.
+        ranges: Option<HueRanges>,
     },
     /// Levels of all channels together: the input black and white points
     /// (0 to 255), the midtones (gamma, 0.1 to 9.99; above 1 lighter) and the
@@ -264,10 +344,20 @@ impl Adjustment {
                 hue,
                 saturation,
                 lightness,
+                colorize,
+                ranges,
             } => AdjustmentType::HueSaturation {
                 hue: hue.clamp(-180.0, 180.0),
                 saturation: saturation.clamp(-100.0, 100.0),
                 lightness: lightness.clamp(-100.0, 100.0),
+                colorize: colorize.map(|c| {
+                    [
+                        c.hue.rem_euclid(360.0),
+                        c.saturation.clamp(0.0, 100.0),
+                        c.lightness.clamp(-100.0, 100.0),
+                    ]
+                }),
+                ranges: ranges.map(|r| r.sliders()).unwrap_or([[0.0; 3]; 6]),
             },
             Adjustment::Levels {
                 in_black,
@@ -476,6 +566,10 @@ pub struct AutoLevelsParams {
     /// colour cast away.
     #[serde(default)]
     pub monochromatic: bool,
+    /// With the channels stretched: also make the midtones neutral, so a grey
+    /// comes out grey (Image ▸ Auto Color, Shift+Ctrl+B).
+    #[serde(default)]
+    pub neutral_midtones: bool,
     /// The share of the darkest and the lightest pixels let go at each end,
     /// in percent (0 to 10).
     #[serde(default = "tenth")]
@@ -522,7 +616,7 @@ impl Command for AutoLevels {
             .map(|l| l.flatten_tiles())
             .ok_or_else(|| CmdError::internal("layer index"))?;
         let histograms = iai_imaging::levels::histograms(&pixels);
-        let channels =
+        let mut channels =
             iai_imaging::levels::auto_levels(&histograms, p.monochromatic, p.clip_percent)
                 .ok_or_else(|| {
                     not_enabled(
@@ -530,6 +624,9 @@ impl Command for AutoLevels {
                         "Ảnh không có dải sáng tối để kéo giãn",
                     )
                 })?;
+        if p.neutral_midtones && !p.monochromatic {
+            iai_imaging::levels::neutral_midtones(&histograms, &mut channels);
+        }
         canvas.layer_stack.active_idx = idx;
         let layer = canvas
             .layer_stack
@@ -544,11 +641,17 @@ impl Command for AutoLevels {
             ));
         }
         s.emit(EngineEvent::Pixels { doc });
-        s.notice("Đã tự cân sáng (Auto Levels)", "Auto Levels");
+        let step = if p.neutral_midtones && !p.monochromatic {
+            s.notice("Đã tự cân màu (Auto Color)", "Auto Color");
+            "Auto Color"
+        } else {
+            s.notice("Đã tự cân sáng (Auto Levels)", "Auto Levels");
+            "Auto Levels"
+        };
         Ok(Plan::Done(Adjusted {
             doc,
             layer,
-            step: "Auto Levels".to_string(),
+            step: step.to_string(),
         }))
     }
 }

@@ -2,6 +2,7 @@
 //! their pixels made from them.
 
 use iai_doc::shape::{ShapeData, ShapeKind};
+use iai_doc::vector::from_shape::RectCorner;
 use iai_doc::vector::object::VectorObjectData;
 use iai_doc::vector::path::{Contour, FillRule, Node, NodeKind, PathData};
 use iai_doc::vector::style::{LineCap, LineJoin, VectorStyle};
@@ -90,7 +91,10 @@ pub struct ShapeParams {
     pub doc: Option<u32>,
     pub shape: Shape,
     /// The box the shape fills, in document pixels.
-    pub rect: RectPx,
+    pub rect: Option<RectPx>,
+    /// The box as [x0, y0, x1, y1] between pixels (a line from the first
+    /// corner to the second), instead of `rect`: what the Shape tool draws.
+    pub span: Option<[f32; 4]>,
     /// Fill colour, "#RRGGBB" or "#RRGGBBAA"; no fill when omitted.
     pub fill: Option<String>,
     /// Outline colour; no outline when omitted.
@@ -111,6 +115,21 @@ pub struct ShapeParams {
     #[serde(default = "half")]
     #[schemars(range(min = 0.05, max = 0.95))]
     pub star_inner: f32,
+    /// How a rectangle's rounded corners are cut.
+    #[serde(default)]
+    pub corners: Corners,
+}
+
+/// A rectangle's corner style (with `cornerRadius`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Corners {
+    #[default]
+    Round,
+    /// Cut inwards, a quarter circle the other way.
+    Scallop,
+    /// Cut straight across.
+    Chamfer,
 }
 
 fn five() -> u32 {
@@ -123,6 +142,16 @@ fn half() -> f32 {
 
 impl Validate for ShapeParams {
     fn validate(&self) -> Result<(), CmdError> {
+        match (&self.rect, &self.span) {
+            (None, None) => return Err(CmdError::bad_param("rect", "a rect or a span")),
+            (Some(_), Some(_)) => {
+                return Err(CmdError::bad_param("span", "a rect or a span, not both"));
+            }
+            (None, Some(span)) if !span.iter().all(|v| v.is_finite() && v.abs() <= 100000.0) => {
+                return Err(CmdError::bad_param("span", "four numbers within 100000"));
+            }
+            _ => {}
+        }
         look(&self.fill, &self.stroke).map(|_| ())
     }
 }
@@ -155,9 +184,14 @@ impl Command for AddShape {
             Shape::Polygon => ShapeKind::Polygon,
             Shape::Star => ShapeKind::Star,
         };
-        let r = p.rect;
-        let (x0, y0) = (r.x as f32, r.y as f32);
-        let (x1, y1) = (x0 + r.w as f32, y0 + r.h as f32);
+        let (x0, y0, x1, y1) = match (p.rect, p.span) {
+            (_, Some([x0, y0, x1, y1])) => (x0, y0, x1, y1),
+            (Some(r), None) => {
+                let (x0, y0) = (r.x as f32, r.y as f32);
+                (x0, y0, x0 + r.w as f32, y0 + r.h as f32)
+            }
+            (None, None) => return Err(CmdError::bad_param("rect", "a rect or a span")),
+        };
         let stroke_width = if stroke.is_some() {
             p.stroke_width
         } else {
@@ -177,6 +211,11 @@ impl Command for AddShape {
         );
         data.sides = p.sides.clamp(3, 100);
         data.star_inner = p.star_inner.clamp(0.05, 0.95);
+        data.corner_type = match p.corners {
+            Corners::Round => RectCorner::Round,
+            Corners::Scallop => RectCorner::Scallop,
+            Corners::Chamfer => RectCorner::Chamfer,
+        };
         let canvas = s.canvas_mut(Some(doc))?;
         let idx = canvas
             .add_shape_layer(data, offset)

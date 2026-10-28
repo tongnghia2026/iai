@@ -130,6 +130,11 @@ impl App {
     /// is: the same change, one undo step, what it says on the status line.
     pub(super) fn handle_command_actions(&mut self, actions: &mut UiActions) {
         for call in std::mem::take(&mut actions.commands) {
+            let call = if crate::app::engine::PAGE_JOBS.contains(&call.command.as_str()) {
+                call.in_background()
+            } else {
+                call
+            };
             let _ = self.execute_command(call);
         }
     }
@@ -485,12 +490,14 @@ mod menu_runs_commands {
         };
         assert_eq!(corner.3, 0, "{corner:?}");
 
-        // Image Size: twice as large at 150 dpi.
+        // Image Size: twice as large at 150 dpi, in the background.
         run(
             &mut app,
             "image.resize",
             json!({"widthPx": 60, "heightPx": 88, "dpi": 150.0}),
         );
+        assert!(app.page_job_holds_shown_tab());
+        app.finish_commands(std::time::Duration::from_secs(60));
         assert_eq!(size(&app), (60, 88));
         assert_eq!(app.docs.active().canvas.metadata.resolution_ppi, 150.0);
         assert_eq!(app.shell.status_msg, "Image Size: 60×88 px");

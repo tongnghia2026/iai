@@ -67,9 +67,9 @@ impl App {
         else {
             return;
         };
-        let documents = &self.docs.documents;
-        self.docs
-            .doc_mru
+        let tabs = &mut self.docs.tabs;
+        let documents = &tabs.documents;
+        tabs.doc_mru
             .retain(|id| *id != active_id && documents.iter().any(|d| d.id == *id));
         self.docs.doc_mru.insert(0, active_id);
     }

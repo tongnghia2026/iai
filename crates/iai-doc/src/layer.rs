@@ -24,6 +24,14 @@ pub enum AdjustmentType {
         hue: f32,
         saturation: f32,
         lightness: f32,
+        /// Photoshop's Colorize: every pixel takes this hue (0 to 360) and
+        /// saturation (0 to 100), its lightness moved by the third (-100 to
+        /// 100). The other sliders are not used then.
+        colorize: Option<[f32; 3]>,
+        /// Hue (-180 to 180), saturation and lightness (-100 to 100) of the
+        /// pixels of one colour, on top of the three above: Reds, Yellows,
+        /// Greens, Cyans, Blues, Magentas (see [`HUE_RANGE_NAMES`]).
+        ranges: [[f32; 3]; 6],
     },
     Levels {
         /// Per-channel parameters: `[master, red, green, blue]`. The master
@@ -245,7 +253,51 @@ fn scale_chroma_around_luma_f32(r: &mut f32, g: &mut f32, b: &mut f32, factor: f
     *b = nb;
 }
 
+/// The colours Hue/Saturation can edit on their own, in [`AdjustmentType::HueSaturation`]'s
+/// `ranges` order.
+pub const HUE_RANGE_NAMES: [&str; 6] = ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas"];
+
+/// How much a pixel of hue `h` (0 to 1) belongs to colour `range` of
+/// Hue/Saturation, as Photoshop's ranges have it by default: wholly within 15°
+/// of the colour's centre (0°, 60°, … 300°), less and less out to 45°, where
+/// the next colour has it wholly. Two neighbours' weights add up to one.
+pub fn hue_range_weight(h: f32, range: usize) -> f32 {
+    let centre = range as f32 * 60.0;
+    let d = (h * 360.0 - centre).rem_euclid(360.0);
+    let d = d.min(360.0 - d);
+    ((45.0 - d) / 30.0).clamp(0.0, 1.0)
+}
+
+/// Colorize: the pixel of HSL lightness `l` (0 to 1) in hue `hue` (0 to 360)
+/// and saturation `saturation` (0 to 100), `lightness` (-100 to 100) moving it
+/// toward white or black as Photoshop's does.
+fn colorize_hsl(l: f32, hue: f32, saturation: f32, lightness: f32) -> (f32, f32, f32) {
+    let k = (lightness / 100.0).clamp(-1.0, 1.0);
+    let l = if k >= 0.0 {
+        l + (1.0 - l) * k
+    } else {
+        l * (1.0 + k)
+    };
+    hsl_to_rgb(
+        (hue / 360.0).rem_euclid(1.0),
+        (saturation / 100.0).clamp(0.0, 1.0),
+        l.clamp(0.0, 1.0),
+    )
+}
+
 impl AdjustmentType {
+    /// Hue/Saturation of the master sliders only: no Colorize, no colour of
+    /// its own.
+    pub fn hue_saturation(hue: f32, saturation: f32, lightness: f32) -> Self {
+        AdjustmentType::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+            colorize: None,
+            ranges: [[0.0; 3]; 6],
+        }
+    }
+
     /// Default Levels: identity on master and all three channels. The single
     /// source of truth for every "new Levels" entry point.
     pub fn default_levels() -> Self {
@@ -354,8 +406,24 @@ impl AdjustmentType {
                 hue,
                 saturation,
                 lightness,
+                colorize,
+                ranges,
             } => {
                 let (h, s, l) = rgb_to_hsl(rf, gf, bf);
+                if let Some([c_hue, c_sat, c_light]) = colorize {
+                    return colorize_hsl(l, *c_hue, *c_sat, *c_light);
+                }
+                let (mut hue, mut saturation, mut lightness) = (*hue, *saturation, *lightness);
+                if ranges.iter().flatten().any(|v| v.abs() > 1e-4) {
+                    // A grey has no colour: a colour's sliders leave it be.
+                    let gate = smootherstep_f32(0.0, 0.06, rgb_chroma_f32(rf, gf, bf));
+                    for (i, [rh, rs, rl]) in ranges.iter().enumerate() {
+                        let w = hue_range_weight(h, i) * gate;
+                        hue += w * rh;
+                        saturation += w * rs;
+                        lightness += w * rl;
+                    }
+                }
                 let nh = (h + hue / 360.0).rem_euclid(1.0);
                 let nl = (l + lightness / 100.0).clamp(0.0, 1.0);
                 let (mut r2, mut g2, mut b2) = hsl_to_rgb(nh, s, nl);
@@ -4814,12 +4882,72 @@ mod tests {
     }
 
     #[test]
-    fn hue_saturation_boost_protects_near_neutral_pixels() {
+    fn colorize_puts_every_pixel_in_one_hue_and_keeps_its_lightness() {
         let adj = AdjustmentType::HueSaturation {
             hue: 0.0,
-            saturation: 40.0,
+            saturation: 0.0,
             lightness: 0.0,
+            colorize: Some([210.0, 50.0, 0.0]),
+            ranges: [[0.0; 3]; 6],
         };
+        let mut last_l = -1.0;
+        for v in [30u8, 90, 128, 170, 230] {
+            let (r, g, b, a) = adj.apply_pixel(v, v, v, 255);
+            assert_eq!(a, 255);
+            let (h, s, l) =
+                iai_color::color::rgb_to_hsl(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+            assert!(
+                (h * 360.0 - 210.0).abs() < 3.0,
+                "grey {v} took hue {}",
+                h * 360.0
+            );
+            assert!((s - 0.5).abs() < 0.04, "saturation {s}");
+            assert!((l - v as f32 / 255.0).abs() < 0.01, "lightness kept");
+            assert!(l > last_l);
+            last_l = l;
+        }
+        // A colour goes the same way: only its lightness is kept.
+        let (r, g, b, _) = adj.apply_pixel(200, 30, 30, 255);
+        let (h, ..) =
+            iai_color::color::rgb_to_hsl(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        assert!((h * 360.0 - 210.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn a_colour_of_its_own_moves_only_its_pixels() {
+        let mut ranges = [[0.0f32; 3]; 6];
+        ranges[4] = [0.0, -100.0, 0.0]; // Blues: no saturation left
+        let adj = AdjustmentType::HueSaturation {
+            hue: 0.0,
+            saturation: 0.0,
+            lightness: 0.0,
+            colorize: None,
+            ranges,
+        };
+        let (r, g, b, _) = adj.apply_pixel(40, 60, 220, 255);
+        let chroma = r.max(g).max(b) - r.min(g).min(b);
+        assert!(chroma < 10, "the blue went grey: {r} {g} {b}");
+        assert_eq!(
+            adj.apply_pixel(220, 40, 40, 255),
+            (220, 40, 40, 255),
+            "red stays"
+        );
+        assert_eq!(
+            adj.apply_pixel(128, 128, 128, 255),
+            (128, 128, 128, 255),
+            "grey stays"
+        );
+        // Halfway between two colours each takes half.
+        let weight = super::hue_range_weight;
+        assert!((weight(30.0 / 360.0, 0) - 0.5).abs() < 1e-5);
+        assert!((weight(30.0 / 360.0, 1) - 0.5).abs() < 1e-5);
+        assert_eq!(weight(355.0 / 360.0, 0), 1.0);
+        assert_eq!(weight(180.0 / 360.0, 0), 0.0);
+    }
+
+    #[test]
+    fn hue_saturation_boost_protects_near_neutral_pixels() {
+        let adj = AdjustmentType::hue_saturation(0.0, 40.0, 0.0);
 
         let neutral_in = (178u8, 181u8, 184u8, 255u8);
         let neutral_out = adj.apply_pixel(neutral_in.0, neutral_in.1, neutral_in.2, neutral_in.3);

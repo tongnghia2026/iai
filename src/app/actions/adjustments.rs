@@ -5,6 +5,49 @@ use crate::app::render::CanvasEvent;
 use crate::app::state::App;
 
 impl App {
+    /// `kind` with the values it was last applied with (Ctrl+Alt+L and its
+    /// kin), or as given when it never was.
+    pub(crate) fn last_adjustment_like(
+        &self,
+        kind: crate::core::layer::AdjustmentType,
+    ) -> crate::core::layer::AdjustmentType {
+        let same = std::mem::discriminant(&kind);
+        self.shell
+            .last_adjustments
+            .iter()
+            .find(|a| std::mem::discriminant(*a) == same)
+            .cloned()
+            .unwrap_or(kind)
+    }
+
+    /// Auto Contrast (`colour` false: the brightness only, colours kept) or
+    /// Auto Color (each channel stretched and its midtones made neutral),
+    /// Photoshop's Alt+Shift+Ctrl+L and Shift+Ctrl+B.
+    pub(crate) fn do_auto_contrast_or_color(&mut self, colour: bool) {
+        let mut args = crate::ui::dialogs::auto_levels_args(self.shell.ui.adjustment_options);
+        args["monochromatic"] = (!colour).into();
+        if colour {
+            args["neutralMidtones"] = true.into();
+        }
+        let _ = self.run_with("image.auto_levels", args);
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Keep what an adjustment was applied with, for the next Ctrl+Alt+L.
+    pub(crate) fn remember_last_adjustment(&mut self, adj: &crate::core::layer::AdjustmentType) {
+        let same = std::mem::discriminant(adj);
+        let kept = &mut self.shell.last_adjustments;
+        kept.retain(|a| std::mem::discriminant(a) != same);
+        kept.push(adj.clone());
+        let json: Vec<serde_json::Value> = kept
+            .iter()
+            .map(iai_formats::iai::adjustment_to_json)
+            .collect();
+        crate::ui::dialogs::save_pref(crate::app::ui_shell::LAST_ADJUSTMENTS_PREF, &json);
+    }
+
     pub(crate) fn begin_adjustment_preview(
         &mut self,
         adj: crate::core::layer::AdjustmentType,
@@ -518,6 +561,128 @@ impl App {
         true
     }
 
+    /// Alt held with the button down on the dialog: a Levels point dragged
+    /// the Photoshop way, to see what it clips.
+    pub(crate) fn levels_clip_held(&self) -> bool {
+        self.edit.input.alt_held && self.win.egui_ctx.input(|i| i.pointer.primary_down())
+    }
+
+    /// Which Levels input point moved (`before` → `after`) with Alt held:
+    /// what it clips is shown until Alt or the button goes.
+    pub(crate) fn note_levels_clip(
+        &mut self,
+        before: &crate::core::layer::AdjustmentType,
+        after: &crate::core::layer::AdjustmentType,
+    ) {
+        use crate::core::layer::AdjustmentType::Levels;
+        let (Levels { channels: was }, Levels { channels: now }) = (before, after) else {
+            self.shell.levels_clip = None;
+            return;
+        };
+        if !self.levels_clip_held() {
+            self.shell.levels_clip = None;
+            return;
+        }
+        for (channel, (was, now)) in was.iter().zip(now).enumerate() {
+            if was.in_black != now.in_black {
+                self.shell.levels_clip = Some((false, channel, now.in_black));
+                return;
+            }
+            if was.in_white != now.in_white {
+                self.shell.levels_clip = Some((true, channel, now.in_white));
+                return;
+            }
+        }
+    }
+
+    /// What the preview shows: `adj`, or while a Levels point is Alt-dragged
+    /// what that level clips, channel by channel, as Photoshop shows it. For
+    /// the black point the page is white and each channel at or below the
+    /// level goes to none (a pixel clipped in all channels black, in some a
+    /// colour); for the white point the page is black and each channel at or
+    /// above it goes full. Dragging one channel's point shows that channel's.
+    pub(crate) fn levels_clip_view(
+        &self,
+        adj: crate::core::layer::AdjustmentType,
+    ) -> crate::core::layer::AdjustmentType {
+        use crate::core::layer::{AdjustmentType, LevelsParams};
+        let Some((white, channel, level)) = self.shell.levels_clip else {
+            return adj;
+        };
+        // A step at the level: below it nothing, from it on full.
+        let edge = if white {
+            level
+        } else {
+            level.saturating_add(1)
+        };
+        let step = LevelsParams {
+            in_black: edge.saturating_sub(1),
+            in_white: edge.max(1),
+            ..LevelsParams::default()
+        };
+        // A channel left out shows as not clipped.
+        let flat = if white { 0 } else { 255 };
+        let constant = LevelsParams {
+            out_black: flat,
+            out_white: flat,
+            ..LevelsParams::default()
+        };
+        let mut channels = [LevelsParams::default(); 4];
+        if channel == 0 {
+            channels[0] = step;
+        } else {
+            for (c, params) in channels.iter_mut().enumerate().skip(1) {
+                *params = if c == channel { step } else { constant };
+            }
+        }
+        AdjustmentType::Levels { channels }
+    }
+
+    /// Ctrl+click on the picture with Curves open: a point on the composite
+    /// curve at that pixel's level, on the curve as it runs there, as
+    /// Photoshop adds one. False off the page or with another dialog.
+    pub(crate) fn add_curve_point_at(&mut self, cx: f32, cy: f32) -> bool {
+        let canvas = &self.docs.active().canvas;
+        if cx < 0.0 || cy < 0.0 || cx >= canvas.width as f32 || cy >= canvas.height as f32 {
+            return false;
+        }
+        let mut adj = self.shell.ui.adjustment_dialog.clone();
+        let crate::core::layer::AdjustmentType::Curves { channels } = &mut adj else {
+            return false;
+        };
+        self.docs.active_mut().canvas.ensure_pixels();
+        let [r, g, b, _] =
+            self.edit
+                .tools
+                .eyedropper()
+                .sample(&self.docs.active().canvas, cx as u32, cy as u32);
+        let x = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.0;
+        let master = &mut channels[0];
+        let y = crate::core::layer::curves_eval(master, x);
+        match master.iter().position(|p| (p.0 - x).abs() < 0.004) {
+            // A point there already: it is that one.
+            Some(_) => return false,
+            None => {
+                let at = master.iter().position(|p| p.0 > x).unwrap_or(master.len());
+                master.insert(at, (x, y));
+            }
+        }
+        self.shell.ui.adjustment_dialog = adj.clone();
+        self.shell.adjustment_preview_pending = None;
+        if self.shell.ui.adjustment_preview_enabled {
+            if self.shell.adjustment_preview.is_some() {
+                self.update_adjustment_preview(adj);
+            } else if self.edit.adjustment_layer_edit.is_some() {
+                self.update_adjustment_layer_edit(adj);
+            }
+        }
+        self.shell.status_msg = format!("Curves: point at {}", (x * 255.0).round());
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
     pub(crate) fn cancel_adjustment_preview(&mut self) {
         // Drop the GPU preview overlay first so the recomposite below shows the
         // original (also covers the no-preview-state case).
@@ -640,6 +805,50 @@ fn push_curve_point(points: &mut Vec<(f32, f32)>, x: f32, y: f32) {
         return;
     }
     points.push((x, y));
+}
+
+#[cfg(test)]
+mod clip_view_tests {
+    use crate::app::state::App;
+    use crate::core::layer::AdjustmentType;
+
+    /// Alt + a Levels point dragged shows, channel by channel, what it clips:
+    /// black point on white, white point on black, as Photoshop shows it.
+    #[test]
+    fn the_clipping_view_shows_each_channel_cut() {
+        let mut app = App::new();
+        let plain = AdjustmentType::default_levels();
+        assert_eq!(
+            app.levels_clip_view(plain.clone()),
+            plain,
+            "no point dragged"
+        );
+
+        // The black point of all channels at 40.
+        app.shell.levels_clip = Some((false, 0, 40));
+        let view = app.levels_clip_view(plain.clone());
+        assert_eq!(
+            view.apply_pixel(30, 30, 30, 255),
+            (0, 0, 0, 255),
+            "cut in all: black"
+        );
+        assert_eq!(
+            view.apply_pixel(30, 90, 200, 255),
+            (0, 255, 255, 255),
+            "red cut: cyan"
+        );
+        assert_eq!(
+            view.apply_pixel(41, 90, 200, 255),
+            (255, 255, 255, 255),
+            "none cut"
+        );
+
+        // The white point of green alone at 200: only green shows.
+        app.shell.levels_clip = Some((true, 2, 200));
+        let view = app.levels_clip_view(plain);
+        assert_eq!(view.apply_pixel(250, 210, 250, 255), (0, 255, 0, 255));
+        assert_eq!(view.apply_pixel(250, 199, 250, 255), (0, 0, 0, 255));
+    }
 }
 
 #[cfg(test)]

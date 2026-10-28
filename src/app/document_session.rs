@@ -4,22 +4,16 @@ use super::state::*;
 
 /// Open documents and their lifecycle.
 ///
-/// Owns the tab list, the active index, MRU order, document id allocation and
-/// the autosave/crash-recovery anchors. Invariant: `active_doc_idx` always
-/// indexes into `documents` (the app never runs with zero documents), and
-/// every `DocumentId` in `doc_mru`/`autosave_files` was minted by
-/// `next_doc_id`.
+/// The tab list, the active index, MRU order and document id allocation are
+/// the engine's [`Tabs`](iai_engine::Tabs) (reached through `Deref`, so
+/// `docs.documents` reads as before); this adds what only the window has:
+/// the autosave/crash-recovery anchors, the save jobs, the close and exit
+/// questions. Invariant: `active_doc_idx` always indexes into `documents`
+/// (the app never runs with zero documents), and every `DocumentId` in
+/// `doc_mru`/`autosave_files` was minted by `next_doc_id`.
 pub struct DocumentSession {
-    pub(in crate::app) documents: Vec<Document>,
-    pub(in crate::app) active_doc_idx: usize,
-    /// Document ids ordered most-recently-used first. Closing the active tab
-    /// returns to the front-most surviving entry instead of the positional
-    /// neighbor, so "edit → copy → close" lands back on the tab the user was
-    /// working in just before.
-    pub(in crate::app) doc_mru: Vec<DocumentId>,
+    pub(in crate::app) tabs: iai_engine::Tabs,
     pub(in crate::app) current_file: Option<PathBuf>,
-    /// Counter for assigning unique DocumentIds to newly created documents.
-    pub(in crate::app) next_doc_id: u32,
     /// When non-None, the user confirmed "close without saving" for this doc index.
     pub(in crate::app) pending_close_doc_idx: Option<usize>,
     /// Dirty documents still requiring a per-tab decision during app shutdown.
@@ -58,6 +52,20 @@ pub struct DocumentSession {
     pub(in crate::app) crash_recovery_checked: bool,
 }
 
+impl std::ops::Deref for DocumentSession {
+    type Target = iai_engine::Tabs;
+
+    fn deref(&self) -> &iai_engine::Tabs {
+        &self.tabs
+    }
+}
+
+impl std::ops::DerefMut for DocumentSession {
+    fn deref_mut(&mut self) -> &mut iai_engine::Tabs {
+        &mut self.tabs
+    }
+}
+
 impl DocumentSession {
     /// The document in the active tab.
     pub(in crate::app) fn active(&self) -> &Document {
@@ -66,22 +74,8 @@ impl DocumentSession {
 
     /// The document in the active tab, to change it.
     pub(in crate::app) fn active_mut(&mut self) -> &mut Document {
-        &mut self.documents[self.active_doc_idx]
-    }
-
-    /// The tab of the document with this id, while it is still open.
-    pub(in crate::app) fn index_of(&self, id: DocumentId) -> Option<usize> {
-        self.documents.iter().position(|d| d.id == id)
-    }
-
-    /// The document with this id, while it is still open.
-    pub(in crate::app) fn by_id(&self, id: DocumentId) -> Option<&Document> {
-        self.documents.iter().find(|d| d.id == id)
-    }
-
-    /// The document with this id, to change it, while it is still open.
-    pub(in crate::app) fn by_id_mut(&mut self, id: DocumentId) -> Option<&mut Document> {
-        self.documents.iter_mut().find(|d| d.id == id)
+        let tabs = &mut self.tabs;
+        &mut tabs.documents[tabs.active_doc_idx]
     }
 
     /// `current_file` is kept, by hand, equal to the active tab's `path`. Until

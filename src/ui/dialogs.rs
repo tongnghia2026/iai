@@ -282,6 +282,137 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     }
 }
 
+/// Open the "Delete preset" window of preset list `list` (see
+/// [`preset_deleter`]).
+pub(crate) fn open_preset_deleter(ctx: &egui::Context, list: &str) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(("preset_deleter_open", list)), true));
+}
+
+/// The "Delete preset" window of a list of presets (`names`), while open:
+/// one is picked, then deleted by the button, so nothing is lost to a click
+/// beside a name. Returns the one to delete.
+pub(crate) fn preset_deleter(
+    ctx: &egui::Context,
+    list: &str,
+    title: &str,
+    names: &[&str],
+) -> Option<usize> {
+    let open_id = egui::Id::new(("preset_deleter_open", list));
+    let picked_id = egui::Id::new(("preset_deleter_picked", list));
+    if !ctx.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+        return None;
+    }
+    let mut picked = ctx
+        .data(|d| d.get_temp::<usize>(picked_id))
+        .filter(|&i| i < names.len());
+    let mut open = true;
+    let mut deleted = None;
+    egui::Window::new(title)
+        .id(egui::Id::new(("preset_deleter", list)))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(egui::Order::Tooltip)
+        .show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            if names.is_empty() {
+                ui.label(egui::RichText::new("No saved presets.").color(egui::Color32::GRAY));
+            } else {
+                ui.label("Chọn preset cần xóa:");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(ui.ctx().content_rect().height() * 0.6)
+                    .show(ui, |ui| {
+                        for (i, name) in names.iter().enumerate() {
+                            let row = egui::Button::selectable(picked == Some(i), *name)
+                                .min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add(row).clicked() {
+                                picked = Some(i);
+                            }
+                        }
+                    });
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let delete = egui::Button::new(
+                    egui::RichText::new(format!("{}  Xóa", ph::TRASH))
+                        .color(egui::Color32::from_rgb(220, 80, 80)),
+                );
+                if ui.add_enabled(picked.is_some(), delete).clicked() {
+                    deleted = picked.take();
+                }
+                if ui.button("Close").clicked() {
+                    open = false;
+                }
+            });
+        });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        open = false;
+    }
+    ctx.data_mut(|d| {
+        d.insert_temp(open_id, open);
+        match picked.filter(|_| open) {
+            Some(i) => {
+                d.insert_temp(picked_id, i);
+            }
+            None => {
+                d.remove::<usize>(picked_id);
+            }
+        }
+    });
+    deleted
+}
+
+/// What a dialog's Cancel button was pressed as (see [`cancel_or_reset`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CancelPress {
+    None,
+    Cancel,
+    Reset,
+}
+
+/// A dialog's Cancel button, Photoshop's way: while Alt is held it reads
+/// `reset` and puts back the values the dialog opened with (see
+/// [`opening_values`]), the dialog staying open. `add` draws the button with
+/// the text it is given.
+pub(crate) fn cancel_or_reset(
+    ui: &mut egui::Ui,
+    cancel: &str,
+    reset: &str,
+    add: impl FnOnce(&mut egui::Ui, &str) -> egui::Response,
+) -> CancelPress {
+    let alt = ui.input(|i| i.modifiers.alt);
+    let response = add(ui, if alt { reset } else { cancel });
+    match (response.clicked(), alt) {
+        (false, _) => CancelPress::None,
+        (true, false) => CancelPress::Cancel,
+        (true, true) => CancelPress::Reset,
+    }
+}
+
+/// The values a dialog opened with: `now` on the first pass it is drawn,
+/// kept while it is drawn pass after pass, and taken again once it was
+/// closed, or when `same` says `now` belongs to another dialog than the one
+/// kept (Curves opened over Levels).
+pub(crate) fn opening_values<T: Clone + Send + Sync + 'static>(
+    ctx: &egui::Context,
+    id: egui::Id,
+    now: &T,
+    same: impl Fn(&T, &T) -> bool,
+) -> T {
+    let pass = ctx.cumulative_pass_nr();
+    let key = id.with("opening_values");
+    ctx.data_mut(|d| {
+        let kept = d
+            .get_temp::<(u64, T)>(key)
+            .filter(|(last, kept)| last.saturating_add(1) >= pass && same(kept, now))
+            .map(|(_, kept)| kept);
+        let value = kept.unwrap_or_else(|| now.clone());
+        d.insert_temp(key, (pass, value.clone()));
+        value
+    })
+}
+
 pub(crate) fn consume_dialog_enter_escape(ctx: &egui::Context) -> (bool, bool) {
     let esc_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     let enter_pressed = if ctx.egui_wants_keyboard_input() {

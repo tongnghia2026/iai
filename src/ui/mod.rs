@@ -836,6 +836,8 @@ fn egui_key(key: crate::app::commands::KeyName) -> egui::Key {
         K::Quote => E::Quote,
         K::Backquote => E::Backtick,
         K::Backslash => E::Backslash,
+        K::BracketLeft => E::OpenBracket,
+        K::BracketRight => E::CloseBracket,
     }
 }
 
@@ -968,16 +970,10 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         if new_hit {
             actions.dialogs.show_new_dialog = Some(true);
         }
-        if ctx.input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers {
-                    alt: true,
-                    ctrl: true,
-                    ..Default::default()
-                },
-                egui::Key::I,
-            ))
-        }) {
+        if keymap
+            .chord_for(Command::ImageSize)
+            .is_some_and(|chord| ctx.input_mut(|i| consume_chord(i, chord)))
+        {
             actions.dialogs.show_image_size_dialog = Some(true);
         }
         // Preferences (Ctrl+K). Handled here as well as in the raw keyboard
@@ -3282,6 +3278,9 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
                         ui.set_max_width(menu_w);
                         ui.spacing_mut().item_spacing.y = 0.0;
                         let mut clicked = false;
+                        let refine_key = data
+                            .keymap
+                            .label_for(crate::app::commands::Command::RefineSelection);
 
                         if flat_context_menu_item(ui, menu_w, has_doc, "Select All", Some("Ctrl+A"))
                         {
@@ -3318,7 +3317,7 @@ fn draw_selection_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut 
                             menu_w,
                             has_doc,
                             "Refine Selection...",
-                            Some("Ctrl+Alt+R"),
+                            Some(refine_key.as_str()).filter(|k| !k.is_empty()),
                         ) {
                             actions.sel.open_refine_panel = true;
                             clicked = true;

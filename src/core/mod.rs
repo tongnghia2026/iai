@@ -59,6 +59,7 @@ pub use iai_imaging::warp;
 pub mod canvas_editor_conversion;
 pub use iai_ai::lama;
 pub use iai_canvas::document;
+pub use iai_canvas::free_transform;
 pub use iai_color::gamut_map;
 pub use iai_imaging::filters;
 pub use iai_layout::mail_merge;

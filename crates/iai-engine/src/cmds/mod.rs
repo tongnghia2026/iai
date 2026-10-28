@@ -13,6 +13,7 @@ pub mod doc;
 pub mod edit;
 pub mod export;
 pub mod file;
+pub mod free_transform;
 pub mod image;
 pub mod layer;
 pub mod mode;
@@ -50,6 +51,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(layer::LayerViaCopy);
     r.register(layer::LayerMask);
     r.register(layer::TransformLayer);
+    r.register(free_transform::FreeTransform);
     r.register(arrange::AlignLayers);
     r.register(arrange::DistributeLayers);
     r.register(arrange::StepCopy);
@@ -103,6 +105,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(vector::Shaping);
     r.register(vector::PowerClip);
     r.register(text::AddText);
+    r.register(text::SetText);
     r.register(edit::Undo);
     r.register(edit::Redo);
     r.register(analyze::AnalyzeRegion);

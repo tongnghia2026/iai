@@ -378,6 +378,10 @@ impl App {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         self.lib.catalog.record(path, width, height, now);
+        // Tests never write the person's recent files or thumbnails.
+        if cfg!(test) {
+            return;
+        }
         self.lib.catalog.save();
         self.lib.thumbs.request(path);
     }

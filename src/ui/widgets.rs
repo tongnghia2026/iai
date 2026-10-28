@@ -27,6 +27,34 @@ pub(crate) fn focus_field_select_all(ui: &egui::Ui, response: &egui::Response) {
     state.store(ui.ctx(), id);
 }
 
+/// Photoshop's Shift + Up / Down in a number box being typed in (`response`,
+/// a `DragValue`'s): `value` moved ten `step`s, kept within `range`. Up and
+/// Down alone are egui's own, one step. True when it moved; the box shows the
+/// new number from the next frame.
+pub(crate) fn shift_arrow_tens<T: egui::emath::Numeric>(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    value: &mut T,
+    step: f64,
+    range: std::ops::RangeInclusive<f64>,
+) -> bool {
+    if !response.has_focus() {
+        return false;
+    }
+    let tens = ui.input_mut(|i| {
+        i.count_and_consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp) as f64
+            - i.count_and_consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown) as f64
+    });
+    if tens == 0.0 {
+        return false;
+    }
+    let moved = (value.to_f64() + 10.0 * step * tens).clamp(*range.start(), *range.end());
+    *value = T::from_f64(moved);
+    // The text being typed goes, so the box reads the number again.
+    ui.data_mut(|d| d.remove::<String>(response.id));
+    true
+}
+
 /// Whether a text field had the keyboard as this frame or the last began:
 /// then Esc and Enter are that field's, not the dialog's around it. egui
 /// drops the focus on Esc before the frame's UI runs, so the frame of the
@@ -648,6 +676,34 @@ fn stacked_slider(
         }
         if out.changed() {
             ui.ctx().data_mut(|d| d.insert_temp(edit_id, text.clone()));
+        }
+        // Up / Down step the number being typed, Shift ten steps, as
+        // Photoshop's number boxes do; the slider follows at once.
+        if out.has_focus() {
+            let step = if (max - min) <= 12.0 { 0.1 } else { 1.0 };
+            let steps = ui.input_mut(|i| {
+                let mut count = |mods, key| i.count_and_consume_key(mods, key) as f32;
+                let one = count(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                    - count(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                let ten = count(egui::Modifiers::SHIFT, egui::Key::ArrowUp)
+                    - count(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+                one + 10.0 * ten
+            });
+            if steps != 0.0 {
+                let typed = text.trim().replace(',', ".").parse::<f32>().ok();
+                let base = typed.filter(|v| v.is_finite()).unwrap_or(*value);
+                let moved = (base + steps * step).clamp(min, max);
+                text = if step < 1.0 {
+                    format!("{moved:.1}")
+                } else {
+                    format!("{moved:.0}")
+                };
+                ui.ctx().data_mut(|d| d.insert_temp(edit_id, text.clone()));
+                if (*value - moved).abs() > f32::EPSILON {
+                    *value = moved;
+                    response.mark_changed();
+                }
+            }
         }
         if out.lost_focus() || !(opening || out.has_focus()) {
             ui.ctx().data_mut(|d| d.remove::<String>(edit_id));

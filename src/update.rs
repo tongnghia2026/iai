@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Where the newest published build describes itself. `IAI_UPDATE_FEED` names
 /// another place, to rehearse an update; `IAI_UPDATE=0` switches the check
@@ -61,12 +61,69 @@ fn day_of(time: u64) -> String {
     crate::diag::local_minute(SystemTime::UNIX_EPOCH + Duration::from_secs(time))
 }
 
+/// What is new, build by build, as its author wrote it for users: this
+/// build's own, newest first.
+pub const OWN_NEWS: &str = include_str!("../assets/whats_new.txt");
+/// How many of its newest entries a build carries in its `update.json`.
+const NEWS_CARRIED: usize = 8;
+
+/// One entry of `assets/whats_new.txt`: its date, and its points.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct News {
+    pub date: String,
+    pub points: Vec<String>,
+}
+
+/// The entries of a `whats_new.txt`, newest first: a date line, then its
+/// points ("- …"), a blank line between entries; `#` lines are notes to the
+/// writer.
+pub fn news_of(text: &str) -> Vec<News> {
+    let mut out: Vec<News> = Vec::new();
+    let mut open = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.is_empty() {
+            open = false;
+            continue;
+        }
+        match out.last_mut() {
+            Some(news) if open => news
+                .points
+                .push(line.trim_start_matches('-').trim().to_string()),
+            _ => {
+                out.push(News {
+                    date: line.to_string(),
+                    points: Vec::new(),
+                });
+                open = true;
+            }
+        }
+    }
+    out
+}
+
+/// The entries `offered` (a published build's) that `own` (this build's)
+/// does not have word for word: what the update brings.
+pub fn news_unseen(offered: &[News], own: &[News]) -> Vec<News> {
+    offered
+        .iter()
+        .filter(|news| !own.contains(news))
+        .cloned()
+        .collect()
+}
+
 /// A published build, as its `update.json` describes it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Release {
     pub commit: String,
     pub time: u64,
     pub files: Vec<ReleaseFile>,
+    /// Its newest entries of what is new (none from builds made before they
+    /// were carried).
+    #[serde(default)]
+    pub notes: Vec<News>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -727,17 +784,35 @@ pub fn print_build_info_if_requested() -> bool {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--build-info")) {
         return false;
     }
-    let build = this_build();
-    let library = if cfg!(feature = "raw-dll") {
-        format!("\"{RAW_NAME}\"")
-    } else {
-        "null".to_owned()
-    };
-    println!(
-        "{{\"commit\":\"{}\",\"time\":{},\"library\":{library}}}",
-        build.commit, build.time
-    );
+    println!("{}", build_info());
     true
+}
+
+/// What `--build-info` prints: this build, the library it loads, and its
+/// newest entries of what is new. Escaped to ASCII, so a console that reads
+/// it in another code page cannot spoil the Vietnamese.
+fn build_info() -> String {
+    let build = this_build();
+    let library = cfg!(feature = "raw-dll").then_some(RAW_NAME);
+    let notes: Vec<News> = news_of(OWN_NEWS).into_iter().take(NEWS_CARRIED).collect();
+    let info = serde_json::json!({
+        "commit": build.commit,
+        "time": build.time,
+        "library": library,
+        "notes": notes,
+    });
+    let mut out = String::new();
+    for c in info.to_string().chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -860,6 +935,46 @@ pub(crate) mod tests {
             sha256(library),
         );
         (json.replacen(r#""files":["#, &entry, 1), packed)
+    }
+
+    #[test]
+    fn entries_of_what_is_new_read_and_only_new_ones_are_offered() {
+        let text = "# to the writer\n# more\n\n12/10/2026\n- one\n-  two \n\n11/10/2026\n- older\n";
+        let news = news_of(text);
+        assert_eq!(
+            news,
+            vec![
+                News {
+                    date: "12/10/2026".into(),
+                    points: vec!["one".into(), "two".into()],
+                },
+                News {
+                    date: "11/10/2026".into(),
+                    points: vec!["older".into()],
+                },
+            ]
+        );
+        assert!(news_of("# nothing yet\n").is_empty());
+        // The installed build has the older entry, and the newer one as it
+        // was before a line was added to it the same day.
+        let own = news_of("12/10/2026\n- one\n\n11/10/2026\n- older\n");
+        assert_eq!(news_unseen(&news, &own), vec![news[0].clone()]);
+        assert!(news_unseen(&news, &news).is_empty());
+    }
+
+    #[test]
+    fn the_build_info_carries_the_newest_entries_in_ascii() {
+        let info = build_info();
+        assert!(info.is_ascii(), "{info}");
+        let read: serde_json::Value = serde_json::from_str(&info).unwrap();
+        assert_eq!(read["commit"], this_build().commit);
+        let notes: Vec<News> = serde_json::from_value(read["notes"].clone()).unwrap();
+        let own = news_of(OWN_NEWS);
+        assert_eq!(
+            notes,
+            own.into_iter().take(NEWS_CARRIED).collect::<Vec<_>>()
+        );
+        assert!(notes.iter().any(|n| n.points.iter().any(|p| !p.is_ascii())));
     }
 
     #[test]

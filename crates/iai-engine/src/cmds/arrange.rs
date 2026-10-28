@@ -173,8 +173,11 @@ pub enum MergeWhat {
     /// A group folder (`layer`), into one layer.
     Group,
     /// Every visible layer, stamped into a new one on top; they stay
-    /// (Ctrl+Shift+E).
+    /// (Ctrl+Shift+Alt+E, Stamp Visible).
     Visible,
+    /// Every visible layer merged into one where the lowest of them was;
+    /// hidden layers stay (Ctrl+Shift+E, Merge Visible).
+    MergeVisible,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -194,8 +197,9 @@ meta!(
     "Gộp layer",
     "Merge Layers",
     "Merge the layers picked in the Layers panel into one (`picked`, Ctrl+E), a group folder \
-     into one layer (`group`), or stamp every visible layer into a new one on top (`visible`, \
-     Ctrl+Shift+E). One undo step."
+     into one layer (`group`), every visible layer into one where the lowest was, hidden ones \
+     kept (`merge_visible`, Ctrl+Shift+E), or stamp every visible layer into a new one on top, \
+     the others kept (`visible`, Ctrl+Shift+Alt+E). One undo step."
 );
 
 /// What the panel says when there is nothing it can merge.
@@ -242,6 +246,15 @@ impl Command for Merge {
                     ));
                 }
                 s.notice("Stamped visible layers", "Stamped visible layers");
+            }
+            MergeWhat::MergeVisible => {
+                if !canvas.merge_visible_in_place() {
+                    return Err(not_enabled(
+                        "fewer than two visible layers to merge",
+                        "Cần ít nhất hai layer đang hiện để gộp",
+                    ));
+                }
+                s.notice("Đã gộp các layer đang hiện", "Merged visible layers");
             }
         }
         let id = active_id(s.canvas(Some(doc))?);

@@ -24,61 +24,38 @@ pub(in crate::app) struct GuiWorkspace<'a> {
 
 impl Workspace for GuiWorkspace<'_> {
     fn documents(&self) -> &[Document] {
-        &self.docs.documents
+        self.docs.tabs.documents()
     }
 
     fn documents_mut(&mut self) -> &mut [Document] {
-        &mut self.docs.documents
+        self.docs.tabs.documents_mut()
     }
 
     fn active(&self) -> Option<usize> {
-        Some(self.docs.active_doc_idx).filter(|&i| i < self.docs.documents.len())
+        self.docs.tabs.active()
     }
 
     fn set_active(&mut self, index: usize) {
-        if index < self.docs.documents.len() {
-            self.docs.active_doc_idx = index;
-        }
+        self.docs.tabs.set_active(index);
     }
 
     fn new_document_id(&mut self) -> DocumentId {
-        let id = DocumentId(self.docs.next_doc_id);
-        self.docs.next_doc_id += 1;
-        id
+        self.docs.tabs.new_document_id()
     }
 
     fn add(&mut self, doc: Document) -> usize {
-        let index = if std::mem::take(&mut self.over_welcome) && self.docs.documents.len() == 1 {
-            self.docs.documents[0] = doc;
+        let tabs = &mut self.docs.tabs;
+        if std::mem::take(&mut self.over_welcome) && tabs.documents.len() == 1 {
+            tabs.documents[0] = doc;
+            tabs.active_doc_idx = 0;
             0
         } else {
-            self.docs.documents.push(doc);
-            self.docs.documents.len() - 1
-        };
-        self.docs.active_doc_idx = index;
-        index
+            tabs.add(doc)
+        }
     }
 
     fn remove(&mut self, index: usize) -> Option<Document> {
-        if index >= self.docs.documents.len() {
-            return None;
-        }
-        // The app never runs without a tab: the last one is replaced by a
-        // blank page.
-        let doc = if self.docs.documents.len() == 1 {
-            let id = self.new_document_id();
-            std::mem::replace(
-                &mut self.docs.documents[0],
-                Document::new(id, crate::core::DEFAULT_W, crate::core::DEFAULT_H),
-            )
-        } else {
-            self.docs.documents.remove(index)
-        };
-        let len = self.docs.documents.len();
-        if self.docs.active_doc_idx > index || self.docs.active_doc_idx >= len {
-            self.docs.active_doc_idx = self.docs.active_doc_idx.saturating_sub(1).min(len - 1);
-        }
-        Some(doc)
+        self.docs.tabs.remove(index)
     }
 }
 
@@ -95,6 +72,10 @@ pub(crate) fn command_registry() -> Registry {
 pub(crate) fn new_engine() -> iai_engine::Engine {
     iai_engine::Engine::new(command_registry(), Source::Gui, Policy::all())
 }
+
+/// The commands that make their change of the whole page in a job: the
+/// window runs them in the background and holds the tab meanwhile.
+pub(crate) const PAGE_JOBS: &[&str] = &["image.crop", "image.resize", "image.perspective_crop"];
 
 /// What a failed command says on the status line.
 pub(crate) fn error_line(e: &CmdError) -> String {
@@ -183,6 +164,18 @@ impl App {
         doc.saved_offset_y = y;
     }
 
+    /// Every frame: the steps the window's tools made since the last frame
+    /// go to the engine (the journal, and its events).
+    pub(crate) fn hand_steps_to_engine(&mut self) {
+        let over_welcome = self.has_only_welcome_placeholder();
+        let mut ws = GuiWorkspace {
+            docs: &mut self.docs,
+            over_welcome,
+        };
+        self.engine.session(&mut ws).take_window_steps();
+        self.apply_engine_events();
+    }
+
     /// Every frame: apply the jobs whose work has ended.
     pub(crate) fn poll_engine(&mut self) {
         if !self.engine.busy() {
@@ -192,6 +185,7 @@ impl App {
         if ended.is_empty() {
             return;
         }
+        self.before_transform_lands(&ended);
         #[cfg(feature = "pro")]
         self.before_pro_jobs_land(&ended);
         let over_welcome = self.has_only_welcome_placeholder();
@@ -208,6 +202,15 @@ impl App {
     /// A command job is running.
     pub(crate) fn engine_busy(&self) -> bool {
         self.engine.busy()
+    }
+
+    /// A page-wide job (see [`PAGE_JOBS`]) works on the tab shown: what is
+    /// painted there meanwhile would be lost under its result.
+    pub(crate) fn page_job_holds_shown_tab(&self) -> bool {
+        let shown = self.docs.active().id.0;
+        self.engine
+            .working_on(shown)
+            .is_some_and(|command| PAGE_JOBS.contains(&command))
     }
 
     /// Redraw what the engine changed, and say what it said.
@@ -230,20 +233,39 @@ impl App {
                     }
                 }
                 EngineEvent::Structure { doc } => structure |= doc == active,
-                EngineEvent::Opened { .. } | EngineEvent::Shown { .. } => refresh = true,
+                EngineEvent::Opened { doc } => {
+                    self.shell.ui.show_welcome = false;
+                    // A tab opened behind the one shown waits to be looked at.
+                    if doc == active {
+                        self.edit.input.painting = false;
+                        self.edit.transform_state = None;
+                        self.edit.pending_stroke_inputs.clear();
+                        refresh = true;
+                    }
+                }
+                EngineEvent::Shown { .. } => refresh = true,
                 EngineEvent::PageShown { doc } => {
                     refresh |= doc == active;
                     fit |= doc == active;
                 }
-                EngineEvent::Saved { doc, path } => {
+                EngineEvent::Saved {
+                    doc,
+                    path,
+                    complete,
+                } => {
                     if let Some(idx) = self.docs.index_of(DocumentId(doc)) {
                         if idx == self.docs.active_doc_idx {
                             self.docs.current_file = Some(path.into());
                         }
-                        self.clear_autosave(idx);
+                        // Work done while it was written is not in the file:
+                        // its recovery copy stays.
+                        if complete {
+                            self.clear_autosave(idx);
+                        }
                     }
                 }
                 EngineEvent::Notice { vi, .. } => self.shell.status_msg = vi,
+                EngineEvent::Stepped { .. } => {}
                 EngineEvent::JobStarted { label_vi, .. } => {
                     self.shell.status_msg = format!("{label_vi}…");
                 }
@@ -333,6 +355,18 @@ impl App {
     fn on_job_finished(&mut self, job: JobId, command: &str, error: Option<&CmdError>) {
         if command == "export.pdf" {
             self.on_pdf_export_finished(job, error);
+        }
+        if command == "file.save" || command == "file.export" {
+            self.on_write_finished(job, error);
+        }
+        if command == "layer.free_transform" {
+            self.on_free_transform_finished(job, error);
+        }
+        if command == "image.crop" {
+            self.on_crop_finished(job, error);
+        }
+        if command == "file.open" {
+            self.on_open_finished(job, error);
         }
         #[cfg(feature = "pro")]
         self.on_pro_job_finished(job, command, error);

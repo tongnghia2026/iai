@@ -5,6 +5,32 @@ use crate::app::state::App;
 use crate::ui::UiActions;
 
 impl App {
+    /// View ▸ Proof Colors (Ctrl+Y) on or off.
+    pub(in crate::app) fn toggle_proof_colors(&mut self) {
+        self.shell.proof_enabled = !self.shell.proof_enabled;
+        self.apply_proof_settings();
+        self.shell.status_msg = if self.shell.proof_enabled {
+            format!("Proof Colors on - {}", self.shell.proof_target.label())
+        } else {
+            "Proof Colors off".to_string()
+        };
+    }
+
+    /// View ▸ Gamut Warning (Ctrl+Shift+Y) on or off.
+    pub(in crate::app) fn toggle_gamut_warning(&mut self) {
+        self.shell.proof_gamut_warn = !self.shell.proof_gamut_warn;
+        // Gamut warning only means anything while proofing.
+        if self.shell.proof_gamut_warn {
+            self.shell.proof_enabled = true;
+        }
+        self.apply_proof_settings();
+        self.shell.status_msg = if self.shell.proof_gamut_warn {
+            "Gamut Warning on".to_string()
+        } else {
+            "Gamut Warning off".to_string()
+        };
+    }
+
     pub(crate) fn handle_color_print_actions(&mut self, actions: &mut UiActions) {
         if let Some(target) = actions.print.set_proof_target.take() {
             self.shell.proof_target = target;
@@ -13,26 +39,10 @@ impl App {
             self.shell.status_msg = format!("Proof: {}", self.shell.proof_target.label());
         }
         if actions.print.toggle_proof_colors {
-            self.shell.proof_enabled = !self.shell.proof_enabled;
-            self.apply_proof_settings();
-            self.shell.status_msg = if self.shell.proof_enabled {
-                format!("Proof Colors on - {}", self.shell.proof_target.label())
-            } else {
-                "Proof Colors off".to_string()
-            };
+            self.toggle_proof_colors();
         }
         if actions.print.toggle_gamut_warning {
-            self.shell.proof_gamut_warn = !self.shell.proof_gamut_warn;
-            // Gamut warning only means anything while proofing.
-            if self.shell.proof_gamut_warn {
-                self.shell.proof_enabled = true;
-            }
-            self.apply_proof_settings();
-            self.shell.status_msg = if self.shell.proof_gamut_warn {
-                "Gamut Warning on".to_string()
-            } else {
-                "Gamut Warning off".to_string()
-            };
+            self.toggle_gamut_warning();
         }
         if actions.print.load_proof_profile
             && let Some(window) = self.win.window.as_ref()
@@ -299,14 +309,17 @@ impl App {
                     && actions.print.print_send.is_none()
                     && self.docs.active().canvas.is_cmyk()
                     && crate::core::canvas::Canvas::fits_flat_buffer(cw, ch);
-                let cmyk_selection = if cmyk_pdf {
-                    crate::core::print::collect_pdf_vectors(&self.docs.active().canvas)
-                } else {
-                    crate::core::print::PdfVectorSelection {
-                        objects: Vec::new(),
-                        promoted_layer_ids: Vec::new(),
-                        above_layer_ids: Vec::new(),
+                // Pictures between the vectors go among them, composited in
+                // ink; a run that is not ink-exact keeps the single image.
+                let (cmyk_selection, ink_overlays) = if cmyk_pdf {
+                    let canvas = &self.docs.active().canvas;
+                    let layered = crate::core::print::collect_pdf_vectors_layered(canvas);
+                    match crate::core::print::pdf_ink_overlays(canvas, &layered) {
+                        Some(overlays) => (layered, overlays),
+                        None => (crate::core::print::collect_pdf_vectors(canvas), Vec::new()),
                     }
+                } else {
+                    (crate::core::print::PdfVectorSelection::empty(), Vec::new())
                 };
                 let ink_page = if cmyk_pdf {
                     crate::core::print::pdf_ink_base(&self.docs.active().canvas, &cmyk_selection)
@@ -323,11 +336,14 @@ impl App {
                 let vector_selection = if ink_native {
                     cmyk_selection
                 } else if self.docs.active().canvas.is_cmyk() {
-                    crate::core::print::PdfVectorSelection {
-                        objects: Vec::new(),
-                        promoted_layer_ids: Vec::new(),
-                        above_layer_ids: Vec::new(),
-                    }
+                    crate::core::print::PdfVectorSelection::empty()
+                } else if actions.print.print_save_pdf
+                    && actions.print.print_send.is_none()
+                    && crate::core::canvas::Canvas::fits_flat_buffer(cw, ch)
+                {
+                    // A saved PDF keeps the vectors under a picture layer that
+                    // sits above them; that picture goes on top as an overlay.
+                    crate::core::print::collect_pdf_vectors_layered(&self.docs.active().canvas)
                 } else {
                     crate::core::print::collect_pdf_vectors(&self.docs.active().canvas)
                 };
@@ -340,6 +356,7 @@ impl App {
                     // app previews, not the viewer's default CMYK interpretation.
                     let cmyk_profile = self.docs.active().canvas.cmyk_pdf_profile();
                     crate::core::print::encode_pdf_page_cmyk(&ink, cw, ch, dpi).and_then(|page| {
+                        let page = page.with_overlays(ink_overlays);
                         crate::core::print::build_pdf_encoded_with_vectors(
                             &page,
                             &vector_selection.objects,
@@ -352,19 +369,27 @@ impl App {
                         &self.docs.active().canvas,
                         &vector_selection,
                     );
+                    let mut overlays = crate::core::print::pdf_overlays(
+                        &self.docs.active().canvas,
+                        &vector_selection,
+                    );
                     if let Some(pp) = &printer_profile {
-                        crate::core::cms::convert_srgb_to_rgb_profile(
-                            &mut rgba,
-                            pp,
-                            layout.intent.to_lcms(),
-                        );
+                        let pictures = overlays.iter_mut().map(|o| &mut o.rgba);
+                        for buf in std::iter::once(&mut rgba).chain(pictures) {
+                            crate::core::cms::convert_srgb_to_rgb_profile(
+                                buf,
+                                pp,
+                                layout.intent.to_lcms(),
+                            );
+                        }
                     }
-                    crate::core::print::build_pdf_with_vectors(
+                    crate::core::print::build_pdf_with_vectors_overlay(
                         &rgba,
                         cw,
                         ch,
                         dpi,
                         &vector_selection.objects,
+                        overlays,
                         &layout,
                         pdf_icc,
                     )

@@ -148,6 +148,40 @@ mod raw_transition_tests {
         app.attach_loaded_doc(path, canvas, None, None);
     }
 
+    /// Pictures open as `file.open` opens them for an agent: the first is
+    /// shown, the next waits behind it, and both are recent files.
+    #[test]
+    fn pictures_open_through_the_command_the_first_shown() {
+        let dir = std::env::temp_dir().join(format!("iai_open_two_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, rgb: [u8; 3]| {
+            let path = dir.join(name);
+            image::RgbImage::from_pixel(12, 8, image::Rgb(rgb))
+                .save(&path)
+                .unwrap();
+            path
+        };
+        let (first, second) = (write("mot.png", [200, 0, 0]), write("hai.png", [0, 0, 200]));
+        let mut app = App::new();
+        app.start_load_paths(vec![first.clone(), second.clone()]);
+        app.finish_commands(std::time::Duration::from_secs(60));
+        let paths: Vec<_> = app.docs.documents.iter().map(|d| d.path.clone()).collect();
+        assert!(paths.contains(&Some(first.clone())) && paths.contains(&Some(second.clone())));
+        assert_eq!(app.docs.active().path.as_deref(), Some(first.as_path()));
+        assert_eq!(app.docs.active().canvas.width, 12);
+        assert!(!app.docs.active().is_modified());
+        assert!(app.jobs.open_jobs.is_empty() && app.jobs.loading_keys.is_empty());
+        let recent: Vec<_> = app
+            .lib
+            .catalog
+            .recent()
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert!(recent.contains(&first) && recent.contains(&second));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_parked_raw_is_spilled_and_read_back_without_decoding() {
         let (mut app, _a, b) = raw_session();
@@ -531,26 +565,32 @@ impl App {
             for path in &paths_to_decode {
                 self.jobs.loading_keys.insert(normalized_path_key(path));
             }
-            if !paths_to_decode.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    // The registry holds only built-in importers (no runtime plugins), so a
-                    // fresh one per worker needs no sharing.
-                    let registry = crate::formats::FormatRegistry::new();
-                    let path_count = paths_to_decode.len();
-                    for (index, path) in paths_to_decode.into_iter().enumerate() {
-                        let result = import_many_guarded(&registry, &path);
-                        if tx.send((path, result, index + 1 == path_count)).is_err() {
-                            break; // UI dropped the receiver (app closing) — stop decoding.
-                        }
-                    }
+            // Pictures open as an agent opens them: `file.open`, one job each,
+            // the first shown and the rest behind it, a multi-page file a tab
+            // per page. A RAW then waits behind the pictures.
+            let pictures = !paths_to_decode.is_empty();
+            if pictures && !self.has_only_welcome_placeholder() {
+                self.docs.active_mut().reconcile_pdf_page_modified();
+            }
+            for (index, path) in paths_to_decode.into_iter().enumerate() {
+                let args = serde_json::json!({
+                    "path": path.display().to_string(),
+                    "show": index == 0,
+                    "pagesAsTabs": true,
                 });
-                self.jobs.pending_loads.push(rx);
+                match self.start_command("file.open", args) {
+                    Some(iai_engine::Reply::Started { job }) => {
+                        self.jobs.open_jobs.push((job, path));
+                    }
+                    _ => {
+                        self.jobs.loading_keys.remove(&normalized_path_key(&path));
+                    }
+                }
             }
             if let Some(first_raw) = raw_paths.first() {
                 self.start_foreground_raw_decode(first_raw.clone(), None);
             }
-            self.jobs.load_activate_pending = true;
+            self.jobs.load_activate_pending = !pictures;
             self.shell.status_msg = if n == 1 {
                 "Loading…".to_string()
             } else {
@@ -896,6 +936,44 @@ impl App {
     /// pushed as a new tab — saving the outgoing view and syncing all GPU state.
     /// Returns the new active index. Caller has already cleared
     /// `load_activate_pending`. Shared by the full-decode and RAW-preview attach.
+    /// A picture's `file.open` job ended: it is no longer being loaded, it
+    /// joins the recent files, or the status line says why it did not open.
+    pub(in crate::app) fn on_open_finished(
+        &mut self,
+        job: iai_engine::JobId,
+        error: Option<&iai_engine::CmdError>,
+    ) {
+        let Some(at) = self.jobs.open_jobs.iter().position(|(j, _)| *j == job) else {
+            return;
+        };
+        let (_, path) = self.jobs.open_jobs.remove(at);
+        self.jobs.loading_keys.remove(&normalized_path_key(&path));
+        match error {
+            Some(e) => {
+                self.shell.status_msg = format!(
+                    "Error opening {}: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    crate::app::engine::error_line(e)
+                );
+            }
+            None => {
+                let size = self
+                    .docs
+                    .documents
+                    .iter()
+                    .find(|d| d.path.as_deref() == Some(path.as_path()))
+                    .map(|d| (d.canvas.width, d.canvas.height));
+                if let Some((w, h)) = size {
+                    self.record_recent(&path, w, h);
+                }
+                // A picture opened and shown is measured in the usual unit.
+                if self.docs.active().path.as_deref() == Some(path.as_path()) {
+                    self.shell.canvas_unit = self.shell.settings.default_unit;
+                }
+            }
+        }
+    }
+
     pub(in crate::app) fn activate_new_document(
         &mut self,
         doc: crate::core::document::Document,

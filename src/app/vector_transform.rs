@@ -299,6 +299,11 @@ impl App {
 
     /// Canvas-space AABB of one Path layer's fill geometry (object-local bounds
     /// mapped through the object transform), or `None` for a degenerate path.
+    /// [`Self::path_canvas_bounds`], for the Move tool's box.
+    pub(crate) fn path_canvas_bounds_of(&self, idx: usize) -> Option<Rect> {
+        self.path_canvas_bounds(idx)
+    }
+
     fn path_canvas_bounds(&self, idx: usize) -> Option<Rect> {
         let layer = self.docs.active().canvas.layer_stack.layers.get(idx)?;
         let LayerType::Vector(VectorGeometry::Path(obj)) = &layer.layer_type else {
@@ -384,7 +389,17 @@ impl App {
         // leaves `active_idx` pointing here; without this gate the box would
         // linger and read as "still selected" (the reported empty-click bug).
         let idx = self.active_path_layer()?;
-        if !self.docs.active().canvas.layer_stack.layers[idx].selected {
+        let stack = &self.docs.active().canvas.layer_stack;
+        if !stack.layers[idx].selected {
+            return None;
+        }
+        // Others picked with it: the Move tool's box frames them all.
+        if stack
+            .layers
+            .iter()
+            .enumerate()
+            .any(|(i, l)| i != idx && l.selected && !l.is_background)
+        {
             return None;
         }
         let (layer_id, model_t, b) = self.active_path_object()?;
@@ -1782,6 +1797,105 @@ mod tests {
         assert!(
             app.multi_path_targets().is_none(),
             "a mixed selection is not a clean multi-Path target set"
+        );
+        // Nor does the active path's own box stand for the pick: the Move
+        // box frames all of it.
+        assert!(app.active_path_transform_box().is_none());
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let last = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .position(|l| l.selected && matches!(l.layer_type, LayerType::Raster))
+                .expect("the picture");
+            let pixels = vec![200u8; 10 * 10 * 4];
+            canvas.layer_stack.layers[last].tiles =
+                crate::core::tile::TileMap::from_rgba(&pixels, 10, 10);
+            canvas.layer_stack.layers[last].width = 10;
+            canvas.layer_stack.layers[last].height = 10;
+            canvas.layer_stack.layers[last].offset = (380, 380);
+        }
+        let (corners, _, _) = app.move_selection_transform_box().expect("one box for all");
+        let union = app
+            .union_canvas_bounds(&app.selected_path_layers())
+            .expect("paths");
+        assert!(corners[0].0 <= union.x.floor() && corners[0].1 <= union.y.floor());
+        assert_eq!(corners[3], (390.0, 390.0), "the picture's corner");
+    }
+
+    /// The owner's report (28/10): a map of paths and other layers picked
+    /// whole showed no box. Now one box frames the pick, and scaling it
+    /// scales every layer in one step, the paths staying paths.
+    #[test]
+    fn a_mixed_pick_scales_together_the_paths_staying_paths() {
+        let (mut app, id_a, id_b) = app_with_two_paths();
+        let picture = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(400, 400);
+            let pixels = vec![200u8; 10 * 10 * 4];
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.tiles = crate::core::tile::TileMap::from_rgba(&pixels, 10, 10);
+            layer.width = 10;
+            layer.height = 10;
+            layer.offset = (300, 300);
+            layer.selected = true;
+            layer.id
+        };
+        let before_a = match &find_layer(&app, id_a).layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => o.transform,
+            _ => unreachable!(),
+        };
+        let steps = app.docs.documents[0].canvas.undo_count();
+        assert!(app.move_selection_transform_box().is_some());
+        app.begin_move_transform();
+        let ts = app
+            .edit
+            .transform_state
+            .as_mut()
+            .expect("a session for the pick");
+        assert_eq!(ts.layer_states.len(), 3);
+        assert!(ts.has_path());
+        (ts.scale_x, ts.scale_y) = (2.0, 2.0);
+        app.commit_transform();
+        app.finish_commands(std::time::Duration::from_secs(30));
+        assert_eq!(app.docs.documents[0].canvas.undo_count(), steps + 1);
+        for id in [id_a, id_b] {
+            let LayerType::Vector(VectorGeometry::Path(o)) = &find_layer(&app, id).layer_type
+            else {
+                panic!("path {id} stays a path");
+            };
+            assert!(
+                (o.transform.a - 2.0 * before_a.a).abs() < 1e-4,
+                "{:?}",
+                o.transform
+            );
+        }
+        assert_eq!(find_layer(&app, picture).width, 20);
+        // One undo gives all of it back.
+        app.docs.documents[0].canvas.undo();
+        let LayerType::Vector(VectorGeometry::Path(o)) = &find_layer(&app, id_a).layer_type else {
+            panic!("path");
+        };
+        assert_eq!(o.transform, before_a);
+        assert_eq!(find_layer(&app, picture).width, 10);
+    }
+
+    /// Ctrl+T takes paths now, in Free mode: a distort would turn them to
+    /// pixels unasked, so it is refused while one is in the session.
+    #[test]
+    fn ctrl_t_takes_paths_but_not_a_distort_of_them() {
+        let (mut app, _, _) = app_with_two_paths();
+        app.begin_transform();
+        assert!(app.edit.transform_state.is_some(), "Ctrl+T opens on paths");
+        app.transform_set_mode(crate::app::state::TransformMode::Distort);
+        let ts = app.edit.transform_state.as_ref().unwrap();
+        assert_eq!(ts.mode, crate::app::state::TransformMode::Free);
+        assert!(ts.quad.is_none());
+        assert!(
+            app.shell.status_msg.contains("path"),
+            "{}",
+            app.shell.status_msg
         );
     }
 

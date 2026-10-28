@@ -76,9 +76,68 @@ pub fn auto_levels(
     any.then_some(channels)
 }
 
+/// Auto Color's last step: a gamma for each of red, green and blue, on top of
+/// their stretch in `channels` (`[master, red, green, blue]`), so that the
+/// three channels' means meet at their average: a grey comes out grey and a
+/// cast in the midtones goes. Each gamma stays within 0.5 to 2; a channel all
+/// dark or all light is left as it is.
+pub fn neutral_midtones(histograms: &[[u32; 256]; 4], channels: &mut [LevelsParams; 4]) {
+    let mean = |plane: usize, p: &LevelsParams| -> Option<f64> {
+        let (black, white) = (f64::from(p.in_black), f64::from(p.in_white));
+        if white <= black {
+            return None;
+        }
+        let (mut sum, mut count) = (0.0, 0u64);
+        for (level, &n) in histograms[plane].iter().enumerate() {
+            let x = ((level as f64 - black) / (white - black)).clamp(0.0, 1.0);
+            sum += x * f64::from(n);
+            count += u64::from(n);
+        }
+        (count > 0).then(|| sum / count as f64)
+    };
+    let Some(means) = (0..3)
+        .map(|plane| mean(plane, &channels[plane + 1]))
+        .collect::<Option<Vec<f64>>>()
+    else {
+        return;
+    };
+    let usable = |m: f64| (0.02..0.98).contains(&m);
+    let target = means.iter().sum::<f64>() / 3.0;
+    if !usable(target) {
+        return;
+    }
+    for (plane, &m) in means.iter().enumerate() {
+        if usable(m) {
+            // m^(1/gamma) = target.
+            channels[plane + 1].gamma = (m.ln() / target.ln()).clamp(0.5, 2.0) as f32;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_color_takes_a_cast_out_of_the_midtones() {
+        // Greys from 20 to 235 with blue a little lifted in the middle.
+        let rgba: Vec<u8> = (20..=235u8)
+            .flat_map(|v| {
+                let lift = ((v as f32 / 255.0 * std::f32::consts::PI).sin() * 30.0) as u8;
+                [v, v, v.saturating_add(lift), 255]
+            })
+            .collect();
+        let h = histograms(&rgba);
+        let mut channels = auto_levels(&h, false, 0.0).unwrap();
+        neutral_midtones(&h, &mut channels);
+        let (r, g, b) = (channels[1].gamma, channels[2].gamma, channels[3].gamma);
+        assert!(b < 1.0, "blue is darkened in the middle: {b}");
+        assert!(
+            r > 1.0 && g > 1.0,
+            "red and green lifted to meet it: {r} {g}"
+        );
+        assert!((r - g).abs() < 0.05);
+    }
 
     #[test]
     fn a_dull_photo_is_stretched_end_to_end_per_channel_or_on_its_luma() {

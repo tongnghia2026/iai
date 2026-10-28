@@ -45,24 +45,6 @@ const NAME_HINT: &str = "Để trống là ẩn danh";
 const SHARE_LABEL: &str = "Giới thiệu cho bạn bè";
 const THANKS: &str = "Cảm ơn bạn đã ủng hộ tác giả!";
 
-/// What is new, build by build, as its author wrote it for users.
-const WHATS_NEW: &str = include_str!("../../../assets/whats_new.txt");
-
-/// The newest entry of `notes`: its date, and its points.
-fn newest_entry(notes: &str) -> (&str, Vec<&str>) {
-    let mut lines = notes
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .skip_while(|line| line.is_empty());
-    let date = lines.next().unwrap_or_default();
-    let points = lines
-        .take_while(|line| !line.is_empty())
-        .map(|line| line.trim_start_matches('-').trim())
-        .collect();
-    (date, points)
-}
-
 /// The name of a group of ways, over them.
 pub(super) fn group_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(12.0);
@@ -215,11 +197,17 @@ pub(crate) fn support_dialog(ctx: &egui::Context, data: &UiData, actions: &mut U
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     if kind == SupportDialog::Updated {
-                        let (date, points) = newest_entry(WHATS_NEW);
+                        let newest = crate::update::news_of(crate::update::OWN_NEWS)
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| crate::update::News {
+                                date: String::new(),
+                                points: Vec::new(),
+                            });
                         ui.label(egui::RichText::new("Đã cập nhật xong. Bản mới có:").strong());
-                        ui.label(weak(&format!("Bản ngày {date}")));
+                        ui.label(weak(&format!("Bản ngày {}", newest.date)));
                         ui.add_space(2.0);
-                        for point in points {
+                        for point in &newest.points {
                             ui.horizontal_top(|ui| {
                                 ui.label("•");
                                 ui.add(egui::Label::new(point).wrap());
@@ -375,19 +363,18 @@ mod tests {
     use crate::ui::dialogs::stage::Stage;
 
     #[test]
-    fn the_newest_entry_is_the_first_block_under_the_notes_to_the_writer() {
-        let notes =
-            "# to the writer\n# more\n\n12/10/2026\n- one\n-  two \n\n11/10/2026\n- older\n";
-        assert_eq!(newest_entry(notes), ("12/10/2026", vec!["one", "two"]));
-        assert_eq!(newest_entry("# nothing yet\n"), ("", vec![]));
-        // What ships has a dated entry with something in it.
-        let (date, points) = newest_entry(WHATS_NEW);
-        assert_eq!(date.len(), "12/10/2026".len(), "{date}");
-        assert!(
-            date.chars().all(|c| c.is_ascii_digit() || c == '/'),
-            "{date}"
-        );
-        assert!(!points.is_empty() && points.iter().all(|p| !p.is_empty()));
+    fn what_ships_is_dated_entries_with_something_in_each() {
+        let news = crate::update::news_of(crate::update::OWN_NEWS);
+        assert!(!news.is_empty());
+        for entry in &news {
+            assert_eq!(entry.date.len(), "12/10/2026".len(), "{}", entry.date);
+            assert!(
+                entry.date.chars().all(|c| c.is_ascii_digit() || c == '/'),
+                "{}",
+                entry.date
+            );
+            assert!(!entry.points.is_empty() && entry.points.iter().all(|p| !p.is_empty()));
+        }
     }
 
     #[test]

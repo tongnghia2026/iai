@@ -657,6 +657,20 @@ impl VectorBatchStyle {
     }
 }
 
+/// What is done with a Photoshop preset file of an adjustment dialog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PresetFile {
+    Load,
+    Save,
+}
+
+/// Which list of adjustment presets the user keeps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdjustmentPresetList {
+    Levels,
+    Curves,
+}
+
 /// Open/confirm/cancel for the modal dialogs and their scratch edits.
 #[derive(Default, PartialEq)]
 pub struct DialogIntent {
@@ -787,9 +801,13 @@ pub struct DialogIntent {
     pub preset_dialog_cancel: bool,
     /// Save/delete user Levels/Curves presets (adjustment_presets.json).
     pub save_levels_preset: Option<(String, [crate::core::layer::LevelsParams; 4])>,
-    pub delete_levels_preset: Option<usize>,
     pub save_curves_preset: Option<(String, [Vec<(f32, f32)>; 4])>,
-    pub delete_curves_preset: Option<usize>,
+    /// A user preset of Levels or Curves to delete, by its place in its list.
+    pub delete_adjustment_preset: Option<(AdjustmentPresetList, usize)>,
+    /// A Photoshop preset file of the dialog open (Levels .alv, Curves .acv,
+    /// Hue/Saturation .ahu): one asked for and loaded, or the dialog's values
+    /// saved as one.
+    pub adjustment_preset_file: Option<PresetFile>,
 }
 /// Chrome: panel toggles, toolbox, theme, guides, window buttons.
 #[derive(Default)]

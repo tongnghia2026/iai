@@ -2826,10 +2826,29 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
         }
         case 2u: { // HueSaturation
             var hsl = rgb_to_hsl(c);
-            let nh = fract(hsl.x + P0.x / 360.0 + 1.0);
-            let nl = clamp(hsl.z + P0.z / 100.0, 0.0, 1.0);
+            if (P0.w > 0.5) { // Colorize: P1.xyz its hue, saturation, lightness
+                let k = clamp(P1.z / 100.0, -1.0, 1.0);
+                let l = select(hsl.z * (1.0 + k), hsl.z + (1.0 - hsl.z) * k, k >= 0.0);
+                return hsl_to_rgb(vec3(
+                    fract(P1.x / 360.0 + 1.0),
+                    clamp(P1.y / 100.0, 0.0, 1.0),
+                    clamp(l, 0.0, 1.0),
+                ));
+            }
+            var shift = P0.xyz;
+            if (P1.w > 0.5) { // the six colours' own sliders, lut[0..6]
+                // A grey has no colour: a colour's sliders leave it be.
+                let gate = adj_smootherstep(0.0, 0.06, adj_chroma(c));
+                for (var i = 0u; i < 6u; i = i + 1u) {
+                    let d = abs(fract(hsl.x - f32(i) / 6.0 + 0.5) - 0.5) * 360.0;
+                    let w = clamp((45.0 - d) / 30.0, 0.0, 1.0) * gate;
+                    shift = shift + w * u.lut[i].xyz;
+                }
+            }
+            let nh = fract(hsl.x + shift.x / 360.0 + 1.0);
+            let nl = clamp(hsl.z + shift.z / 100.0, 0.0, 1.0);
             var adjusted = hsl_to_rgb(vec3(nh, hsl.y, nl));
-            let sf = P0.y / 100.0;
+            let sf = shift.y / 100.0;
             if (abs(sf) > 0.001) {
                 let chroma_gate = adj_smootherstep(0.035, 0.20, adj_chroma(adjusted));
                 let factor = select(1.0 + sf, 1.0 + sf * 1.35 * chroma_gate, sf >= 0.0);

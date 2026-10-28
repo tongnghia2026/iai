@@ -2034,7 +2034,9 @@ fn json_to_rgba(v: &serde_json::Value) -> Option<[u8; 4]> {
     Some(out)
 }
 
-fn adjustment_to_json(adj: &iai_doc::layer::AdjustmentType) -> serde_json::Value {
+/// An adjustment's params as the .iai file keeps them (also how the app
+/// remembers the values one was last applied with).
+pub fn adjustment_to_json(adj: &iai_doc::layer::AdjustmentType) -> serde_json::Value {
     use iai_doc::layer::AdjustmentType as A;
     match adj {
         A::BrightnessContrast {
@@ -2047,9 +2049,21 @@ fn adjustment_to_json(adj: &iai_doc::layer::AdjustmentType) -> serde_json::Value
             hue,
             saturation,
             lightness,
-        } => serde_json::json!({
-            "type": "HueSaturation", "hue": hue, "saturation": saturation, "lightness": lightness
-        }),
+            colorize,
+            ranges,
+        } => {
+            let mut out = serde_json::json!({
+                "type": "HueSaturation", "hue": hue, "saturation": saturation, "lightness": lightness
+            });
+            // Written only when used, so an older build still reads the file.
+            if let Some(c) = colorize {
+                out["colorize"] = serde_json::json!(c);
+            }
+            if ranges.iter().flatten().any(|v| v.abs() > 1e-4) {
+                out["ranges"] = serde_json::json!(ranges);
+            }
+            out
+        }
         A::Levels { channels } => {
             // Legacy keys carry the master channel so v≤2 builds keep reading
             // these files; r/g/b are written only when non-identity.
@@ -2163,7 +2177,8 @@ fn adjustment_to_json(adj: &iai_doc::layer::AdjustmentType) -> serde_json::Value
     }
 }
 
-fn json_to_adjustment(v: &serde_json::Value) -> Option<iai_doc::layer::AdjustmentType> {
+/// Inverse of [`adjustment_to_json`]; `None` for anything it does not read.
+pub fn json_to_adjustment(v: &serde_json::Value) -> Option<iai_doc::layer::AdjustmentType> {
     use iai_doc::layer::AdjustmentType as A;
     let t = v["type"].as_str()?;
     let f32v = |key: &str| v[key].as_f64().unwrap_or(0.0) as f32;
@@ -2179,11 +2194,27 @@ fn json_to_adjustment(v: &serde_json::Value) -> Option<iai_doc::layer::Adjustmen
             brightness: f32v("brightness"),
             contrast: f32v("contrast"),
         },
-        "HueSaturation" => A::HueSaturation {
-            hue: f32v("hue"),
-            saturation: f32v("saturation"),
-            lightness: f32v("lightness"),
-        },
+        "HueSaturation" => {
+            let triple = |v: &serde_json::Value| -> Option<[f32; 3]> {
+                let a = v.as_array()?;
+                let at =
+                    |i: usize| a.get(i).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+                Some([at(0), at(1), at(2)])
+            };
+            let mut ranges = [[0.0f32; 3]; 6];
+            if let Some(list) = v["ranges"].as_array() {
+                for (slot, item) in ranges.iter_mut().zip(list) {
+                    *slot = triple(item).unwrap_or_default();
+                }
+            }
+            A::HueSaturation {
+                hue: f32v("hue"),
+                saturation: f32v("saturation"),
+                lightness: f32v("lightness"),
+                colorize: triple(&v["colorize"]),
+                ranges,
+            }
+        }
         "Levels" => {
             use iai_doc::layer::LevelsParams;
             let parse_ch = |val: &serde_json::Value| LevelsParams {

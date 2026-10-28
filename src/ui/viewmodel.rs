@@ -832,7 +832,7 @@ pub struct ErrandForm {
     pub job: ErrandJob,
     /// What else the person says; the whole ask for [`ErrandJob::Other`].
     pub note: String,
-    /// ID photos: "3x4", "2x3", "4x6".
+    /// ID photos: "3x4", "2x3", "4x6", "33x48", "35x45", "5x5".
     pub size: String,
     /// ID photos: "white", "blue".
     pub backdrop: String,
@@ -1053,6 +1053,9 @@ pub struct UpdateView {
     pub new_day: String,
     /// Megabytes to download.
     pub megabytes: u64,
+    /// What the published build brings: its entries of what is new that this
+    /// build does not have, newest first.
+    pub news: Vec<crate::update::News>,
 }
 /// The Channels panel.
 pub struct ChannelsViewModel {

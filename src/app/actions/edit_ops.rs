@@ -135,24 +135,65 @@ impl App {
                 .crop()
                 .engine_call(canvas.width, canvas.height, background)
         };
-        match call {
-            Some(args) => {
-                if self.run_with("image.crop", args).is_err() {
-                    // Refused (the status line says why): the frame stays.
-                    return false;
-                }
-                self.edit.tools.crop_mut().cancel();
+        let Some(args) = call else {
+            self.edit.tools.crop_mut().cancel();
+            return false;
+        };
+        if self.edit.pending_crop_job.is_some() {
+            return false;
+        }
+        // A frame turned or scaled resamples every layer, a job of its own:
+        // the frame stays up until it lands (on_crop_finished).
+        match self.start_command("image.crop", args) {
+            // Refused (the status line says why): the frame stays.
+            None => return false,
+            Some(iai_engine::Reply::Started { job }) => {
+                self.edit.pending_crop_job = Some((job, began));
             }
-            None => {
+            Some(iai_engine::Reply::Done { .. }) => {
                 self.edit.tools.crop_mut().cancel();
-                return false;
+                self.note_crop_cost(began);
             }
         }
-        // The command's events did the canvas-size bookkeeping (GPU texture
-        // resize, compositor invalidation, re-fit, recomposite) through
-        // apply_canvas_event, the SAME path undo/redo take. The crop
-        // resamples on this thread; a commit by Enter runs inside the key
-        // handler, where no frame timing sees it. Keep what it cost.
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// The Crop tool's `image.crop` job ended: the frame gives way to the
+    /// result, or stays for another try when it failed.
+    pub(in crate::app) fn on_crop_finished(
+        &mut self,
+        job: iai_engine::JobId,
+        error: Option<&iai_engine::CmdError>,
+    ) {
+        let Some((ours, began)) = self.edit.pending_crop_job else {
+            return;
+        };
+        if ours != job {
+            return;
+        }
+        self.edit.pending_crop_job = None;
+        if error.is_none() {
+            self.edit.tools.crop_mut().cancel();
+            self.note_crop_cost(began);
+        }
+        self.update_crop_preview();
+    }
+
+    /// Esc while the Crop tool's job runs: it is cancelled, the page stays.
+    pub(in crate::app) fn cancel_crop_job(&mut self) {
+        if let Some((job, _)) = self.edit.pending_crop_job.take() {
+            self.engine.cancel(job);
+        }
+    }
+
+    /// The command's events did the canvas-size bookkeeping (GPU texture
+    /// resize, compositor invalidation, re-fit, recomposite) through
+    /// apply_canvas_event, the SAME path undo/redo take. Keep what the crop
+    /// cost, from Enter to its result on screen.
+    fn note_crop_cost(&self, began: std::time::Instant) {
         let total = began.elapsed();
         if total.as_millis() >= 30 {
             let canvas = &self.docs.active().canvas;
@@ -166,10 +207,6 @@ impl App {
                 ),
             );
         }
-        if let Some(w) = &self.win.window {
-            w.request_redraw();
-        }
-        true
     }
 
     pub fn update_crop_preview(&mut self) {
@@ -700,6 +737,11 @@ mod tests {
             tool.commit(&mut by_hand, Some(app.edit.bg_color));
 
             assert!(app.commit_active_crop(), "{name}");
+            app.finish_commands(std::time::Duration::from_secs(60));
+            assert!(
+                app.edit.pending_crop_job.is_none(),
+                "{name}: still cropping"
+            );
             let by_window = &app.docs.documents[0].canvas;
             assert_eq!(
                 (by_window.width, by_window.height),
@@ -723,6 +765,53 @@ mod tests {
             );
             assert!(!app.edit.tools.crop().has_selection(), "{name}: frame left");
         }
+    }
+
+    /// A turned frame crops in a job: the frame stays up and the tab takes
+    /// no stroke until it lands; Esc meanwhile cancels it and the page stays.
+    #[test]
+    fn a_turned_crop_holds_its_frame_until_it_lands_and_esc_cancels_it() {
+        use crate::tools::crop::CropMode;
+        let (w, h) = (300u32, 200u32);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, 90, 160, 255])
+            .collect();
+        let setup = |app: &mut App| {
+            app.shell.ui.show_welcome = false;
+            app.docs.documents[0].canvas = Canvas::from_rgba(rgba.clone(), w, h);
+            app.edit.tools.select(crate::tools::ToolId::Crop);
+            let t = app.edit.tools.crop_mut();
+            t.mode = CropMode::Free;
+            (t.crop_x0, t.crop_y0, t.crop_x1, t.crop_y1) = (40.0, 30.0, 220.0, 170.0);
+            t.rotation = 0.3;
+        };
+
+        let mut app = App::new();
+        setup(&mut app);
+        assert!(app.commit_active_crop());
+        assert!(
+            app.edit.pending_crop_job.is_some(),
+            "the crop runs as a job"
+        );
+        assert!(app.edit.tools.crop().has_selection(), "the frame stays up");
+        assert!(app.page_job_holds_shown_tab(), "the tab is held");
+        app.finish_commands(std::time::Duration::from_secs(60));
+        assert!(app.edit.pending_crop_job.is_none());
+        assert!(!app.edit.tools.crop().has_selection(), "the frame gave way");
+        assert_ne!(app.docs.documents[0].canvas.width, w);
+
+        let mut app = App::new();
+        setup(&mut app);
+        assert!(app.commit_active_crop());
+        app.cancel_crop_job();
+        app.finish_commands(std::time::Duration::from_secs(60));
+        let canvas = &app.docs.documents[0].canvas;
+        assert_eq!(
+            (canvas.width, canvas.height),
+            (w, h),
+            "cancelled: the page stays"
+        );
+        assert_eq!(canvas.layer_stack.layers[0].flatten_tiles(), rgba);
     }
 
     #[test]

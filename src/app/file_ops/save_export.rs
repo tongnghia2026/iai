@@ -1,12 +1,11 @@
 //! Saving and exporting the active document: PNG/JPEG/TIFF/.iai writes,
 //! CMYK separations and multi-page PDF export.
 
-use crate::app::autosave::{content_fingerprint, detached_canvas};
+use crate::app::autosave::content_fingerprint;
 use crate::app::state::App;
 use crate::core::canvas::Canvas;
 use crate::core::document::{DocumentId, file_modified_at};
 use crate::file_io;
-use crate::formats::ExportOptions;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -15,37 +14,25 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 pub(in crate::app) enum SaveWait {
     /// The caller goes on to act on the outcome: closing the tab, leaving the app.
     Finish,
-    /// The user asked to save and keeps working; the outcome is taken in by
-    /// `poll_save_jobs`.
+    /// The user asked to save and keeps working; the outcome is taken in when
+    /// the engine's job ends.
     Background,
 }
 
-/// A single image being written on a worker thread.
+/// A single image being written by the engine's `file.save` or
+/// `file.export` job.
 pub(in crate::app) struct SaveJob {
     doc_id: DocumentId,
     path: PathBuf,
-    /// For a save, what the document held when it was snapshotted: it counts as
-    /// saved only if it still holds exactly that when the file lands. `None`
-    /// for an export, which leaves the document as it is.
+    /// For a save, what the document held when it was asked for: a second
+    /// Ctrl+S with nothing new is not started. `None` for an export, which
+    /// leaves the document as it is.
     saved_content: Option<u64>,
-    done: Receiver<Result<PathBuf, String>>,
+    job: iai_engine::JobId,
 }
 
-/// Worker body: encode `canvas` into `path`. Returns the file written, which
-/// gains `.png` when `path` named no format.
-fn write_image(canvas: &Canvas, path: &Path, opts: &ExportOptions) -> Result<PathBuf, String> {
-    let has_exporter = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| crate::formats::ExportFormat::from_extension(e).is_some());
-    if has_exporter {
-        crate::formats::FormatRegistry::new()
-            .export(canvas, path, opts)
-            .map(|()| path.to_path_buf())
-    } else {
-        file_io::save(canvas, path).map_err(|e| e.to_string())
-    }
-}
+/// The longest a save that holds its caller waits for the file to land.
+const SAVE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Ask where to write the PDF, with the native save dialog on a worker (it
 /// must not re-enter winit/egui's UI thread). `None` when cancelled.
@@ -443,67 +430,64 @@ impl App {
             self.finish_save_jobs();
         }
 
-        let opts = if ext == "iai" {
-            ExportOptions::default()
+        // A name with no ending is written as a PNG.
+        let path = if path.extension().is_none() {
+            path.with_extension("png")
         } else {
-            ExportOptions {
-                embed_icc: self.shell.ui.export_embed_icc,
-                resize_long_edge: self
-                    .shell
-                    .ui
-                    .export_resize_enabled
-                    .then_some(self.shell.ui.export_resize_long_edge),
-                output_sharpen: self.shell.ui.export_output_sharpen,
-                ..ExportOptions::default()
-            }
+            path.to_path_buf()
         };
-        let canvas = detached_canvas(&self.docs.documents[idx].canvas);
-        self.start_write(
-            doc_id,
-            canvas,
-            path.to_path_buf(),
-            opts,
-            Some(content),
-            wait,
-        );
+        let mut args = serde_json::json!({
+            "doc": doc_id.0,
+            "path": path.display().to_string(),
+        });
+        if ext != "iai" {
+            self.add_image_options(&mut args);
+        }
+        self.start_write("file.save", args, doc_id, path, Some(content), wait);
     }
 
-    /// Write `canvas` to `path` on a worker thread. `saved_content` as in
-    /// [`SaveJob`].
+    /// The Export options the person set (Preferences), as the file commands
+    /// take them.
+    fn add_image_options(&self, args: &mut serde_json::Value) {
+        let ui = &self.shell.ui;
+        args["embedIcc"] = ui.export_embed_icc.into();
+        args["sharpen"] = ui.export_output_sharpen.min(100).into();
+        if ui.export_resize_enabled {
+            args["longEdgePx"] = ui.export_resize_long_edge.clamp(16, 30000).into();
+        }
+    }
+
+    /// Run `command` (`file.save` or `file.export`) as a job writing `path`.
+    /// `saved_content` as in [`SaveJob`]; `wait` says whether to stay until the
+    /// file has landed.
     fn start_write(
         &mut self,
+        command: &str,
+        args: serde_json::Value,
         doc_id: DocumentId,
-        canvas: Canvas,
         path: PathBuf,
-        opts: ExportOptions,
         saved_content: Option<u64>,
         wait: SaveWait,
     ) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let worker_path = path.clone();
-        let spawned = std::thread::Builder::new()
-            .name("iai-save".to_string())
-            .spawn(move || {
-                let _ = tx.send(write_image(&canvas, &worker_path, &opts));
-            });
-        if let Err(error) = spawned {
-            self.report_save_error(format!("Lỗi lưu: không tạo được luồng ghi file ({error})"));
-            return;
-        }
-        let job = SaveJob {
+        let job = match self.start_command(command, args) {
+            Some(iai_engine::Reply::Started { job }) => job,
+            // Done at once: nothing is under way.
+            Some(iai_engine::Reply::Done { .. }) => return,
+            None => {
+                let error = self.shell.status_msg.clone();
+                self.report_save_error(error);
+                return;
+            }
+        };
+        self.docs.save_jobs.push(SaveJob {
             doc_id,
             path,
             saved_content,
-            done: rx,
-        };
+            job,
+        });
         match wait {
             SaveWait::Finish => self.wait_for_save_job(job),
             SaveWait::Background => {
-                self.shell.status_msg = format!(
-                    "Đang lưu {}…",
-                    job.path.file_name().unwrap_or_default().to_string_lossy()
-                );
-                self.docs.save_jobs.push(job);
                 if let Some(window) = &self.win.window {
                     window.request_redraw();
                 }
@@ -511,39 +495,23 @@ impl App {
         }
     }
 
-    fn wait_for_save_job(&mut self, job: SaveJob) {
-        let result = job
-            .done
-            .recv()
-            .unwrap_or_else(|_| Err("save worker stopped".to_string()));
-        self.finish_save_job(job, result);
-    }
-
-    /// Take in the saves and exports that have finished. Called every frame.
-    pub(crate) fn poll_save_jobs(&mut self) {
-        let mut i = 0;
-        while i < self.docs.save_jobs.len() {
-            match self.docs.save_jobs[i].done.try_recv() {
-                Err(TryRecvError::Empty) => i += 1,
-                outcome => {
-                    let job = self.docs.save_jobs.remove(i);
-                    let result = outcome.unwrap_or_else(|_| Err("save worker stopped".to_string()));
-                    self.finish_save_job(job, result);
-                }
-            }
-        }
-        // Nothing else wakes the loop when a worker finishes.
-        if !self.docs.save_jobs.is_empty()
-            && let Some(window) = &self.win.window
+    /// Stay until the job `job` has ended and been taken in.
+    fn wait_for_save_job(&mut self, job: iai_engine::JobId) {
+        let started = std::time::Instant::now();
+        while self.docs.save_jobs.iter().any(|s| s.job == job)
+            && self.engine.busy()
+            && started.elapsed() < SAVE_PATIENCE
         {
-            window.request_redraw();
+            self.poll_engine();
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
     /// Stay until every save and export under way has landed. For the moments
     /// that act on the outcome: closing a tab, leaving the app.
     pub(crate) fn finish_save_jobs(&mut self) {
-        for job in std::mem::take(&mut self.docs.save_jobs) {
+        let jobs: Vec<_> = self.docs.save_jobs.iter().map(|s| s.job).collect();
+        for job in jobs {
             self.wait_for_save_job(job);
         }
     }
@@ -558,47 +526,25 @@ impl App {
         })
     }
 
-    fn finish_save_job(&mut self, job: SaveJob, result: Result<PathBuf, String>) {
-        let saved = match result {
-            Ok(saved) => saved,
-            Err(e) => {
-                let what = if job.saved_content.is_some() {
-                    "Lỗi lưu"
-                } else {
-                    "Lỗi xuất file"
-                };
-                self.report_save_error(format!("{what}: {e}"));
-                return;
-            }
-        };
-        let name = saved
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        self.shell.status_msg = format!("Saved: {name}");
-        let Some(content) = job.saved_content else {
+    /// A `file.save` or `file.export` job ended. What it wrote was taken in
+    /// by the engine (the document's file and saved state, the recovery copy
+    /// dropped); a failure raises the save error.
+    pub(in crate::app) fn on_write_finished(
+        &mut self,
+        job: iai_engine::JobId,
+        error: Option<&iai_engine::CmdError>,
+    ) {
+        let Some(at) = self.docs.save_jobs.iter().position(|s| s.job == job) else {
             return;
         };
-        let Some(idx) = self.docs.index_of(job.doc_id) else {
-            return;
-        };
-        let doc = &mut self.docs.documents[idx];
-        doc.path = Some(saved.clone());
-        doc.file_modified_at = file_modified_at(&saved);
-        // Work done while the file was being written is not in it.
-        let still_as_saved = content_fingerprint(&doc.canvas) == content;
-        if still_as_saved {
-            doc.mark_saved();
-        }
-        if idx == self.docs.active_doc_idx {
-            self.docs.current_file = Some(saved);
-        }
-        if still_as_saved {
-            self.clear_autosave(idx);
-        } else {
-            self.shell.status_msg =
-                format!("Saved: {name} — phần sửa sau lúc bấm lưu chưa nằm trong file");
+        let write = self.docs.save_jobs.remove(at);
+        if let Some(e) = error {
+            let what = if write.saved_content.is_some() {
+                "Lỗi lưu"
+            } else {
+                "Lỗi xuất file"
+            };
+            self.report_save_error(format!("{what}: {}", crate::app::engine::error_line(e)));
         }
     }
 
@@ -650,31 +596,25 @@ impl App {
 
         self.sync_brush_gpu_to_cpu();
 
+        // `file.export` lays a page that shows the shared master over it for a
+        // picture; a `.iai` copy keeps the page's own layers.
         let is_iai = matches!(format, crate::formats::ExportFormat::Iai);
-        let doc = self.docs.active();
-        // Raster export of a page that shows the shared master: build a throwaway
-        // canvas with the master composited beneath and export THAT. `.iai` keeps
-        // the master stored separately (via the artboard-document save), so it is
-        // never merged here.
-        let merged = if is_iai {
-            None
-        } else {
-            doc.page_render_canvas(doc.active_artboard)
-        };
-        let canvas = merged.unwrap_or_else(|| detached_canvas(&doc.canvas));
-        let doc_id = doc.id;
-        let opts = ExportOptions {
-            embed_icc: self.shell.ui.export_embed_icc,
-            resize_long_edge: self
-                .shell
-                .ui
-                .export_resize_enabled
-                .then_some(self.shell.ui.export_resize_long_edge),
-            output_sharpen: self.shell.ui.export_output_sharpen,
-            pdf_marks: self.shell.ui.export_pdf_marks,
-            ..ExportOptions::default()
-        };
-        self.start_write(doc_id, canvas, path_buf, opts, None, SaveWait::Background);
+        let doc_id = self.docs.active().id;
+        let mut args = serde_json::json!({
+            "doc": doc_id.0,
+            "path": path_buf.display().to_string(),
+        });
+        if !is_iai {
+            self.add_image_options(&mut args);
+        }
+        self.start_write(
+            "file.export",
+            args,
+            doc_id,
+            path_buf,
+            None,
+            SaveWait::Background,
+        );
     }
 
     /// File ▸ Export ▸ SVG (Vector) — write the active document as an SVG: its
@@ -1335,12 +1275,14 @@ mod tests {
         let mut app = App::new();
         app.shell.ui.show_welcome = false;
         app.docs.documents[0].canvas.mark_dirty_unconditionally();
-        let missing_folder =
-            std::env::temp_dir().join(format!("iai_save_error_{}_absent", std::process::id()));
+        // A missing folder is made; one that is a file cannot be.
+        let folder = Folder::new("not_a_folder");
+        let not_a_folder = folder.0.join("a_file");
+        std::fs::write(&not_a_folder, b"x").unwrap();
 
         for name in ["anh.png", "anh.iai"] {
             app.shell.ui.save_error = None;
-            app.save_to(&missing_folder.join(name));
+            app.save_to(&not_a_folder.join(name));
 
             let message = app
                 .shell

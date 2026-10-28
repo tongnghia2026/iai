@@ -375,6 +375,95 @@ impl Canvas {
         ok
     }
 
+    /// Photoshop's Merge Visible: every visible layer flattened into one that
+    /// takes the place of the lowest of them (below its folder when it lies in
+    /// one), the Background when the Background was among them. Hidden layers
+    /// stay as they are; a folder left with no layer goes. One undo step;
+    /// `false`, nothing changed, with fewer than two visible layers.
+    pub fn merge_visible_in_place(&mut self) -> bool {
+        let stack = &self.layer_stack;
+        let visible: Vec<usize> = (0..stack.layers.len())
+            .filter(|&i| stack.is_effectively_visible(i) && !stack.layers[i].is_group())
+            .collect();
+        let (Some(&lowest), true) = (visible.first(), visible.len() >= 2) else {
+            return false;
+        };
+        // Below the outermost folder round the lowest one: a layer that is
+        // not a member must not sit inside a folder's block.
+        let mut at = lowest;
+        let mut parent = stack.layers[lowest].parent_id;
+        while let Some(id) = parent {
+            let Some(header) = stack.layers.iter().position(|l| l.id == id) else {
+                break;
+            };
+            at = at.min(stack.group_member_range(header).start);
+            parent = stack.layers[header].parent_id;
+        }
+        let merged_ids: std::collections::HashSet<u32> =
+            visible.iter().map(|&i| stack.layers[i].id).collect();
+        let background = visible.iter().any(|&i| stack.layers[i].is_background);
+        let folders_with_members: Vec<u32> = stack
+            .layers
+            .iter()
+            .filter(|l| l.is_group())
+            .map(|l| l.id)
+            .filter(|&id| !stack.children_of(id).is_empty())
+            .collect();
+
+        let mut cmd = iai_history::command::LayerStructureCommand::capture_before(
+            "Merge Visible",
+            &self.layer_stack,
+            self.width,
+            self.height,
+        );
+        let stamped = if self.bit_depth == BitDepth::Sixteen {
+            self.layer_stack.merge_visible16(self.width, self.height)
+        } else {
+            self.layer_stack.merge_visible(self.width, self.height)
+        };
+        let Some(mut merged) = stamped.then(|| self.layer_stack.layers.pop()).flatten() else {
+            return false;
+        };
+        let stack = &mut self.layer_stack;
+        for i in (0..stack.layers.len()).rev() {
+            if merged_ids.contains(&stack.layers[i].id) {
+                stack.layers.remove(i);
+            }
+        }
+        // Folders whose every layer went in, as far up as that goes.
+        loop {
+            let emptied = stack.layers.iter().position(|l| {
+                l.is_group()
+                    && folders_with_members.contains(&l.id)
+                    && stack.children_of(l.id).is_empty()
+            });
+            match emptied {
+                Some(i) => {
+                    stack.remove_layer(i);
+                }
+                None => break,
+            }
+        }
+        for layer in &mut stack.layers {
+            layer.selected = false;
+        }
+        merged.selected = true;
+        merged.parent_id = None;
+        if background {
+            merged.name = "Background".to_string();
+            merged.is_background = true;
+            merged.locked = true;
+        }
+        let at = at.min(stack.layers.len());
+        stack.layers.insert(at, merged);
+        stack.active_idx = at;
+        stack.repair_clip_relations();
+        cmd.capture_after(&self.layer_stack, self.width, self.height);
+        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        self.flatten_full();
+        true
+    }
+
     pub fn add_adjustment_layer(&mut self, adj: AdjustmentType) -> usize {
         let mut _cmd = iai_history::command::LayerStructureCommand::capture_before(
             "Add Adjustment Layer",
@@ -625,5 +714,92 @@ mod folder_tests {
         let (mut canvas, _) = canvas_with_folder();
         assert!(canvas.duplicate_active_group());
         assert_eq!(canvas.layer_stack.layers.len(), 8);
+    }
+}
+
+#[cfg(test)]
+mod merge_visible_tests {
+    use super::*;
+
+    fn square(stack: &mut LayerStack, name: &str, rgba: [u8; 4], at: (i32, i32)) -> u32 {
+        let id = stack.next_id();
+        let mut layer = Layer::from_rgba(id, name, rgba.repeat(100), 10, 10);
+        layer.offset = at;
+        stack.layers.push(layer);
+        stack.set_next_id(id + 1);
+        id
+    }
+
+    #[test]
+    fn merge_visible_keeps_the_hidden_layers_and_the_picture() {
+        let mut canvas = Canvas::new(60, 40);
+        let stack = &mut canvas.layer_stack;
+        square(stack, "red", [255, 0, 0, 255], (5, 5));
+        let hidden = square(stack, "hidden", [0, 255, 0, 255], (20, 5));
+        square(stack, "blue", [0, 0, 255, 255], (8, 8));
+        let hidden_idx = stack.layers.iter().position(|l| l.id == hidden).unwrap();
+        stack.layers[hidden_idx].visible = false;
+        let before = canvas.layer_stack.flatten(60, 40);
+        let undo = canvas.undo_count();
+
+        assert!(canvas.merge_visible_in_place());
+        let stack = &canvas.layer_stack;
+        assert_eq!(stack.layers.len(), 2, "one merged layer and the hidden one");
+        assert!(
+            stack.layers[0].is_background,
+            "the Background was among them"
+        );
+        assert_eq!(stack.layers[1].id, hidden);
+        assert!(!stack.layers[1].visible);
+        assert_eq!(stack.flatten(60, 40), before, "what shows is unchanged");
+        assert_eq!(canvas.undo_count(), undo + 1);
+
+        canvas.undo().expect("undo");
+        assert_eq!(canvas.layer_stack.layers.len(), 4);
+    }
+
+    #[test]
+    fn merge_visible_takes_a_layer_out_of_a_folder_that_keeps_a_hidden_one() {
+        let mut canvas = Canvas::new(60, 40);
+        canvas.layer_stack.layers[0].visible = false;
+        let stack = &mut canvas.layer_stack;
+        let shown = square(stack, "shown", [255, 0, 0, 255], (5, 5));
+        let kept = square(stack, "kept", [0, 255, 0, 255], (20, 5));
+        for layer in &mut stack.layers {
+            layer.selected = layer.id == shown || layer.id == kept;
+        }
+        let header = stack.create_group_from_selected(60, 40).expect("folder");
+        let folder = stack.layers[header].id;
+        let kept_idx = stack.layers.iter().position(|l| l.id == kept).unwrap();
+        stack.layers[kept_idx].visible = false;
+        square(stack, "top", [0, 0, 255, 255], (30, 20));
+        let before = canvas.layer_stack.flatten(60, 40);
+
+        assert!(canvas.merge_visible_in_place());
+        let stack = &canvas.layer_stack;
+        let header = stack
+            .layers
+            .iter()
+            .position(|l| l.id == folder)
+            .expect("the folder stays");
+        let members: Vec<u32> = stack
+            .group_member_range(header)
+            .map(|i| stack.layers[i].id)
+            .collect();
+        assert_eq!(members, vec![kept], "only the hidden layer is left in it");
+        let merged = &stack.layers[stack.active_idx];
+        assert_eq!(
+            merged.parent_id, None,
+            "the merged layer is not in the folder"
+        );
+        assert!(stack.active_idx < header);
+        assert_eq!(stack.flatten(60, 40), before);
+    }
+
+    #[test]
+    fn merge_visible_wants_two_visible_layers() {
+        let mut canvas = Canvas::new(20, 20);
+        assert!(!canvas.merge_visible_in_place());
+        assert_eq!(canvas.layer_stack.layers.len(), 1);
     }
 }

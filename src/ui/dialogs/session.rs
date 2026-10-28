@@ -687,10 +687,24 @@ fn preferences_shortcuts(
                     let reset = egui::Button::new(egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE);
                     if ui
                         .add_enabled(changed, reset)
-                        .on_hover_text(format!("Về mặc định ({})", cmd.default_label()))
+                        .on_hover_text(match cmd.default_label() {
+                            label if label.is_empty() => {
+                                "Bỏ phím (lệnh này mặc định không có phím)".to_string()
+                            }
+                            label => format!("Về mặc định ({label})"),
+                        })
                         .clicked()
                     {
-                        request_shortcut(&ctx, &mut keymap, cmd, cmd.default_chord());
+                        match cmd.default_chord() {
+                            Some(chord) => request_shortcut(&ctx, &mut keymap, cmd, chord),
+                            None => {
+                                keymap.assign(cmd, None);
+                                shortcut_notice(
+                                    &ctx,
+                                    format!("Đã bỏ phím của “{}”.", cmd.display_name()),
+                                );
+                            }
+                        }
                     }
                     ui.end_row();
                 }

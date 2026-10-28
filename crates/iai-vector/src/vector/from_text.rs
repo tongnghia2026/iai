@@ -65,6 +65,176 @@ impl GlyphSegment {
             GlyphSegment::Cubic(_, _, c2, _) => Some(c2),
         }
     }
+
+    /// Every point through `f` (exact for an affine `f`).
+    pub fn map(self, f: impl Fn(Point) -> Point) -> Self {
+        match self {
+            GlyphSegment::Line(a, b) => GlyphSegment::Line(f(a), f(b)),
+            GlyphSegment::Quad(a, c, b) => GlyphSegment::Quad(f(a), f(c), f(b)),
+            GlyphSegment::Cubic(a, c1, c2, b) => GlyphSegment::Cubic(f(a), f(c1), f(c2), f(b)),
+        }
+    }
+
+    /// The control polygon's points, start to end.
+    fn points(self) -> impl Iterator<Item = Point> {
+        let (n, pts) = match self {
+            GlyphSegment::Line(a, b) => (2, [a, b, b, b]),
+            GlyphSegment::Quad(a, c, b) => (3, [a, c, b, b]),
+            GlyphSegment::Cubic(a, c1, c2, b) => (4, [a, c1, c2, b]),
+        };
+        pts.into_iter().take(n)
+    }
+
+    /// The segment cut where it turns in y, so each piece only rises or only
+    /// falls.
+    fn split_at_y_turns(self) -> Vec<GlyphSegment> {
+        match self {
+            GlyphSegment::Line(..) => vec![self],
+            GlyphSegment::Quad(a, c, b) => {
+                let denom = a.y - 2.0 * c.y + b.y;
+                let t = if denom.abs() > 1e-9 {
+                    (a.y - c.y) / denom
+                } else {
+                    -1.0
+                };
+                if t > TURN_EPS && t < 1.0 - TURN_EPS {
+                    let (m1, m2) = (lerp(a, c, t), lerp(c, b, t));
+                    let p = lerp(m1, m2, t);
+                    vec![GlyphSegment::Quad(a, m1, p), GlyphSegment::Quad(p, m2, b)]
+                } else {
+                    vec![self]
+                }
+            }
+            GlyphSegment::Cubic(a, c1, c2, b) => {
+                // y'(t) / 3 = qa·t² + qb·t + qc.
+                let (d0, d1, d2) = (c1.y - a.y, c2.y - c1.y, b.y - c2.y);
+                let (qa, qb, qc) = (d0 - 2.0 * d1 + d2, 2.0 * (d1 - d0), d0);
+                let mut ts: Vec<f32> = if qa.abs() > 1e-9 {
+                    let disc = qb * qb - 4.0 * qa * qc;
+                    if disc < 0.0 {
+                        Vec::new()
+                    } else {
+                        let r = disc.sqrt();
+                        vec![(-qb - r) / (2.0 * qa), (-qb + r) / (2.0 * qa)]
+                    }
+                } else if qb.abs() > 1e-9 {
+                    vec![-qc / qb]
+                } else {
+                    Vec::new()
+                };
+                ts.retain(|t| *t > TURN_EPS && *t < 1.0 - TURN_EPS);
+                ts.sort_by(f32::total_cmp);
+                ts.dedup_by(|x, y| (*x - *y).abs() < TURN_EPS);
+                let mut out = Vec::with_capacity(ts.len() + 1);
+                let (mut rest, mut done) = ([a, c1, c2, b], 0.0);
+                for t in ts {
+                    let local = (t - done) / (1.0 - done);
+                    let [p0, p1, p2, p3] = rest;
+                    let (q1, q2, q3) = (
+                        lerp(p0, p1, local),
+                        lerp(p1, p2, local),
+                        lerp(p2, p3, local),
+                    );
+                    let (r1, r2) = (lerp(q1, q2, local), lerp(q2, q3, local));
+                    let mid = lerp(r1, r2, local);
+                    out.push(GlyphSegment::Cubic(p0, q1, r1, mid));
+                    rest = [mid, r2, q3, p3];
+                    done = t;
+                }
+                let [p0, p1, p2, p3] = rest;
+                out.push(GlyphSegment::Cubic(p0, p1, p2, p3));
+                out
+            }
+        }
+    }
+
+    fn shifted(self, dx: f32) -> Self {
+        self.map(|p| Point::new(p.x + dx, p.y))
+    }
+}
+
+/// How close to a segment's ends a y turn may sit and still cut it.
+const TURN_EPS: f32 = 1e-4;
+
+fn lerp(a: Point, b: Point, t: f32) -> Point {
+    Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+}
+
+/// Twice the signed area under a run of segments (control polygons: enough to
+/// tell which way a glyph's rings wind).
+fn ring_area2(ring: &[GlyphSegment]) -> f32 {
+    let mut pts = ring.iter().flat_map(|s| s.points());
+    let Some(first) = pts.next() else {
+        return 0.0;
+    };
+    let (mut area, mut prev) = (0.0, first);
+    for p in pts.chain(std::iter::once(first)) {
+        area += prev.x * p.y - p.x * prev.y;
+        prev = p;
+    }
+    area
+}
+
+/// The outline of a glyph dragged `dx` along +x — the area a faux bold paints
+/// by striking the glyph at 0 and at `dx` — as one outline. The two overlapping
+/// copies a double strike would give cross in small steps at stroke ends and
+/// kinks at the tops and bottoms of curves, which a PDF shows when zoomed in.
+/// Each ring is cut where it turns in y; runs whose outside faces +x move by
+/// `dx`, and flat joins bridge them to the runs that stay. Rings are split as
+/// [`glyph_contours`] splits them.
+pub fn glyph_swept_right(segments: &[GlyphSegment], dx: f32) -> Vec<GlyphSegment> {
+    if !(dx.is_finite() && dx > 0.0) {
+        return segments.to_vec();
+    }
+    let mut rings: Vec<&[GlyphSegment]> = Vec::new();
+    let mut start = 0;
+    for i in 1..=segments.len() {
+        if i == segments.len() || segments[i].start() != segments[i - 1].end() {
+            rings.push(&segments[start..i]);
+            start = i;
+        }
+    }
+    // The ink lies on the same side of travel on every ring of a glyph (holes
+    // wind the other way), so the glyph's total signed area says which side.
+    let area: f32 = rings.iter().map(|r| ring_area2(r)).sum();
+    if area.abs() < 1e-6 {
+        return segments.to_vec();
+    }
+    let mut out = Vec::with_capacity(segments.len() * 2);
+    for ring in rings {
+        let pieces: Vec<GlyphSegment> = ring.iter().flat_map(|s| s.split_at_y_turns()).collect();
+        // Whether a piece moves; a flat piece goes with the one before it.
+        let moves: Vec<Option<bool>> = pieces
+            .iter()
+            .map(|p| {
+                let dy = p.end().y - p.start().y;
+                (dy.abs() > MERGE_EPS).then_some((dy > 0.0) == (area > 0.0))
+            })
+            .collect();
+        let Some(mut side) = moves.iter().flatten().next_back().copied() else {
+            out.extend_from_slice(ring);
+            continue;
+        };
+        let sides: Vec<bool> = moves
+            .iter()
+            .map(|m| {
+                side = m.unwrap_or(side);
+                side
+            })
+            .collect();
+        let shift = |p: Point, moved: bool| if moved { Point::new(p.x + dx, p.y) } else { p };
+        for (i, piece) in pieces.iter().enumerate() {
+            let prev = if i == 0 { pieces.len() - 1 } else { i - 1 };
+            if sides[prev] != sides[i] {
+                out.push(GlyphSegment::Line(
+                    shift(pieces[prev].end(), sides[prev]),
+                    shift(piece.start(), sides[i]),
+                ));
+            }
+            out.push(if sides[i] { piece.shifted(dx) } else { *piece });
+        }
+    }
+    out
 }
 
 /// Cubic control point equivalent to a quadratic control `ctrl` at anchor `a`:
@@ -282,5 +452,124 @@ mod tests {
     #[test]
     fn empty_input_yields_no_contours() {
         assert!(glyph_contours(&[]).is_empty());
+    }
+
+    fn eval(s: GlyphSegment, t: f32) -> Point {
+        match s {
+            GlyphSegment::Line(a, b) => lerp(a, b, t),
+            GlyphSegment::Quad(a, c, b) => lerp(lerp(a, c, t), lerp(c, b, t), t),
+            GlyphSegment::Cubic(a, c1, c2, b) => {
+                let (q1, q2, q3) = (lerp(a, c1, t), lerp(c1, c2, t), lerp(c2, b, t));
+                lerp(lerp(q1, q2, t), lerp(q2, q3, t), t)
+            }
+        }
+    }
+
+    /// The filled area, curves flattened finely, rings split as
+    /// `glyph_contours` splits them, holes counted against their outers.
+    fn area_of(segs: &[GlyphSegment]) -> f32 {
+        let mut total = 0.0;
+        let mut ring: Vec<Point> = Vec::new();
+        let close = |ring: &mut Vec<Point>| {
+            let n = ring.len();
+            let a: f32 = (0..n)
+                .map(|i| {
+                    let (p, q) = (ring[i], ring[(i + 1) % n]);
+                    p.x * q.y - q.x * p.y
+                })
+                .sum();
+            ring.clear();
+            a / 2.0
+        };
+        for (i, s) in segs.iter().enumerate() {
+            if i > 0 && s.start() != segs[i - 1].end() {
+                total += close(&mut ring);
+            }
+            for k in 0..64 {
+                ring.push(eval(*s, k as f32 / 64.0));
+            }
+        }
+        (total + close(&mut ring)).abs()
+    }
+
+    fn lines(points: &[(f32, f32)]) -> Vec<GlyphSegment> {
+        (0..points.len())
+            .map(|i| {
+                let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                GlyphSegment::Line(p(a.0, a.1), p(b.0, b.1))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_swept_square_is_one_sweep_wider() {
+        let square = lines(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let swept = glyph_swept_right(&square, 1.0);
+        assert!((area_of(&swept) - 110.0).abs() < 1e-3);
+        assert_eq!(glyph_contours(&swept).len(), 1);
+        // Wound the other way (a CFF font), the same.
+        let mut back = lines(&[(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)]);
+        back = glyph_swept_right(&back, 1.0);
+        assert!((area_of(&back) - 110.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_swept_ring_thickens_round_its_hole() {
+        let mut ring = lines(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        ring.extend(lines(&[(3.0, 3.0), (3.0, 7.0), (7.0, 7.0), (7.0, 3.0)]));
+        let swept = glyph_swept_right(&ring, 1.0);
+        // 11×10 outside, a 3×4 hole.
+        assert!((area_of(&swept) - 98.0).abs() < 1e-3);
+        assert_eq!(glyph_contours(&swept).len(), 2);
+    }
+
+    #[test]
+    fn a_swept_point_gets_a_flat_end() {
+        // A triangle pointing down: its tip becomes a 2-wide flat.
+        let tri = lines(&[(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)]);
+        let swept = glyph_swept_right(&tri, 2.0);
+        assert!((area_of(&swept) - 70.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_swept_circle_is_one_smooth_ring() {
+        // Four cubics, radius 10: the sweep adds a 20×1 band and keeps the
+        // round tops round (flat joins where the tangent is flat anyway).
+        let k = 10.0 * 0.552_284_8;
+        let circle = [
+            GlyphSegment::Cubic(p(10.0, 0.0), p(10.0, k), p(k, 10.0), p(0.0, 10.0)),
+            GlyphSegment::Cubic(p(0.0, 10.0), p(-k, 10.0), p(-10.0, k), p(-10.0, 0.0)),
+            GlyphSegment::Cubic(p(-10.0, 0.0), p(-10.0, -k), p(-k, -10.0), p(0.0, -10.0)),
+            GlyphSegment::Cubic(p(0.0, -10.0), p(k, -10.0), p(10.0, -k), p(10.0, 0.0)),
+        ];
+        let swept = glyph_swept_right(&circle, 1.0);
+        assert!((area_of(&swept) - area_of(&circle) - 20.0).abs() < 0.05);
+        assert_eq!(glyph_contours(&swept).len(), 1);
+        // Every bridge is flat and one sweep long.
+        let bridges: Vec<_> = swept
+            .iter()
+            .filter_map(|s| match *s {
+                GlyphSegment::Line(a, b) => Some((a, b)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bridges.len(), 2);
+        assert!(
+            bridges
+                .iter()
+                .all(|(a, b)| a.y == b.y && ((b.x - a.x).abs() - 1.0).abs() < 1e-5)
+        );
+    }
+
+    #[test]
+    fn a_swept_curve_turning_mid_segment_is_cut_there() {
+        // One cubic arch over a flat base: the arch turns at its top, inside
+        // the segment, and the sweep still adds exactly height × sweep.
+        let arch = [
+            GlyphSegment::Cubic(p(0.0, 0.0), p(0.0, -8.0), p(10.0, -8.0), p(10.0, 0.0)),
+            GlyphSegment::Line(p(10.0, 0.0), p(0.0, 0.0)),
+        ];
+        let swept = glyph_swept_right(&arch, 1.0);
+        assert!((area_of(&swept) - area_of(&arch) - 6.0).abs() < 0.02);
     }
 }

@@ -19,12 +19,19 @@ use iai_history::command::{Command, CommandHistory, EditContext, HistoryEntry};
 #[derive(Default)]
 pub struct HistoryGate {
     history: CommandHistory,
+    /// The names of the steps recorded since they were last taken, for the
+    /// engine to hear of every change, whoever made it.
+    recorded: Vec<String>,
 }
+
+/// Steps kept for the taker at most; older ones are dropped.
+const RECORDED_KEPT: usize = 64;
 
 impl HistoryGate {
     pub fn new() -> Self {
         Self {
             history: CommandHistory::new(),
+            recorded: Vec::new(),
         }
     }
 
@@ -32,8 +39,26 @@ impl HistoryGate {
     /// `(revision, is_dirty)` so the gateway can build a `ChangeOutcome` without
     /// re-reading state.
     pub fn record(&mut self, cmd: Box<dyn Command>) -> (u64, bool) {
+        if self.recorded.len() >= RECORDED_KEPT {
+            self.recorded.remove(0);
+        }
+        self.recorded.push(cmd.label().to_string());
         self.history.push(cmd);
         (self.history.revision(), self.history.is_dirty())
+    }
+
+    /// Every step of this history, oldest first, taken out of it: a page-wide
+    /// change made on a copy of a page (see `Canvas::page_work_copy`) goes back
+    /// with the steps it recorded there. They are recorded again through
+    /// [`record`](Self::record) on the page, so the one door still holds.
+    pub fn take_steps(&mut self) -> Vec<Box<dyn Command>> {
+        self.recorded.clear();
+        self.history.take_undo_steps()
+    }
+
+    /// The names of the steps recorded since the last call, oldest first.
+    pub fn take_recorded(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.recorded)
     }
 
     pub fn undo(&mut self, ctx: &mut EditContext) -> bool {

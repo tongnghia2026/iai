@@ -590,6 +590,91 @@ fn a_turned_frame_is_cropped_to_a_print_size_and_the_edge_filled() {
     assert_eq!(e.code, ErrorCode::BadParams);
 }
 
+/// A frame crop is a job made on a copy of the page. Should the page change
+/// while it runs, the crop is made again on the page as it is then; either
+/// way it is one undo step.
+#[test]
+fn a_crop_in_the_background_lands_on_the_page_as_it_is() {
+    let frame = json!({"frame": {"x": 50, "y": 50, "w": 100, "h": 100, "angle": 0.5,
+                                 "outW": 100, "outH": 100}});
+    for changed_meanwhile in [false, true] {
+        let mut t = Setup::new();
+        t.run(
+            "file.new",
+            json!({"widthPx": 200, "heightPx": 100, "background": "#0000FF"}),
+        );
+        t.run(
+            "select.rect",
+            json!({"rect": {"x": 0, "y": 0, "w": 100, "h": 100}}),
+        );
+        t.run("edit.fill", json!({"color": "#FF0000"}));
+        t.run("select.none", json!({}));
+        let job = {
+            let mut s = t.engine.session(&mut t.ws);
+            match s.execute(CommandCall::new("image.crop", frame.clone()).in_background()) {
+                Ok(Reply::Started { job }) => job,
+                other => panic!("{other:?}"),
+            }
+        };
+        if changed_meanwhile {
+            // The person turns the page around under the job: red goes right.
+            t.ws.documents[0].canvas.flip_horizontal();
+        }
+        {
+            let mut s = t.engine.session(&mut t.ws);
+            let state = s.wait(job, Duration::from_secs(60));
+            assert!(matches!(state, Some(JobState::Done { .. })), "{state:?}");
+        }
+        let kept = if changed_meanwhile {
+            "#0000FF"
+        } else {
+            "#FF0000"
+        };
+        assert_eq!(
+            t.mean(json!({"x": 40, "y": 40, "w": 20, "h": 20})),
+            kept,
+            "changed meanwhile: {changed_meanwhile}"
+        );
+        t.run("edit.undo", json!({}));
+        assert_eq!(t.inspect()["widthPx"], json!(200), "one step undoes it");
+    }
+}
+
+/// Canvas Size keeps the picture where the anchor says, and fills what the
+/// Background gains when given a colour.
+#[test]
+fn canvas_size_grows_round_the_anchor() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 100, "heightPx": 50, "background": "#FF0000"}),
+    );
+    let out = t.run(
+        "image.canvas_size",
+        json!({"widthPx": 200, "heightPx": 100, "anchor": "center", "fill": "#FFFFFF"}),
+    );
+    assert_eq!(
+        (out["widthPx"].clone(), out["heightPx"].clone()),
+        (json!(200), json!(100))
+    );
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 35, "w": 80, "h": 30})),
+        "#FF0000"
+    );
+    assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 40, "h": 20})), "#FFFFFF");
+    assert_eq!(
+        t.mean(json!({"x": 160, "y": 80, "w": 40, "h": 20})),
+        "#FFFFFF"
+    );
+    t.run("edit.undo", json!({}));
+    let out = t.run(
+        "image.canvas_size",
+        json!({"widthPx": 60, "heightPx": 50, "anchor": "right"}),
+    );
+    assert_eq!(out["widthPx"], json!(60));
+    assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 60, "h": 50})), "#FF0000");
+}
+
 #[test]
 fn the_page_is_cropped_resized_rotated_and_flipped() {
     let mut t = Setup::new();
@@ -1782,4 +1867,332 @@ fn a_selection_becomes_a_layer_and_a_mask_hides_and_is_applied() {
     // Nothing selected: the whole layer is copied.
     let whole = t.run("layer.via_copy", json!({}));
     assert_eq!(whole["layers"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn free_transform_scales_distorts_and_goes_back_to_the_first_pixels() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 120, "heightPx": 100, "background": "#FFFFFF"}),
+    );
+    // A red bar 20 × 10 at (10, 20), on a layer of its own.
+    let layer = t.run("layer.new", json!({}))["layer"].as_u64().unwrap();
+    t.run(
+        "select.rect",
+        json!({"rect": {"x": 10, "y": 20, "w": 20, "h": 10}}),
+    );
+    t.run("edit.fill", json!({"color": "#FF0000"}));
+    t.run("select.none", json!({}));
+
+    // Twice as large round its middle (20, 25): 40 × 20 from (0, 15).
+    let out = t.run(
+        "layer.free_transform",
+        json!({"layers": [layer], "scaleX": 2, "scaleY": 2}),
+    );
+    assert_eq!(out["changed"], json!(true));
+    assert_eq!(out["layers"], json!([layer]));
+    assert_eq!(
+        t.mean(json!({"x": 2, "y": 17, "w": 36, "h": 16})),
+        "#FF0000"
+    );
+    // Back to half: resampled from the first pixels, the bar is as sharp as
+    // it was, edge to edge.
+    t.run(
+        "layer.free_transform",
+        json!({"layers": [layer], "scaleX": 0.5, "scaleY": 0.5}),
+    );
+    assert_eq!(
+        t.mean(json!({"x": 10, "y": 20, "w": 20, "h": 10})),
+        "#FF0000"
+    );
+    assert_eq!(
+        t.mean(json!({"x": 31, "y": 20, "w": 8, "h": 10})),
+        "#FFFFFF"
+    );
+    // Undo gives back the bar as the first transform left it, not the first
+    // pixels the second one was drawn from.
+    t.run("edit.undo", json!({}));
+    assert_eq!(
+        t.mean(json!({"x": 2, "y": 17, "w": 36, "h": 16})),
+        "#FF0000"
+    );
+    t.run("edit.redo", json!({}));
+    assert_eq!(
+        t.mean(json!({"x": 31, "y": 20, "w": 8, "h": 10})),
+        "#FFFFFF"
+    );
+
+    // A move alone is done at once; nothing at all changes nothing.
+    let moved = t.run("layer.free_transform", json!({"layers": [layer], "dx": 50}));
+    assert_eq!(moved["changed"], json!(true));
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 20, "w": 20, "h": 10})),
+        "#FF0000"
+    );
+    let none = t.run("layer.free_transform", json!({"layers": [layer]}));
+    assert_eq!(none["changed"], json!(false));
+
+    // Its corners sent out to a wider box: a distort.
+    t.run(
+        "layer.free_transform",
+        json!({"layers": [layer], "corners": [[50, 10], [100, 10], [100, 40], [50, 40]]}),
+    );
+    assert_eq!(
+        t.mean(json!({"x": 52, "y": 12, "w": 46, "h": 26})),
+        "#FF0000"
+    );
+    // One undo step each.
+    t.run("edit.undo", json!({}));
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 20, "w": 20, "h": 10})),
+        "#FF0000"
+    );
+
+    // The Background and nonsense are refused.
+    let e = t
+        .try_run("layer.free_transform", json!({"layers": [0], "scaleX": 2}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+    let e = t
+        .try_run(
+            "layer.free_transform",
+            json!({"layers": [layer], "scaleX": 0}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn a_shape_drawn_between_pixels_keeps_its_span_and_its_corners() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 120, "heightPx": 100, "background": "#FFFFFF"}),
+    );
+    let drawn = t.run(
+        "vector.add_shape",
+        json!({
+            "shape": "rectangle",
+            "span": [10.5, 20.25, 60.5, 70.25],
+            "fill": "#0000FFFF",
+            "cornerRadius": 8,
+            "corners": "chamfer",
+        }),
+    );
+    let layer = drawn["layer"].as_u64().unwrap();
+    assert_eq!(
+        t.mean(json!({"x": 20, "y": 30, "w": 30, "h": 30})),
+        "#0000FF"
+    );
+    // A chamfer cuts the corner straight: its very corner is white.
+    assert_eq!(t.mean(json!({"x": 11, "y": 21, "w": 1, "h": 1})), "#FFFFFF");
+    let info = t.inspect();
+    let shape = info["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_u64() == Some(layer))
+        .unwrap();
+    assert_eq!(shape["kind"], json!("vector"), "{shape}");
+
+    let e = t
+        .try_run(
+            "vector.add_shape",
+            json!({"shape": "ellipse", "fill": "#000000"}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let e = t
+        .try_run(
+            "vector.add_shape",
+            json!({
+                "shape": "ellipse",
+                "fill": "#000000",
+                "rect": {"x": 0, "y": 0, "w": 5, "h": 5},
+                "span": [0, 0, 5, 5],
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
+fn a_type_spec_carries_every_style_of_a_type_layer() {
+    use iai_doc::model::text::{GlyphStyle, TextAlign, TextData, TextFontFamily};
+    let data = TextData {
+        content: "Xin chào\nbạn".to_string(),
+        font_px: 37.5,
+        color: [10, 20, 30, 200],
+        font_family: TextFontFamily::System("Arial".to_string()),
+        align: TextAlign::Center,
+        line_height: 1.35,
+        bold: true,
+        italic: false,
+        underline: true,
+        tracking_px: 1.25,
+        opacity: 0.8,
+        stretch_x: 1.1,
+        rotation_deg: -12.5,
+        flip_x: true,
+        flip_y: false,
+        glyph_styles: (0..12)
+            .map(|i| GlyphStyle {
+                color: [i, 0, 0, 255],
+                font_px: 30.0 + f32::from(i),
+                font_family: if i % 2 == 0 {
+                    TextFontFamily::Tahoma
+                } else {
+                    TextFontFamily::SystemFace {
+                        family: "Times New Roman".to_string(),
+                        style: "Bold".to_string(),
+                    }
+                },
+                bold: i % 3 == 0,
+                italic: true,
+                underline: false,
+            })
+            .collect(),
+    };
+    let spec = super::text::TypeSpec::of(&data);
+    let json = serde_json::to_value(&spec).unwrap();
+    let back: super::text::TypeSpec = serde_json::from_value(json).unwrap();
+    assert_eq!(back.data(), data);
+}
+
+#[test]
+fn text_set_writes_a_new_type_layer_then_changes_it_one_step_each() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 200, "heightPx": 100, "background": "#FFFFFF"}),
+    );
+    let spec = |text: &str, color: [u8; 4]| {
+        json!({
+            "text": text, "sizePx": 40, "color": color,
+            "font": {"kind": "builtin", "name": "Arial"}, "align": "left",
+            "lineHeight": 1.2, "bold": false, "italic": false, "underline": false,
+            "trackingPx": 0, "opacity": 1, "stretchX": 1, "rotation": 0,
+            "flipX": false, "flipY": false,
+        })
+    };
+    let made = t.run(
+        "text.set",
+        json!({"type": spec("AB", [0, 0, 0, 255]), "origin": [10, 10]}),
+    );
+    let layer = made["layer"].as_u64().unwrap();
+    let dark = t.mean(json!({"x": 10, "y": 10, "w": 60, "h": 40}));
+    assert_ne!(dark, "#FFFFFF");
+    t.run(
+        "text.set",
+        json!({"layer": layer, "type": spec("AB", [255, 0, 0, 255]), "origin": [10, 10]}),
+    );
+    let info = t.inspect();
+    let names: Vec<&str> = info["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    // Changed in place: still one type layer, named by its text.
+    assert_eq!(names, ["AB", "Background"]);
+    // Undo gives back the black type, then no type at all.
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.mean(json!({"x": 10, "y": 10, "w": 60, "h": 40})), dark);
+    t.run("edit.undo", json!({}));
+    assert_eq!(
+        t.mean(json!({"x": 10, "y": 10, "w": 60, "h": 40})),
+        "#FFFFFF"
+    );
+    // Not on a picture layer.
+    let e = t
+        .try_run(
+            "text.set",
+            json!({"layer": 0, "type": spec("x", [0, 0, 0, 255]), "origin": [0, 0]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
+}
+
+#[test]
+fn a_step_a_tool_made_reaches_the_engine_and_a_commands_own_does_not_twice() {
+    let mut t = Setup::new();
+    t.run("file.new", json!({"widthPx": 40, "heightPx": 40}));
+    t.engine.take_events();
+    // As a brush stroke is recorded: straight into the page's history.
+    {
+        let canvas = &mut t.ws.documents_mut()[0].canvas;
+        let (w, h) = (canvas.width, canvas.height);
+        let mut step = iai_history::command::LayerStructureCommand::capture_before(
+            "Brush",
+            &canvas.layer_stack,
+            w,
+            h,
+        );
+        step.capture_after(&canvas.layer_stack, w, h);
+        canvas.record(Box::new(step));
+    }
+    // The next call hears of it first; its own step is not told again.
+    t.run("layer.new", json!({}));
+    let steps: Vec<String> = t
+        .engine
+        .take_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            EngineEvent::Stepped { label, .. } => Some(label),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, ["Brush"]);
+    t.engine.session(&mut t.ws).take_window_steps();
+    assert!(
+        !t.engine
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Stepped { .. }))
+    );
+}
+
+#[test]
+fn free_transform_keeps_a_path_a_path_and_refuses_to_distort_it() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 200, "heightPx": 200, "background": "#FFFFFF"}),
+    );
+    let path = t.run(
+        "vector.add_path",
+        json!({"runs": [{"points": [[10, 10], [50, 10], [50, 50], [10, 50]], "closed": true}], "fill": "#0000FF"}),
+    )["layer"]
+        .as_u64()
+        .unwrap();
+    t.run(
+        "layer.free_transform",
+        json!({"layers": [path], "scaleX": 2, "scaleY": 2, "pivot": [10, 10]}),
+    );
+    // Twice as large from its top-left corner: blue to (90, 90), still a path.
+    assert_eq!(
+        t.mean(json!({"x": 12, "y": 12, "w": 75, "h": 75})),
+        "#0000FF"
+    );
+    assert_eq!(
+        t.mean(json!({"x": 95, "y": 95, "w": 20, "h": 20})),
+        "#FFFFFF"
+    );
+    let info = t.inspect();
+    let kind = info["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"].as_u64() == Some(path))
+        .map(|l| l["kind"].clone())
+        .unwrap();
+    assert_eq!(kind, json!("vector"));
+    let e = t
+        .try_run(
+            "layer.free_transform",
+            json!({"layers": [path], "corners": [[0, 0], [100, 10], [100, 100], [0, 90]]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::NotEnabled);
 }

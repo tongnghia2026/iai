@@ -17,6 +17,18 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
 };
 
+/// An arrow key's step in page pixels: one, or ten with Shift.
+fn arrow_step(key: PhysicalKey, shift: bool) -> Option<(f32, f32)> {
+    let step = if shift { 10.0 } else { 1.0 };
+    match key {
+        PhysicalKey::Code(KeyCode::ArrowLeft) => Some((-step, 0.0)),
+        PhysicalKey::Code(KeyCode::ArrowRight) => Some((step, 0.0)),
+        PhysicalKey::Code(KeyCode::ArrowUp) => Some((0.0, -step)),
+        PhysicalKey::Code(KeyCode::ArrowDown) => Some((0.0, step)),
+        _ => None,
+    }
+}
+
 /// `[` / `]` step for the Clone / Repair tip, coarser as the tip grows
 /// (Photoshop's brush-size stepping).
 fn clone_bracket_step(size: f32, grow: bool) -> f32 {
@@ -224,6 +236,20 @@ impl App {
             }
         }
 
+        // The Crop frame up: the arrow keys move it (Shift: ten pixels).
+        if pressed
+            && let Some((dx, dy)) = arrow_step(physical_key, self.edit.input.shift_held)
+            && self.edit.tools.active_id() == ToolId::Crop
+            && self.edit.tools.crop().has_selection()
+            && !self.edit.input.ctrl_held
+            && !self.edit.input.alt_held
+        {
+            if self.edit.pending_crop_job.is_none() && self.edit.tools.crop_mut().nudge(dx, dy) {
+                self.update_crop_preview();
+                self.redraw_main();
+            }
+            return;
+        }
         if pressed && self.is_tool_modal_active() {
             let is_allowed = matches!(
                 physical_key,
@@ -266,6 +292,18 @@ impl App {
         // A shortcut the user re-bound in Preferences runs here; everything
         // still on its built-in key goes through the original arms below.
         if pressed && let Some(cmd) = self.custom_command_for(physical_key) {
+            self.run_command(cmd, event_loop, repeat);
+            return;
+        }
+        // The commands with no key arm below run from the keymap on their
+        // built-in key too (Ctrl+Alt+L, Shift+Ctrl+B, Ctrl+[ …): before the
+        // arms, which would take those keys for something else.
+        if pressed
+            && let Some(cmd) = self
+                .pressed_chord(physical_key)
+                .and_then(|chord| self.shell.keymap.command_for(chord))
+                .filter(|cmd| cmd.runs_from_the_keymap())
+        {
             self.run_command(cmd, event_loop, repeat);
             return;
         }
@@ -530,56 +568,19 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyE) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolEraser, event_loop, repeat);
             }
-            PhysicalKey::Code(KeyCode::KeyE)
-                if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
-            {
-                let is_large = self.win.gpu.as_ref().is_some_and(|g| g.is_large_canvas);
-                if is_large {
-                    self.shell.status_msg =
-                        "Merge Visible không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)"
-                            .to_string();
-                } else {
-                    let _ = self.run_with("layer.merge", serde_json::json!({"what": "visible"}));
-                }
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
-            PhysicalKey::Code(KeyCode::KeyE) if pressed && self.edit.input.ctrl_held => {
-                // Tile-native (256-px chunks): no large-canvas gate needed.
-                let _ = self.run_with("layer.merge", serde_json::json!({"what": "picked"}));
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
             PhysicalKey::Code(KeyCode::KeyV) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolMove, event_loop, repeat);
             }
-            PhysicalKey::Code(KeyCode::KeyI) if pressed && self.edit.input.ctrl_held => {
-                self.run_default(Command::Invert, event_loop, repeat);
-            }
-            PhysicalKey::Code(KeyCode::KeyI) if pressed => {
-                self.run_default(Command::ToolEyedropper, event_loop, repeat);
-            }
-            PhysicalKey::Code(KeyCode::KeyG)
-                if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
-            {
-                let idx = self.docs.active().canvas.layer_stack.active_idx;
-                self.do_ungroup(idx);
-            }
-            PhysicalKey::Code(KeyCode::KeyG)
+            PhysicalKey::Code(KeyCode::KeyI)
                 if pressed
                     && self.edit.input.ctrl_held
-                    && self.edit.input.alt_held
-                    && !self.edit.input.shift_held =>
+                    && !self.edit.input.shift_held
+                    && !self.edit.input.alt_held =>
             {
-                // Photoshop clipping mask: clip the active layer to the one below.
-                self.toggle_clipping_mask();
+                self.run_default(Command::Invert, event_loop, repeat);
             }
-            PhysicalKey::Code(KeyCode::KeyG)
-                if pressed && self.edit.input.ctrl_held && !self.edit.input.alt_held =>
-            {
-                self.do_group_selected();
+            PhysicalKey::Code(KeyCode::KeyI) if pressed && !self.edit.input.ctrl_held => {
+                self.run_default(Command::ToolEyedropper, event_loop, repeat);
             }
             PhysicalKey::Code(KeyCode::KeyG) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolFill, event_loop, repeat);
@@ -624,17 +625,8 @@ impl App {
                 self.run_default(Command::ToolHand, event_loop, repeat);
             }
             PhysicalKey::Code(KeyCode::KeyR)
-                if pressed
-                    && self.edit.input.ctrl_held
-                    && self.edit.input.alt_held
-                    && !self.edit.input.shift_held =>
+                if pressed && self.edit.input.ctrl_held && !self.edit.input.alt_held =>
             {
-                if !repeat {
-                    self.open_refine_panel();
-                    self.sync_cursor(event_loop);
-                }
-            }
-            PhysicalKey::Code(KeyCode::KeyR) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::ToggleRulers, event_loop, repeat);
             }
             PhysicalKey::Code(KeyCode::KeyT) if pressed && !self.edit.input.ctrl_held => {
@@ -645,17 +637,8 @@ impl App {
                 if pressed
                     && !repeat
                     && self.edit.input.ctrl_held
-                    && self.edit.input.shift_held =>
+                    && !self.edit.input.shift_held =>
             {
-                if !self.begin_warp() {
-                    self.shell.status_msg = "Warp requires an unlocked raster layer".to_string();
-                }
-                self.sync_cursor(event_loop);
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
-            }
-            PhysicalKey::Code(KeyCode::KeyX) if pressed && !repeat && self.edit.input.ctrl_held => {
                 self.run_default(Command::EditCut, event_loop, repeat);
             }
             PhysicalKey::Code(KeyCode::KeyX)
@@ -728,72 +711,9 @@ impl App {
             {
                 self.run_default(Command::EditRedo, event_loop, repeat);
             }
-            // Ctrl+Y → Proof Colors (redo lives on Ctrl+Shift+Z).
-            PhysicalKey::Code(KeyCode::KeyY)
-                if pressed && self.edit.input.ctrl_held && !self.edit.input.shift_held =>
-            {
-                self.shell.proof_enabled = !self.shell.proof_enabled;
-                self.apply_proof_settings();
-                self.shell.status_msg = if self.shell.proof_enabled {
-                    format!("Proof Colors on — {}", self.shell.proof_target.label())
-                } else {
-                    "Proof Colors off".to_string()
-                };
-            }
-            // Ctrl+Shift+Y → Gamut Warning.
-            PhysicalKey::Code(KeyCode::KeyY)
-                if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
-            {
-                self.shell.proof_gamut_warn = !self.shell.proof_gamut_warn;
-                if self.shell.proof_gamut_warn {
-                    self.shell.proof_enabled = true;
-                }
-                self.apply_proof_settings();
-                self.shell.status_msg = if self.shell.proof_gamut_warn {
-                    "Gamut Warning on".to_string()
-                } else {
-                    "Gamut Warning off".to_string()
-                };
-            }
             // Ctrl+P → Print dialog.
             PhysicalKey::Code(KeyCode::KeyP) if pressed && self.edit.input.ctrl_held => {
                 self.run_default(Command::FilePrint, event_loop, repeat);
-            }
-            // Ctrl+Q → Convert to Curves (Corel muscle memory). Routes to the
-            // shape→path conversion for a parametric Shape, or text→curves for a
-            // Text layer; both already handle their own undo + invalidation.
-            PhysicalKey::Code(KeyCode::KeyQ) if pressed && !repeat && self.edit.input.ctrl_held => {
-                use crate::core::layer::LayerType;
-                use crate::core::vector::object::VectorGeometry;
-                let idx = self.docs.active().canvas.layer_stack.active_idx;
-                let kind = self
-                    .docs
-                    .active()
-                    .canvas
-                    .layer_stack
-                    .layers
-                    .get(idx)
-                    .map(|l| match &l.layer_type {
-                        LayerType::Vector(VectorGeometry::Primitive(_)) => 1u8,
-                        LayerType::Text(_) => 2,
-                        _ => 0,
-                    })
-                    .unwrap_or(0);
-                match kind {
-                    1 => {
-                        self.convert_shape_to_path(idx);
-                    }
-                    2 => {
-                        self.text_to_curves(idx);
-                    }
-                    _ => {
-                        self.shell.status_msg =
-                            "Convert to Curves: chọn một Shape hoặc Text trước".to_string();
-                        if let Some(w) = &self.win.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
             }
             PhysicalKey::Code(KeyCode::KeyA)
                 if pressed && self.edit.input.ctrl_held && self.edit.input.shift_held =>
@@ -925,6 +845,7 @@ impl App {
                     self.edit.tools.active_id(),
                     ToolId::Crop | ToolId::PerspectiveCrop
                 ) {
+                    self.cancel_crop_job();
                     self.edit.tools.active_on_cancel();
                     self.update_crop_preview();
                     if let Some(w) = &self.win.window {
@@ -1075,6 +996,8 @@ pub(in crate::app) fn key_name(code: KeyCode) -> Option<KeyName> {
         KeyCode::Quote => K::Quote,
         KeyCode::Backquote => K::Backquote,
         KeyCode::Backslash => K::Backslash,
+        KeyCode::BracketLeft => K::BracketLeft,
+        KeyCode::BracketRight => K::BracketRight,
         _ => return None,
     })
 }
@@ -1310,7 +1233,7 @@ impl App {
             return view;
         }
         let input = &self.edit.input;
-        let (ctrl, shift, alt) = (input.ctrl_held, input.shift_held, input.alt_held);
+        let (ctrl, shift) = (input.ctrl_held, input.shift_held);
         let command = self
             .pressed_chord(physical_key)
             .and_then(|c| self.shell.keymap.command_for(c));
@@ -1333,7 +1256,9 @@ impl App {
                 | Command::FitScreen
                 | Command::ZoomActual
                 | Command::ToolHand
-                | Command::ToolZoom,
+                | Command::ToolZoom
+                | Command::ProofColors
+                | Command::GamutWarning,
             ) => return true,
             Some(_) => true,
             // The keys that edit without being a command of the keymap.
@@ -1349,9 +1274,7 @@ impl App {
                 KeyCode::NumpadAdd => !ctrl,
                 KeyCode::Equal => shift && !ctrl,
                 KeyCode::F5 | KeyCode::F6 | KeyCode::F7 => shift,
-                KeyCode::KeyD | KeyCode::KeyE | KeyCode::KeyG | KeyCode::KeyQ => ctrl,
-                KeyCode::KeyR => ctrl && alt,
-                KeyCode::KeyX => ctrl && shift,
+                KeyCode::KeyD => ctrl,
                 _ => false,
             },
         };
@@ -1364,7 +1287,7 @@ impl App {
         view || matches!(
             code,
             KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::KeyX | KeyCode::KeyD
-        ) || (code == KeyCode::KeyY && ctrl)
+        )
     }
 
     fn refine_panel_key(
@@ -1453,6 +1376,82 @@ impl App {
             self.shell.status_msg = "Adjustment requires an unlocked raster layer".to_string();
         }
         self.redraw_main();
+    }
+
+    /// Ctrl+[ / Ctrl+] and with Shift: the active layer one step down or up,
+    /// or to the bottom or top.
+    fn key_move_layer(&mut self, to: &str) {
+        let stack = &self.docs.active().canvas.layer_stack;
+        let Some(id) = stack.layers.get(stack.active_idx).map(|l| l.id) else {
+            return;
+        };
+        let _ = self.run_with("layer.move", serde_json::json!({"layer": id, "to": to}));
+        self.redraw_main();
+    }
+
+    /// Alt+[ / Alt+]: the layer below or above the active one becomes active.
+    fn key_pick_neighbour_layer(&mut self, above: bool) {
+        let stack = &self.docs.active().canvas.layer_stack;
+        let i = stack.active_idx;
+        let next = if above {
+            i.checked_add(1)
+        } else {
+            i.checked_sub(1)
+        };
+        let Some(id) = next.and_then(|j| stack.layers.get(j)).map(|l| l.id) else {
+            return;
+        };
+        let _ = self.run_with(
+            "layer.set",
+            serde_json::json!({"layer": id, "activate": true}),
+        );
+        self.redraw_main();
+    }
+
+    /// Ctrl+Shift+E merges the visible layers into one; with Alt (`stamp`)
+    /// they are stamped into a new one on top (Photoshop's).
+    fn key_merge_visible(&mut self, stamp: bool) {
+        let (what, name) = if stamp {
+            ("visible", "Stamp Visible")
+        } else {
+            ("merge_visible", "Merge Visible")
+        };
+        if self.win.gpu.as_ref().is_some_and(|g| g.is_large_canvas) {
+            self.shell.status_msg =
+                format!("{name} không hỗ trợ canvas > 25M pixels (Viewport Streaming mode)");
+        } else {
+            let _ = self.run_with("layer.merge", serde_json::json!({"what": what}));
+        }
+        self.redraw_main();
+    }
+
+    /// Convert to Curves (Corel's Ctrl+Q): a parametric Shape becomes a
+    /// path, a Text layer curves; both keep their own undo.
+    fn key_convert_to_curves(&mut self) {
+        use crate::core::layer::LayerType;
+        use crate::core::vector::object::VectorGeometry;
+        let idx = self.docs.active().canvas.layer_stack.active_idx;
+        match self
+            .docs
+            .active()
+            .canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .map(|l| &l.layer_type)
+        {
+            Some(LayerType::Vector(VectorGeometry::Primitive(_))) => {
+                self.convert_shape_to_path(idx);
+            }
+            Some(LayerType::Text(_)) => {
+                self.text_to_curves(idx);
+            }
+            _ => {
+                self.shell.status_msg =
+                    "Convert to Curves: chọn một Shape hoặc Text trước".to_string();
+                self.redraw_main();
+            }
+        }
     }
 
     /// Run a re-bindable command. Each body is the one its built-in key arm
@@ -1602,15 +1601,121 @@ impl App {
                     preserve_luminosity: true,
                 })
             }
-            Command::HueSaturation => {
-                self.key_adjustment(crate::core::layer::AdjustmentType::HueSaturation {
-                    hue: 0.0,
-                    saturation: 0.0,
-                    lightness: 0.0,
+            Command::HueSaturation => self.key_adjustment(
+                crate::core::layer::AdjustmentType::hue_saturation(0.0, 0.0, 0.0),
+            ),
+            // Engine commands, run above.
+            Command::SelectAll
+            | Command::LayerViaCopy
+            | Command::Desaturate
+            | Command::Invert
+            | Command::SelectInverse => {}
+            Command::LevelsLast => {
+                let adj =
+                    self.last_adjustment_like(crate::core::layer::AdjustmentType::default_levels());
+                self.key_adjustment(adj)
+            }
+            Command::CurvesLast => {
+                let adj =
+                    self.last_adjustment_like(crate::core::layer::AdjustmentType::default_curves());
+                self.key_adjustment(adj)
+            }
+            Command::HueSaturationLast => {
+                let adj = self.last_adjustment_like(
+                    crate::core::layer::AdjustmentType::hue_saturation(0.0, 0.0, 0.0),
+                );
+                self.key_adjustment(adj)
+            }
+            Command::ColorBalanceLast => {
+                let adj =
+                    self.last_adjustment_like(crate::core::layer::AdjustmentType::ColorBalance {
+                        shadows: [0.0; 3],
+                        midtones: [0.0; 3],
+                        highlights: [0.0; 3],
+                        preserve_luminosity: true,
+                    });
+                self.key_adjustment(adj)
+            }
+            Command::AutoContrast | Command::AutoColor if !repeat => {
+                self.do_auto_contrast_or_color(cmd == Command::AutoColor);
+            }
+            Command::AutoContrast | Command::AutoColor => {}
+            Command::BlackAndWhite => {
+                self.key_adjustment(crate::core::layer::AdjustmentType::BlackAndWhite {
+                    r: 40.0,
+                    y: 60.0,
+                    g: 40.0,
+                    c: 60.0,
+                    b: 20.0,
+                    m: 80.0,
                 })
             }
-            // Engine commands, run above.
-            Command::SelectAll | Command::LayerViaCopy | Command::Desaturate | Command::Invert => {}
+            Command::CanvasSize => {
+                self.shell.ui.show_resize_dialog = true;
+                self.redraw_main();
+            }
+            Command::BringForward if !repeat => self.key_move_layer("up"),
+            Command::SendBackward if !repeat => self.key_move_layer("down"),
+            Command::BringToFront if !repeat => self.key_move_layer("top"),
+            Command::SendToBack if !repeat => self.key_move_layer("bottom"),
+            Command::BringForward
+            | Command::SendBackward
+            | Command::BringToFront
+            | Command::SendToBack => {}
+            Command::SelectLayerAbove => self.key_pick_neighbour_layer(true),
+            Command::SelectLayerBelow => self.key_pick_neighbour_layer(false),
+            Command::Group if !repeat => self.do_group_selected(),
+            Command::Ungroup if !repeat => {
+                let idx = self.docs.active().canvas.layer_stack.active_idx;
+                self.do_ungroup(idx);
+            }
+            // Photoshop clipping mask: clip the active layer to the one below.
+            Command::ClippingMask if !repeat => {
+                self.toggle_clipping_mask();
+            }
+            Command::MergeLayers if !repeat => {
+                // Tile-native (256-px chunks): no large-canvas gate needed.
+                let _ = self.run_with("layer.merge", serde_json::json!({"what": "picked"}));
+                self.redraw_main();
+            }
+            Command::MergeVisible | Command::StampVisible if !repeat => {
+                self.key_merge_visible(cmd == Command::StampVisible)
+            }
+            Command::ConvertToCurves if !repeat => self.key_convert_to_curves(),
+            Command::ImageSize => {
+                self.shell.ui.show_image_size_dialog = true;
+                self.redraw_main();
+            }
+            Command::Warp if !repeat => {
+                if !self.begin_warp() {
+                    self.shell.status_msg = "Warp requires an unlocked raster layer".to_string();
+                }
+                self.sync_cursor(event_loop);
+                self.redraw_main();
+            }
+            Command::RefineSelection if !repeat => {
+                self.open_refine_panel();
+                self.sync_cursor(event_loop);
+            }
+            Command::ProofColors if !repeat => {
+                self.toggle_proof_colors();
+                self.redraw_main();
+            }
+            Command::GamutWarning if !repeat => {
+                self.toggle_gamut_warning();
+                self.redraw_main();
+            }
+            Command::Group
+            | Command::Ungroup
+            | Command::ClippingMask
+            | Command::MergeLayers
+            | Command::MergeVisible
+            | Command::StampVisible
+            | Command::ConvertToCurves
+            | Command::Warp
+            | Command::RefineSelection
+            | Command::ProofColors
+            | Command::GamutWarning => {}
             Command::ToggleRulers => {
                 self.shell.ui.show_rulers = !self.shell.ui.show_rulers;
                 self.redraw_main();
@@ -1629,6 +1734,8 @@ impl App {
                 self.open_develop_window(event_loop);
                 self.redraw_main();
             }
+            // Run above, as the engine command it is.
+            Command::Menu(_) => {}
         }
     }
 }
@@ -1733,6 +1840,8 @@ mod tests {
             KeyCode::Quote,
             KeyCode::Backquote,
             KeyCode::Backslash,
+            KeyCode::BracketLeft,
+            KeyCode::BracketRight,
         ];
         let mapped: std::collections::HashSet<KeyName> =
             codes.into_iter().filter_map(key_name).collect();
@@ -1751,12 +1860,19 @@ mod tests {
             KeyCode::Space,
             KeyCode::Delete,
             KeyCode::ArrowUp,
-            KeyCode::BracketLeft,
             KeyCode::Equal,
             KeyCode::Minus,
             KeyCode::Tab,
         ] {
             assert_eq!(key_name(code), None, "{code:?}");
+        }
+        // [ and ] take a key with Ctrl or Alt (layer order, as Photoshop);
+        // alone or with Shift they stay the tip's size and hardness.
+        use crate::app::commands::{KeyChord, reserved_action};
+        for key in [KeyName::BracketLeft, KeyName::BracketRight] {
+            assert!(reserved_action(KeyChord::plain(key)).is_some());
+            assert!(reserved_action(KeyChord::new(false, true, false, key)).is_some());
+            assert!(reserved_action(KeyChord::ctrl(key)).is_none());
         }
     }
 

@@ -469,6 +469,54 @@ fn rasterize_projective_layer_model(layer: &mut Layer) {
     }
 }
 
+/// The output pixels `[x0, y0, x1, y1]` a layer's tiles can reach when the
+/// page is resampled through `forward` (page → output): the tiles' extent,
+/// grown a source pixel for the bilinear reach, turned onto the output and
+/// grown a pixel there for the footprint taps. `None` (no limit) when the map
+/// has no tile or the frame is degenerate.
+fn output_reach(
+    tiles: &TileMap,
+    offset: (i32, i32),
+    forward: &AffineTransform,
+    out_w: u32,
+    out_h: u32,
+) -> Option<[u32; 4]> {
+    use iai_raster::tile::TILE_SIZE;
+    let size = TILE_SIZE as i32;
+    let mut keys = tiles.tiles.keys();
+    let first = keys.next()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
+    for pos in keys {
+        x0 = x0.min(pos.x);
+        y0 = y0.min(pos.y);
+        x1 = x1.max(pos.x);
+        y1 = y1.max(pos.y);
+    }
+    let left = (x0 * size + offset.0) as f32 - 1.0;
+    let top = (y0 * size + offset.1) as f32 - 1.0;
+    let right = ((x1 + 1) * size + offset.0) as f32 + 1.0;
+    let bottom = ((y1 + 1) * size + offset.1) as f32 + 1.0;
+    let on_output = forward.transform_bounds(iai_geom::geometry::Rect::new(
+        left,
+        top,
+        right - left,
+        bottom - top,
+    ));
+    if ![on_output.x, on_output.y, on_output.w, on_output.h]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return None;
+    }
+    let clamp = |v: f32, max: u32| v.clamp(0.0, max as f32) as u32;
+    Some([
+        clamp((on_output.x - 1.0).floor(), out_w),
+        clamp((on_output.y - 1.0).floor(), out_h),
+        clamp((on_output.right() + 1.0).ceil(), out_w),
+        clamp((on_output.bottom() + 1.0).ceil(), out_h),
+    ])
+}
+
 /// Crop resampling rebuilds RGB mirrors for every layer kind, not only Paths.
 /// Restore CMYK ink planes before the history snapshot so crop/undo/export keep
 /// separations valid for raster, text and explicitly rasterized vector layers.
@@ -843,14 +891,27 @@ impl Canvas {
                 (src_cx - ox, src_cy - oy)
             };
             let layer_fill = background.filter(|_| layer.is_background);
-            layer.tiles = Self::resample_into_tiles_footprint(
-                &layer.tiles,
-                out_w,
-                out_h,
-                map,
-                layer_fill,
-                footprint,
-            );
+            // A path or shape without a mask is drawn again from its model
+            // below: resampling its pixels first would be thrown away.
+            let redrawn = layer.mask.is_none()
+                && matches!(
+                    layer.layer_type,
+                    LayerType::Vector(VectorGeometry::Path(_) | VectorGeometry::Primitive(_))
+                );
+            layer.tiles = if redrawn {
+                TileMap::new(out_w, out_h)
+            } else {
+                Self::resample_footprint(
+                    &layer.tiles,
+                    out_w,
+                    out_h,
+                    map,
+                    layer_fill,
+                    footprint,
+                    false,
+                    output_reach(&layer.tiles, layer.offset, &forward, out_w, out_h),
+                )
+            };
             layer.width = out_w;
             layer.height = out_h;
             layer.offset = (0, 0);
@@ -864,6 +925,7 @@ impl Canvas {
                     background.map(|_| [255, 255, 255, 255]),
                     footprint,
                     true,
+                    output_reach(&mask.tiles, source.offset, &forward, out_w, out_h),
                 );
                 mask.width = out_w;
                 mask.height = out_h;
@@ -1037,7 +1099,7 @@ impl Canvas {
         background: Option<[u8; 4]>,
         footprint: f32,
     ) -> iai_raster::tile::TileMap {
-        Self::resample_footprint(src, out_w, out_h, map, background, footprint, false)
+        Self::resample_footprint(src, out_w, out_h, map, background, footprint, false, None)
     }
 
     /// [`Self::resample_into_tiles_footprint`], and for a layer mask with
@@ -1046,6 +1108,10 @@ impl Canvas {
     /// mask blended toward white at its edge shows the layer's edge pixels
     /// through even where it hides them (a faint line along the photo's edge
     /// when a crop reaches past it).
+    ///
+    /// `reach` (`[x0, y0, x1, y1]` output pixels, see [`output_reach`]) is
+    /// where the source can land: output tiles outside it are left out
+    /// unsampled, as they would come out clear. Only without `background`.
     #[allow(clippy::too_many_arguments)]
     fn resample_footprint(
         src: &iai_raster::tile::TileMap,
@@ -1055,7 +1121,15 @@ impl Canvas {
         background: Option<[u8; 4]>,
         footprint: f32,
         keep_edge: bool,
+        reach: Option<[u32; 4]>,
     ) -> iai_raster::tile::TileMap {
+        let reach = reach.filter(|_| background.is_none());
+        let outside = |x: u32, y: u32| {
+            reach.is_some_and(|[x0, y0, x1, y1]| {
+                let size = iai_raster::tile::TILE_SIZE;
+                x >= x1 || y >= y1 || x + size <= x0 || y + size <= y0
+            })
+        };
         use iai_raster::fast_math::{round_u8, round_u16};
         use iai_raster::tile::{BilinearCursor, TILE_SIZE, Tile, TileGrid, TilePos};
         use rayon::prelude::*;
@@ -1127,6 +1201,9 @@ impl Canvas {
         if src.tiles.is_empty() && background.is_none() {
             return new_tiles;
         }
+        if reach.is_some_and(|[x0, y0, x1, y1]| x0 >= x1 || y0 >= y1) {
+            return new_tiles;
+        }
         if !src.has_hdr() {
             let pixel8 = |cur: &mut BilinearCursor, u: f32, v: f32| -> [u8; 4] {
                 let (mut rr, mut gg, mut bb, mut aa) = sample8(cur, u, v);
@@ -1171,6 +1248,9 @@ impl Canvas {
                 .filter_map(|i| {
                     let (tx, ty) = (i % cols, i / cols);
                     let (bx, by) = (tx * TILE_SIZE, ty * TILE_SIZE);
+                    if outside(bx, by) {
+                        return None;
+                    }
                     let cw = TILE_SIZE.min(out_w - bx) as usize;
                     let ch = TILE_SIZE.min(out_h - by);
                     let mut tile = Tile::new_empty();
@@ -1211,6 +1291,10 @@ impl Canvas {
             let mut bx = 0;
             while bx < out_w {
                 let cw = chunk.min(out_w - bx);
+                if outside(bx, by) {
+                    bx += cw;
+                    continue;
+                }
                 let mut buf = vec![0u16; (cw * ch * 4) as usize];
                 buf.par_chunks_mut((cw * 4) as usize)
                     .enumerate()
@@ -1564,10 +1648,24 @@ impl Canvas {
             self.height,
         );
 
+        // Paths, shapes and type are models in page pixels: they are scaled
+        // and drawn again, not resampled, so they stay sharp and a later edit
+        // of them keeps the new size.
+        let scale = AffineTransform::scale(sx, sy);
         for layer in &mut self.layer_stack.layers {
+            let source = layer.clone();
+            let redrawn = layer.mask.is_none()
+                && matches!(
+                    layer.layer_type,
+                    LayerType::Vector(VectorGeometry::Path(_) | VectorGeometry::Primitive(_))
+                );
             let layer_new_w = ((layer.width as f32 * sx).round() as u32).max(1);
             let layer_new_h = ((layer.height as f32 * sy).round() as u32).max(1);
-            layer.tiles = Self::resample_tilemap(&layer.tiles, layer_new_w, layer_new_h);
+            layer.tiles = if redrawn {
+                TileMap::new(layer_new_w, layer_new_h)
+            } else {
+                Self::resample_tilemap(&layer.tiles, layer_new_w, layer_new_h)
+            };
             layer.width = layer_new_w;
             layer.height = layer_new_h;
             layer.offset = (
@@ -1582,18 +1680,15 @@ impl Canvas {
                 mask.width = mask_new_w;
                 mask.height = mask_new_h;
             }
+            reconcile_affine_layer_model(layer, &source, scale);
         }
 
         self.width = new_w;
         self.height = new_h;
         self.metadata.resolution_ppi = new_dpi.max(1.0);
-        self.pixels = if Self::fits_flat_buffer(new_w, new_h) {
-            Self::checked_rgba_len(new_w, new_h)
-                .map(|len| vec![255u8; len])
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        // The flat composite is made again when it is next read.
+        self.pixels = Vec::new();
+        reconcile_crop_ink(self);
         cmd.capture_after(&self.layer_stack, self.width, self.height);
         self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
         self.end_undo_group();
@@ -1664,5 +1759,171 @@ impl Canvas {
         selection.active = selection.mask.par_iter().any(|&v| v > 0);
         selection.mask_revision += 1;
         selection.mark_bbox_dirty();
+    }
+}
+
+#[cfg(test)]
+mod page_change_tests {
+    use super::*;
+    use iai_doc::vector::color::ColorValue;
+    use iai_doc::vector::object::VectorObjectData;
+    use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
+    use iai_doc::vector::style::VectorStyle;
+    use iai_geom::geometry::Point;
+
+    /// A frame turned, moved and scaled down, as a crop to a print size.
+    fn turned_frame() -> (AffineTransform, impl Fn(f32, f32) -> (f32, f32) + Sync, f32) {
+        let (cx, cy, vw, vh, out_w, out_h) =
+            (420.0f32, 300.0f32, 500.0f32, 380.0f32, 260u32, 200u32);
+        let (tx, ty, angle) = (13.0f32, -7.5f32, 0.31f32);
+        let (sx, sy) = (vw / out_w as f32, vh / out_h as f32);
+        let (hw, hh) = (out_w as f32 * 0.5, out_h as f32 * 0.5);
+        let forward = AffineTransform::translate(hw, hh)
+            .then(&AffineTransform::scale(1.0 / sx, 1.0 / sy))
+            .then(&AffineTransform::translate(tx, ty))
+            .then(&AffineTransform::rotate(angle))
+            .then(&AffineTransform::translate(-cx, -cy));
+        let (cos, sin) = (angle.cos(), angle.sin());
+        let map = move |u: f32, v: f32| {
+            let (dx, dy) = ((u - hw) * sx + cx - cx - tx, (v - hh) * sy + cy - cy - ty);
+            (dx * cos + dy * sin + cx, -dx * sin + dy * cos + cy)
+        };
+        (forward, map, sx.max(sy))
+    }
+
+    /// A blob of colour far from the page's middle, on a big layer.
+    fn corner_blob(hdr: bool) -> TileMap {
+        let (w, h) = (900u32, 700u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 380..470u32 {
+            for x in 520..640u32 {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[(x % 256) as u8, (y % 256) as u8, 77, 200]);
+            }
+        }
+        if hdr {
+            let px16: Vec<u16> = rgba.iter().map(|&v| v as u16 * 257 + 3).collect();
+            TileMap::from_rgba16(&px16, w, h)
+        } else {
+            TileMap::from_rgba(&rgba, w, h)
+        }
+    }
+
+    #[test]
+    fn the_reach_holds_every_pixel_the_layer_lands_on() {
+        let (forward, map, footprint) = turned_frame();
+        for hdr in [false, true] {
+            for offset in [(0, 0), (-37, 22)] {
+                let tiles = corner_blob(hdr);
+                let shifted = |u: f32, v: f32| {
+                    let (x, y) = map(u, v);
+                    (x - offset.0 as f32, y - offset.1 as f32)
+                };
+                let reach = output_reach(&tiles, offset, &forward, 260, 200);
+                assert!(reach.is_some());
+                let all = Canvas::resample_footprint(
+                    &tiles, 260, 200, shifted, None, footprint, false, None,
+                );
+                let within = Canvas::resample_footprint(
+                    &tiles, 260, 200, shifted, None, footprint, false, reach,
+                );
+                let mut a = vec![0u8; 260 * 200 * 4];
+                let mut b = vec![0u8; 260 * 200 * 4];
+                all.flatten_tiles_region_into(0, 0, 260, 200, &mut a);
+                within.flatten_tiles_region_into(0, 0, 260, 200, &mut b);
+                assert!(a.iter().any(|&v| v != 0), "the blob lands on the frame");
+                assert!(
+                    a == b,
+                    "hdr {hdr}, offset {offset:?}: the reach cut pixels off"
+                );
+                if hdr {
+                    let mut a16 = vec![0u16; 260 * 200 * 4];
+                    let mut b16 = vec![0u16; 260 * 200 * 4];
+                    all.flatten16_region_into(0, 0, 260, 200, &mut a16);
+                    within.flatten16_region_into(0, 0, 260, 200, &mut b16);
+                    assert!(a16 == b16, "offset {offset:?}: 16-bit pixels differ");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn image_size_scales_a_path_and_keeps_it_a_path() {
+        let mut canvas = Canvas::new(200, 100);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(0.0, 0.0)),
+                    Node::sharp(Point::new(40.0, 0.0)),
+                    Node::sharp(Point::new(40.0, 20.0)),
+                    Node::sharp(Point::new(0.0, 20.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let object = VectorObjectData::new(
+            path,
+            VectorStyle::filled(ColorValue::rgb(0.0, 0.0, 1.0)),
+            AffineTransform::translate(30.0, 20.0),
+        );
+        let idx = canvas.layer_stack.add_layer(200, 100);
+        iai_vector::command_vector::apply_object_to_layer(
+            &mut canvas.layer_stack.layers[idx],
+            object,
+        );
+        assert!(canvas.resize_image(400, 200, 144.0));
+
+        let layer = &canvas.layer_stack.layers[idx];
+        let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type else {
+            panic!("the path became pixels");
+        };
+        let bounds = object.layer_bounds(0.05).expect("path bounds");
+        assert!((bounds.x - 60.0).abs() < 0.5 && (bounds.y - 40.0).abs() < 0.5);
+        assert!((bounds.w - 80.0).abs() < 0.5 && (bounds.h - 40.0).abs() < 0.5);
+        // What shows is the model drawn at the new size, not the old pixels
+        // blown up: drawn again, it comes out the same.
+        let mut redrawn = layer.clone();
+        iai_vector::command_vector::apply_object_to_layer(&mut redrawn, object.clone());
+        assert_eq!(redrawn.offset, layer.offset);
+        assert_eq!(redrawn.flatten_tiles(), layer.flatten_tiles());
+
+        canvas.undo().expect("undo Image Size");
+        let LayerType::Vector(VectorGeometry::Path(object)) =
+            &canvas.layer_stack.layers[idx].layer_type
+        else {
+            panic!("undo lost the path");
+        };
+        let bounds = object.layer_bounds(0.05).expect("path bounds");
+        assert!((bounds.x - 30.0).abs() < 0.5 && (bounds.w - 40.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_change_made_on_a_copy_lands_with_its_undo_step() {
+        let mut canvas = Canvas::new(900, 700);
+        let idx = canvas.layer_stack.add_layer(900, 700);
+        canvas.layer_stack.layers[idx].tiles = corner_blob(false);
+        let before = canvas.layer_stack.layers[idx].flatten_tiles();
+        let undo_steps = canvas.undo_count();
+
+        let mut copy = canvas.page_work_copy();
+        let stamp = canvas.page_stamp();
+        assert!(copy.crop_transformed(560.0, 420.0, 400.0, 300.0, 200, 150, 0.0, 0.0, 0.2, true));
+        assert_eq!(canvas.page_stamp(), stamp, "the copy is not the page");
+        canvas.adopt_page_change(copy);
+
+        assert_eq!((canvas.width, canvas.height), (200, 150));
+        assert_eq!(canvas.undo_count(), undo_steps + 1, "one undo step");
+        assert_ne!(canvas.page_stamp(), stamp);
+        assert!(
+            canvas.layer_stack.layers[idx]
+                .flatten_tiles()
+                .iter()
+                .any(|&v| v != 0),
+            "the blob is in the frame"
+        );
+        canvas.undo().expect("undo the crop");
+        assert_eq!((canvas.width, canvas.height), (900, 700));
+        assert_eq!(canvas.layer_stack.layers[idx].flatten_tiles(), before);
     }
 }

@@ -1024,7 +1024,7 @@ impl App {
     /// switch, and dropping it against the wrong document would leave the
     /// layer as the blank editing placeholder (losing the original text).
     pub fn commit_text_edit(&mut self) {
-        let Some(session) = self.edit.text_edit.take() else {
+        let Some(mut session) = self.edit.text_edit.take() else {
             return;
         };
         self.edit.text_font_preview = None;
@@ -1033,10 +1033,6 @@ impl App {
             return;
         };
         let is_active = doc_idx == self.docs.active_doc_idx;
-        let (cw, ch) = {
-            let d = &self.docs.documents[doc_idx];
-            (d.canvas.width, d.canvas.height)
-        };
         let mut td =
             self.text_data_from_state(session.buffer.clone(), session.glyph_styles.clone());
         td.rotation_deg = session.rotation_deg;
@@ -1044,42 +1040,72 @@ impl App {
         td.flip_x = session.flip_x;
         td.flip_y = session.flip_y;
 
-        let canvas = &mut self.docs.documents[doc_idx].canvas;
-        let Some(idx) = canvas
-            .layer_stack
-            .layers
-            .iter()
-            .position(|l| l.id == session.layer_id)
-        else {
-            return;
+        let empty = session.buffer.trim().is_empty();
+        let changed = session.is_new || session.orig.as_ref() != Some(&td);
+        // Back to the page as it was when the session began, with no step:
+        // `text.set` below makes the one step, as it would for an agent.
+        let label = {
+            let canvas = &mut self.docs.documents[doc_idx].canvas;
+            let label = match session.before_cmd.take() {
+                Some(mut before) => {
+                    use crate::core::command::Command as _;
+                    let label = before.label().to_string();
+                    let (mut w, mut h) = (canvas.width, canvas.height);
+                    let mut ctx = crate::core::command::EditContext::new(
+                        &mut canvas.layer_stack,
+                        &mut w,
+                        &mut h,
+                        None,
+                    );
+                    let _ = before.undo(&mut ctx);
+                    label
+                }
+                None if session.is_new => {
+                    if let Some(idx) = canvas
+                        .layer_stack
+                        .layers
+                        .iter()
+                        .position(|l| l.id == session.layer_id)
+                    {
+                        canvas.layer_stack.remove_layer(idx);
+                    }
+                    "Type".to_string()
+                }
+                None => {
+                    if let (Some(idx), Some(orig)) = (
+                        canvas
+                            .layer_stack
+                            .layers
+                            .iter()
+                            .position(|l| l.id == session.layer_id),
+                        session.orig.clone(),
+                    ) {
+                        rasterize_into_layer(canvas, idx, session.origin, orig);
+                    }
+                    "Edit Text".to_string()
+                }
+            };
+            canvas.layer_revision += 1;
+            label
         };
 
-        let empty = session.buffer.trim().is_empty();
-
-        if empty {
-            if session.is_new {
-                canvas.layer_stack.remove_layer(idx);
-            } else if let Some(orig) = session.orig {
-                rasterize_into_layer(canvas, idx, session.origin, orig);
+        if !empty && changed {
+            let mut args = serde_json::json!({
+                "doc": session.doc_id.0,
+                "type": iai_engine::cmds::text::TypeSpec::of(&td),
+                "origin": [session.origin.0, session.origin.1],
+                "label": label,
+            });
+            if !session.is_new {
+                args["layer"] = session.layer_id.into();
             }
-            canvas.layer_revision += 1;
-            if is_active {
-                self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+            if let Err(error) = self.run_with("text.set", args) {
+                // What was typed is never lost: written as the tool always
+                // wrote it.
+                crate::diag::note("text", &format!("text.set refused: {error:?}"));
+                self.write_text_directly(doc_idx, &session, td, &label);
             }
-            if let Some(w) = &self.win.window {
-                w.request_redraw();
-            }
-            return;
         }
-
-        let changed = session.is_new || session.orig.as_ref() != Some(&td);
-        rasterize_into_layer(canvas, idx, session.origin, td);
-
-        if changed && let Some(mut cmd) = session.before_cmd {
-            cmd.capture_after(&canvas.layer_stack, cw, ch);
-            canvas.record(Box::new(cmd));
-        }
-        canvas.layer_revision += 1;
 
         if is_active {
             self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
@@ -1087,6 +1113,42 @@ impl App {
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
+    }
+
+    /// The type of `session`, written into its document as one step without
+    /// the command (should the command refuse it).
+    fn write_text_directly(
+        &mut self,
+        doc_idx: usize,
+        session: &TextEditState,
+        td: TextData,
+        label: &str,
+    ) {
+        let Some(doc) = self.docs.documents.get_mut(doc_idx) else {
+            return;
+        };
+        let canvas = &mut doc.canvas;
+        let (cw, ch) = (canvas.width, canvas.height);
+        let mut cmd = LayerStructureCommand::capture_before(label, &canvas.layer_stack, cw, ch);
+        let found = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == session.layer_id);
+        let idx = match found {
+            Some(idx) if !session.is_new => idx,
+            _ => {
+                let idx = canvas.layer_stack.add_layer(cw, ch);
+                let layer = &mut canvas.layer_stack.layers[idx];
+                layer.name = "Text".to_string();
+                layer.offset = session.origin;
+                idx
+            }
+        };
+        rasterize_into_layer(canvas, idx, session.origin, td);
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+        canvas.layer_revision += 1;
     }
 
     /// Install `family` into the egui context if it isn't yet. Only builtin
@@ -1558,6 +1620,50 @@ mod tests {
         assert!(app.modal_lock_active(), "editing text locks other features");
         app.cancel_text_edit();
         assert!(!app.modal_lock_active());
+    }
+
+    /// Typing and committing is `text.set`: one undo step named as before,
+    /// on the layer the session made; editing it again is another.
+    #[test]
+    fn typed_text_commits_through_the_command_one_step_at_a_time() {
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        let steps = |app: &App| app.docs.documents[0].canvas.undo_count();
+        let before = steps(&app);
+        app.text_tool_click(10.0, 10.0);
+        let layer_id = app.edit.text_edit.as_ref().unwrap().layer_id;
+        app.update_text_buffer("Xin chào".to_string());
+        app.commit_text_edit();
+        let canvas = &app.docs.documents[0].canvas;
+        assert_eq!(steps(&app), before + 1);
+        assert_eq!(canvas.history_entries().last().unwrap().label, "Type");
+        let idx = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == layer_id)
+            .expect("the session's layer");
+        assert!(matches!(
+            &canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Text(td) if td.content == "Xin chào"
+        ));
+
+        app.begin_edit_text_layer(idx);
+        app.update_text_buffer("Xin chào bạn".to_string());
+        app.commit_text_edit();
+        assert_eq!(steps(&app), before + 2);
+        let canvas = &app.docs.documents[0].canvas;
+        assert_eq!(canvas.history_entries().last().unwrap().label, "Edit Text");
+        // Opened and left as it was: no step.
+        app.begin_edit_text_layer(idx);
+        app.commit_text_edit();
+        assert_eq!(steps(&app), before + 2);
+        // Undo goes back one edit at a time.
+        app.docs.documents[0].canvas.undo();
+        assert!(matches!(
+            &app.docs.documents[0].canvas.layer_stack.layers[idx].layer_type,
+            LayerType::Text(td) if td.content == "Xin chào"
+        ));
     }
 
     #[test]

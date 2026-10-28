@@ -9,6 +9,7 @@ use crate::core::command::LayerStructureCommand;
 use crate::core::layer::LayerType;
 use crate::core::shape::{ShapeData, ShapeHandle, ShapeKind};
 use crate::core::tile::TileMap;
+use crate::core::vector::from_shape::RectCorner;
 use crate::core::vector::object::VectorGeometry;
 
 /// Screen-space grab radius for a handle.
@@ -45,29 +46,39 @@ impl App {
                 s.star_inner,
             )
         };
-        let (mut data, offset) = ShapeData::from_canvas_span(
-            kind,
-            x0,
-            y0,
-            x1,
-            y1,
-            corner_radius,
-            fill,
-            fill_color,
-            stroke_width,
-            stroke_color,
-        );
-        // Corner style / Polygon-Star parameters live on the tool, not the span.
-        data.corner_type = corner_type;
-        data.sides = sides.clamp(3, 100);
-        data.star_inner = star_inner.clamp(0.05, 0.95);
-        let doc_idx = self.docs.active_doc_idx;
-        let canvas = &mut self.docs.documents[doc_idx].canvas;
-        if canvas.add_shape_layer(data, offset).is_none() {
+        // The same command an agent runs: `vector.add_shape`.
+        let shape = match kind {
+            ShapeKind::Rectangle => "rectangle",
+            ShapeKind::Ellipse => "ellipse",
+            ShapeKind::Line => "line",
+            ShapeKind::Polygon => "polygon",
+            ShapeKind::Star => "star",
+        };
+        let corners = match corner_type {
+            RectCorner::Round => "round",
+            RectCorner::Scallop => "scallop",
+            RectCorner::Chamfer => "chamfer",
+        };
+        let mut args = serde_json::json!({
+            "shape": shape,
+            "span": [x0, y0, x1, y1],
+            "strokeWidth": stroke_width.clamp(0.0, 1000.0),
+            "cornerRadius": corner_radius.clamp(0.0, 100000.0),
+            "sides": sides.clamp(3, 100),
+            "starInner": star_inner.clamp(0.05, 0.95),
+            "corners": corners,
+        });
+        if fill {
+            args["fill"] = crate::ui::color_hex(fill_color).into();
+        }
+        if stroke_width > 0.0 {
+            args["stroke"] = crate::ui::color_hex(stroke_color).into();
+        }
+        if !fill && stroke_width <= 0.0 {
+            // Draws nothing.
             return;
         }
-
-        self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
+        let _ = self.run_with("vector.add_shape", args);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

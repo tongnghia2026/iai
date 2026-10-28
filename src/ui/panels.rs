@@ -2351,11 +2351,7 @@ fn layers_channels_panel(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActio
                                 ),
                                 (
                                     "Hue/Saturation",
-                                    AdjustmentType::HueSaturation {
-                                        hue: 0.0,
-                                        saturation: 0.0,
-                                        lightness: 0.0,
-                                    },
+                                    AdjustmentType::hue_saturation(0.0, 0.0, 0.0),
                                 ),
                                 ("Levels", AdjustmentType::default_levels()),
                                 ("Curves", AdjustmentType::default_curves()),

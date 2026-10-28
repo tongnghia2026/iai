@@ -7,6 +7,7 @@
 
 pub mod canvas;
 pub mod document;
+pub mod free_transform;
 pub mod powerclip;
 pub mod print;
 pub mod raw_spill;

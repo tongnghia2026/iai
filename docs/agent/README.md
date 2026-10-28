@@ -183,9 +183,14 @@ The test `agent::e2e` runs this through MCP (a light one in the suite; the full 
 ## Tone, colour, filters, pages
 
 - `image.auto_levels` — a dull, dark or tinted photo (a card or a paper shot with a phone)
-  stretched end to end; `image.adjust {adjustment: {kind: …}}` for a set change (levels,
+  stretched end to end (`monochromatic`: Auto Contrast; `neutralMidtones`: Auto Color, a cast
+  taken out of the greys too); `image.adjust {adjustment: {kind: …}}` for a set change (levels,
   curves `[[in, out], …]` 0–255, brightness_contrast, hue_saturation, vibrance, exposure,
   color_balance, invert, desaturate, threshold, posterize, black_and_white, photo_filter).
+  hue_saturation takes `colorize {hue, saturation, lightness}` (one tint for the whole picture)
+  and `ranges {reds | yellows | greens | cyans | blues | magentas: {hue, saturation, lightness}}`.
+- `image.canvas_size {widthPx, heightPx, anchor?, fill?}` — the page larger or smaller round
+  `anchor` (top_left … bottom_right, `center`), what the Background gains in `fill`.
 - `image.filter {filter: {kind: …}}` — gaussian_blur, sharpen, high_pass, add_noise,
   pixelate, reduce_noise; inside the selection when there is one.
 - `image.scan_cleanup` — a photographed page made a clean scan (white paper, black writing);
@@ -196,9 +201,14 @@ The test `agent::e2e` runs this through MCP (a light one in the suite; the full 
 - `layer.transform {layer, scale | scaleX/scaleY, angle, dx, dy}` — a picture layer scaled,
   turned by any angle round its middle and moved, as Free Transform does (a scan a little
   askew: duplicate the Background, then turn the copy by `angle`).
+- `layer.free_transform {layers?, scaleX, scaleY, angle, dx, dy, pivot?, corners?, bounds?}` — what
+  Ctrl+T does, with the same pixels: several layers together, type and shapes kept editable where
+  the gesture allows, masks along, a distort or perspective by the box's four `corners`, and a
+  picture transformed again resampled from its first pixels.
 - Layers as the Layers panel and the Move tool do them: `layer.group {layers}` /
-  `layer.ungroup`, `layer.merge {what: picked | group | visible}`, `layer.clip` (to the layer
-  below), `layer.align {layers, align: left | horizontal_center | right | top |
+  `layer.ungroup`, `layer.merge {what: picked | group | merge_visible | visible}` (`merge_visible`:
+  the visible layers become one, hidden ones stay; `visible`: stamped into a new one on top),
+  `layer.clip` (to the layer below), `layer.align {layers, align: left | horizontal_center | right | top |
   vertical_center | bottom}`, `layer.distribute {layers, axis}`, `layer.step_copy {layers, dx,
   dy}` (a row of copies: call it again, it goes on from the last copy).
 - Shapes: `vector.to_curves {layer}`, `vector.shaping {op: weld | trim | intersect | simplify,

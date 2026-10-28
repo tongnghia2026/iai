@@ -117,18 +117,50 @@ fn parse_levels(d: &[u8]) -> Option<AdjustmentType> {
 
 /// `hue2` — Hue/Saturation (version 2). Layout: `u16` version, colorization flag
 /// byte + pad byte, then the colorization triple (3×`i16`) and the master triple
-/// (3×`i16`: hue, saturation, lightness) before the six per-range records. iAi's
-/// Hue/Saturation is master-only, so we take the master triple.
+/// (3×`i16`: hue, saturation, lightness), then six per-range records (Reds …
+/// Magentas) of four `u16` range bounds and a triple. iAi's ranges are
+/// Photoshop's default bounds, so a range's own bounds are not read.
 fn parse_hue_saturation(d: &[u8]) -> Option<AdjustmentType> {
     let _version = be_u16(d, 0)?;
+    let triple = |at: usize| -> Option<[f32; 3]> {
+        Some([
+            be_i16(d, at)? as f32,
+            be_i16(d, at + 2)? as f32,
+            be_i16(d, at + 4)? as f32,
+        ])
+    };
+    let clamp = |[h, s, l]: [f32; 3]| {
+        [
+            h.clamp(-180.0, 180.0),
+            s.clamp(-100.0, 100.0),
+            l.clamp(-100.0, 100.0),
+        ]
+    };
     // 2: colorization flag, 3: padding, 4..10: colorization triple, 10..16: master.
-    let hue = be_i16(d, 10)? as f32;
-    let saturation = be_i16(d, 12)? as f32;
-    let lightness = be_i16(d, 14)? as f32;
+    let colorize = (d.get(2).copied().unwrap_or(0) != 0)
+        .then(|| triple(4))
+        .flatten()
+        .map(|[h, s, l]| {
+            [
+                h.rem_euclid(360.0),
+                s.clamp(0.0, 100.0),
+                l.clamp(-100.0, 100.0),
+            ]
+        });
+    let [hue, saturation, lightness] = clamp(triple(10)?);
+    let mut ranges = [[0.0f32; 3]; 6];
+    for (i, range) in ranges.iter_mut().enumerate() {
+        // 16 + 14 i: four bounds (8 bytes), then the triple.
+        if let Some(t) = triple(16 + 14 * i + 8) {
+            *range = clamp(t);
+        }
+    }
     Some(AdjustmentType::HueSaturation {
-        hue: hue.clamp(-180.0, 180.0),
-        saturation: saturation.clamp(-100.0, 100.0),
-        lightness: lightness.clamp(-100.0, 100.0),
+        hue,
+        saturation,
+        lightness,
+        colorize,
+        ranges,
     })
 }
 
@@ -206,6 +238,133 @@ fn parse_curves(d: &[u8]) -> Option<AdjustmentType> {
         };
         if ch < 4 {
             channels[ch] = points;
+        }
+    }
+    Some(AdjustmentType::Curves { channels })
+}
+
+/// A Photoshop preset file of an adjustment dialog, read by its extension:
+/// Curves `.acv`, Levels `.alv`, Hue/Saturation `.ahu`. `None` for another
+/// kind of file or one it cannot read.
+pub fn parse_preset_file(extension: &str, data: &[u8]) -> Option<AdjustmentType> {
+    match extension.to_ascii_lowercase().as_str() {
+        "acv" => parse_acv(data),
+        // The same records as the PSD's `levl` / `hue2` blocks.
+        "alv" => parse_levels(data),
+        "ahu" => parse_hue_saturation(data),
+        _ => None,
+    }
+}
+
+/// Photoshop's default bounds of Hue/Saturation's six colours, in degrees:
+/// where each starts to take a pixel, takes it wholly, and lets it go.
+const HUE_RANGE_BOUNDS: [[u16; 4]; 6] = [
+    [315, 345, 15, 45],
+    [15, 45, 75, 105],
+    [75, 105, 135, 165],
+    [135, 165, 195, 225],
+    [195, 225, 255, 285],
+    [255, 285, 315, 345],
+];
+
+/// A Photoshop preset file of an adjustment, the inverse of
+/// [`parse_preset_file`]: its extension and bytes, for Levels (.alv),
+/// Curves (.acv) and Hue/Saturation (.ahu); `None` for another kind.
+pub fn write_preset_file(adj: &AdjustmentType) -> Option<(&'static str, Vec<u8>)> {
+    let mut d = Vec::new();
+    let i16s = |d: &mut Vec<u8>, values: &[i32]| {
+        for v in values {
+            let v = (*v).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            d.extend_from_slice(&v.to_be_bytes());
+        }
+    };
+    match adj {
+        AdjustmentType::Levels { channels } => {
+            i16s(&mut d, &[2]);
+            for i in 0..29 {
+                let p = channels.get(i).copied().unwrap_or_default();
+                i16s(
+                    &mut d,
+                    &[
+                        p.in_black.into(),
+                        p.in_white.into(),
+                        p.out_black.into(),
+                        p.out_white.into(),
+                        (p.gamma * 100.0).round() as i32,
+                    ],
+                );
+            }
+            Some(("alv", d))
+        }
+        AdjustmentType::Curves { channels } => {
+            i16s(&mut d, &[4, channels.len() as i32]);
+            for points in channels {
+                let points: Vec<_> = points.iter().take(19).collect();
+                i16s(&mut d, &[points.len() as i32]);
+                for (input, output) in points {
+                    let level = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as i32;
+                    i16s(&mut d, &[level(*output), level(*input)]);
+                }
+            }
+            Some(("acv", d))
+        }
+        AdjustmentType::HueSaturation {
+            hue,
+            saturation,
+            lightness,
+            colorize,
+            ranges,
+        } => {
+            i16s(&mut d, &[2]);
+            d.extend_from_slice(&[u8::from(colorize.is_some()), 0]);
+            let round = |v: f32| v.round() as i32;
+            let [ch, cs, cl] = colorize.unwrap_or([0.0, 25.0, 0.0]);
+            i16s(&mut d, &[round(ch), round(cs), round(cl)]);
+            i16s(
+                &mut d,
+                &[round(*hue), round(*saturation), round(*lightness)],
+            );
+            for (bounds, [h, s, l]) in HUE_RANGE_BOUNDS.iter().zip(ranges) {
+                let bounds: Vec<i32> = bounds.iter().map(|&b| b.into()).collect();
+                i16s(&mut d, &bounds);
+                i16s(&mut d, &[round(*h), round(*s), round(*l)]);
+            }
+            Some(("ahu", d))
+        }
+        _ => None,
+    }
+}
+
+/// `.acv`: `u16` version (1 or 4), `u16` count, then each curve (composite,
+/// red, green, blue, …) as a `u16` number of points and that many
+/// (output, input) pairs, 0 to 255.
+fn parse_acv(d: &[u8]) -> Option<AdjustmentType> {
+    let version = be_u16(d, 0)?;
+    if version != 1 && version != 4 {
+        return None;
+    }
+    let count = be_u16(d, 2)? as usize;
+    if count == 0 {
+        return None;
+    }
+    let mut channels: [Vec<(f32, f32)>; 4] = std::array::from_fn(|_| identity_curve());
+    let mut off = 4;
+    for ch in 0..count.min(32) {
+        let n = be_u16(d, off)? as usize;
+        off += 2;
+        if !(2..=19).contains(&n) {
+            return None;
+        }
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            let output = be_u16(d, off)?.min(255);
+            let input = be_u16(d, off + 2)?.min(255);
+            off += 4;
+            pts.push((input as f32 / 255.0, output as f32 / 255.0));
+        }
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if ch < 4 {
+            channels[ch] = pts;
         }
     }
     Some(AdjustmentType::Curves { channels })
@@ -488,6 +647,8 @@ mod tests {
             hue,
             saturation,
             lightness,
+            colorize,
+            ranges,
         }) = parse_adjustment(b"hue2", &d)
         else {
             panic!("expected HueSaturation");
@@ -495,6 +656,125 @@ mod tests {
         assert_eq!(hue, -40.0);
         assert_eq!(saturation, 25.0);
         assert_eq!(lightness, -10.0);
+        assert_eq!(colorize, None);
+        assert_eq!(
+            ranges, [[0.0; 3]; 6],
+            "a file cut short has no colour of its own"
+        );
+    }
+
+    /// What iAi writes as a Photoshop preset reads back as it was.
+    #[test]
+    fn a_preset_written_reads_back() {
+        let mut levels = [LevelsParams::default(); 4];
+        levels[0].in_black = 12;
+        levels[2].gamma = 1.35;
+        levels[3].out_white = 240;
+        let mut curves: [Vec<(f32, f32)>; 4] = std::array::from_fn(|_| identity_curve());
+        curves[0] = vec![(0.0, 0.0), (100.0 / 255.0, 140.0 / 255.0), (1.0, 1.0)];
+        curves[3] = vec![(0.0, 20.0 / 255.0), (1.0, 1.0)];
+        let mut ranges = [[0.0f32; 3]; 6];
+        ranges[1] = [-15.0, 40.0, -5.0];
+        let adjustments = [
+            AdjustmentType::Levels { channels: levels },
+            AdjustmentType::Curves { channels: curves },
+            AdjustmentType::HueSaturation {
+                hue: 10.0,
+                saturation: -20.0,
+                lightness: 5.0,
+                colorize: None,
+                ranges,
+            },
+            AdjustmentType::HueSaturation {
+                hue: 0.0,
+                saturation: 0.0,
+                lightness: 0.0,
+                colorize: Some([210.0, 45.0, -10.0]),
+                ranges: [[0.0; 3]; 6],
+            },
+        ];
+        for adj in adjustments {
+            let (extension, bytes) = write_preset_file(&adj).expect("a preset file");
+            let back = parse_preset_file(extension, &bytes).expect("reads back");
+            assert_eq!(back, adj, "{extension}");
+        }
+        assert!(write_preset_file(&AdjustmentType::Invert).is_none());
+    }
+
+    /// A Curves preset of Photoshop's (.acv): composite and red come in, the
+    /// others stay straight; another kind of file or a cut one does not.
+    #[test]
+    fn an_acv_preset_reads_its_curves() {
+        let mut d = Vec::new();
+        push_i16(&mut d, 4); // version
+        push_i16(&mut d, 2); // curves
+        for points in [
+            vec![(0, 0), (128, 100), (255, 255)],
+            vec![(20, 0), (255, 255)],
+        ] {
+            push_i16(&mut d, points.len() as i16);
+            for (output, input) in points {
+                push_i16(&mut d, output);
+                push_i16(&mut d, input);
+            }
+        }
+        let Some(AdjustmentType::Curves { channels }) = parse_preset_file("ACV", &d) else {
+            panic!("expected Curves");
+        };
+        assert_eq!(channels[0].len(), 3);
+        assert!(
+            (channels[0][1].0 - 100.0 / 255.0).abs() < 1e-6,
+            "input first"
+        );
+        assert!((channels[0][1].1 - 128.0 / 255.0).abs() < 1e-6);
+        assert_eq!(channels[1][0], (0.0, 20.0 / 255.0));
+        assert_eq!(channels[2], identity_curve());
+        assert!(parse_preset_file("acv", &d[..d.len() - 3]).is_none());
+        assert!(parse_preset_file("txt", &d).is_none());
+        assert!(parse_preset_file("acv", b"garbage!").is_none());
+    }
+
+    /// A Colorize layer and one with its Blues moved come in as they are,
+    /// not as the master sliders alone.
+    #[test]
+    fn hue_saturation_reads_colorize_and_the_colours() {
+        let record = |colorize: bool, blues: [i16; 3]| {
+            let mut d = Vec::new();
+            push_i16(&mut d, 2);
+            d.push(u8::from(colorize));
+            d.push(0);
+            for v in [200, 40, -10] {
+                push_i16(&mut d, v); // colorization
+            }
+            for v in [0, 0, 0] {
+                push_i16(&mut d, v); // master
+            }
+            for range in 0..6 {
+                for bound in [0, 0, 0, 0] {
+                    push_i16(&mut d, bound);
+                }
+                let t = if range == 4 { blues } else { [0, 0, 0] };
+                for v in t {
+                    push_i16(&mut d, v);
+                }
+            }
+            d
+        };
+        let Some(AdjustmentType::HueSaturation { colorize, .. }) =
+            parse_adjustment(b"hue2", &record(true, [0, 0, 0]))
+        else {
+            panic!("expected HueSaturation");
+        };
+        assert_eq!(colorize, Some([200.0, 40.0, -10.0]));
+        let Some(AdjustmentType::HueSaturation {
+            colorize, ranges, ..
+        }) = parse_adjustment(b"hue2", &record(false, [30, -50, 10]))
+        else {
+            panic!("expected HueSaturation");
+        };
+        assert_eq!(colorize, None);
+        assert_eq!(ranges[4], [30.0, -50.0, 10.0]);
+        assert_eq!(ranges[0], [0.0; 3]);
     }
 
     #[test]
