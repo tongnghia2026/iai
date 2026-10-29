@@ -93,6 +93,9 @@ pub struct UiShell {
     /// Session of the "Auto retouch" dialog (analysis + live preview).
     #[cfg(feature = "pro")]
     pub(in crate::app) portrait: Option<crate::app::portrait_ops::PortraitSession>,
+    /// A card of an ID card sheet being fixed in its photo's tab.
+    #[cfg(feature = "pro")]
+    pub(in crate::app) card_edit: Option<crate::app::card_edit::CardEdit>,
     /// Why the retouch asked for in the dialog could not start, for the
     /// dialog to show.
     #[cfg(feature = "pro")]

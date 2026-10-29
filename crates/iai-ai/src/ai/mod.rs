@@ -14,6 +14,9 @@ pub mod edit;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod face_mesh;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
+pub mod ocr;
 pub mod ort_ep;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]

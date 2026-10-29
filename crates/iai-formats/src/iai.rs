@@ -513,6 +513,7 @@ fn build_canvas_from_meta<R: Read + Seek>(
         }
         layer.portrait =
             read_portrait(archive, prefix, i, &layer_info["portrait"]).map(std::sync::Arc::new);
+        layer.cut = read_cut(&layer_info["cut"]).map(std::sync::Arc::new);
 
         canvas.layer_stack.layers.push(layer);
     }
@@ -1115,6 +1116,15 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
                 .map_or(serde_json::Value::Null, |r| {
                     portrait_to_json(r, &canvas.layer_stack.layers)
                 }),
+            "cut": layer.cut.as_ref().map_or(serde_json::Value::Null, |c| {
+                serde_json::json!({
+                    "path": c.path,
+                    "corners": c.corners.map(|(x, y)| [x, y]),
+                    "turn": c.turn,
+                    "kind": c.kind,
+                    "doubtful": c.doubtful,
+                })
+            }),
         }));
     }
 
@@ -1536,6 +1546,22 @@ pub fn save_pdf_project(
 
 /// Bound on one recipe mask entry (a sanity check, like the manifest's).
 const MAX_PORTRAIT_MASK_BYTES: usize = 512 * 1024 * 1024;
+
+/// The photo and corners a card layer was cut with, as `"cut"` holds them.
+fn read_cut(value: &serde_json::Value) -> Option<iai_doc::cut_source::CutSource> {
+    let corners = value["corners"].as_array()?;
+    let corner = |i: usize| -> Option<(f32, f32)> {
+        let p = corners.get(i)?.as_array()?;
+        Some((p.first()?.as_f64()? as f32, p.get(1)?.as_f64()? as f32))
+    };
+    Some(iai_doc::cut_source::CutSource {
+        path: value["path"].as_str()?.to_string(),
+        corners: [corner(0)?, corner(1)?, corner(2)?, corner(3)?],
+        turn: value["turn"].as_u64().unwrap_or(0) as u32 % 360,
+        kind: value["kind"].as_str().unwrap_or_default().to_string(),
+        doubtful: value["doubtful"].as_bool().unwrap_or(false),
+    })
+}
 
 fn portrait_entry(prefix: &str, layer: usize, what: &str) -> String {
     format!("{prefix}layer_{layer}_portrait_{what}.png")
@@ -3186,6 +3212,36 @@ mod tests {
         };
         assert!(loaded.layer_stack.layers[0].portrait.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_cut_from_a_photo_remembers_the_photo_and_its_corners() {
+        use iai_doc::cut_source::CutSource;
+        let dir = tmp_dir("cut");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 40, 30);
+        let idx = canvas.layer_stack.add_layer(40, 30);
+        let cut = CutSource {
+            path: "C:/khach/truoc.jpg".to_string(),
+            corners: [(12.5, 30.0), (900.0, 41.25), (880.0, 600.0), (20.0, 590.5)],
+            turn: 180,
+            kind: "front-2021".to_string(),
+            doubtful: true,
+        };
+        canvas.layer_stack.layers[idx].cut = Some(std::sync::Arc::new(cut.clone()));
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let found: Vec<_> = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .filter_map(|l| l.cut.as_deref())
+            .collect();
+        assert_eq!(found, vec![&cut]);
     }
 
     #[test]

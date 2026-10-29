@@ -1153,6 +1153,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         draw_delete_preset_dialog(ctx, data, &mut actions);
         draw_crop_idle_border(ctx, data, canvas_viewport);
         draw_crop_overlay(ctx, data, canvas_viewport);
+        draw_doubtful_cards(ctx, data, canvas_viewport);
 
         // Selected Develop local-mask outline (screen space — see
         // App::build_develop_local_overlay).
@@ -1912,6 +1913,42 @@ fn draw_shape_preview(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::
 
 // Shape layer editing overlay: bounding box + resize handles + the
 // rounded-corner radius node (Shape tool, active Shape layer).
+/// A red frame round each card of an ID card sheet worth a look: on screen
+/// only, never printed. Drawn with the canvas, under every window, and not
+/// while the Print window is open (the page is then looked at as it prints).
+fn draw_doubtful_cards(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    if data.layers.doubtful_cards.is_empty() || data.print.show_print_dialog {
+        return;
+    }
+    let (zoom, ox, oy) = (data.doc.zoom, data.doc.offset_x, data.doc.offset_y);
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            CANVAS_TOOL_OVERLAY_ORDER,
+            egui::Id::new("doubtful_cards"),
+        ))
+        .with_clip_rect(canvas_viewport);
+    let red = egui::Color32::from_rgb(230, 40, 40);
+    for &[x, y, w, h] in data.layers.doubtful_cards.iter() {
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(x * zoom + ox, y * zoom + oy),
+            egui::pos2((x + w) * zoom + ox, (y + h) * zoom + oy),
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(3.0_f32, red),
+            egui::StrokeKind::Outside,
+        );
+        painter.text(
+            rect.left_top() + egui::vec2(6.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            "Cần xem — chuột phải để sửa",
+            egui::FontId::proportional(13.0),
+            red,
+        );
+    }
+}
+
 fn draw_shape_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
     let zoom = data.doc.zoom;
     let ox = data.doc.offset_x;
@@ -3148,6 +3185,73 @@ fn draw_object_context_menu(ctx: &mut egui::Ui, data: &UiData, actions: &mut UiA
                             flat_context_menu_item(ui, menu_w, en, label, sc)
                         };
 
+                        // An ID photo print being worked on: back into its sheet.
+                        if data.layers.photo_fix_tab {
+                            if item(ui, true, "Xong — thay vào tờ in", None) {
+                                actions.run("print.photo_put", serde_json::json!({}));
+                                clicked = true;
+                            }
+                            if item(ui, true, "Bỏ — quay lại tờ in", None) {
+                                actions.run("print.photo_put", serde_json::json!({"cancel": true}));
+                                clicked = true;
+                            }
+                            flat_context_menu_separator(ui, menu_w);
+                        }
+                        let card = data.layers.layer_card.get(active_idx).copied().unwrap_or(0);
+                        // A print of an ID photo sheet: worked on in a tab of its own.
+                        if card == 3 {
+                            if item(ui, true, "Sửa ảnh thẻ này…", None) {
+                                actions.run_on_layer(
+                                    &data.layers.layer_ids,
+                                    active_idx,
+                                    "print.card_source",
+                                    serde_json::json!({}),
+                                );
+                                clicked = true;
+                            }
+                            if item(ui, true, "Làm lại từ ảnh chụp gốc…", None) {
+                                actions.run_on_layer(
+                                    &data.layers.layer_ids,
+                                    active_idx,
+                                    "print.card_source",
+                                    serde_json::json!({"fromPortrait": true}),
+                                );
+                                clicked = true;
+                            }
+                            flat_context_menu_separator(ui, menu_w);
+                        }
+                        // A card of an ID card sheet: cut again from its photo.
+                        if card == 1 || card == 2 {
+                            if item(ui, true, "Sửa góc thẻ căn cước…", None) {
+                                actions.run_on_layer(
+                                    &data.layers.layer_ids,
+                                    active_idx,
+                                    "print.card_source",
+                                    serde_json::json!({}),
+                                );
+                                clicked = true;
+                            }
+                            for (label, turn) in [
+                                ("Xoay thẻ 90° phải", 90),
+                                ("Xoay thẻ 90° trái", 270),
+                                ("Xoay thẻ 180°", 180),
+                            ] {
+                                if item(ui, true, label, None) {
+                                    actions.run_on_layer(
+                                        &data.layers.layer_ids,
+                                        active_idx,
+                                        "print.card_fix",
+                                        serde_json::json!({"turnBy": turn}),
+                                    );
+                                    clicked = true;
+                                }
+                            }
+                            if item(ui, true, "Tới thẻ cần xem tiếp theo", None) {
+                                actions.run("print.card_next", serde_json::json!({}));
+                                clicked = true;
+                            }
+                            flat_context_menu_separator(ui, menu_w);
+                        }
                         if item(ui, selected_vectors > 0, "Format Selected Vectors…", None) {
                             actions.dialogs.open_vector_style_dialog =
                                 Some(intent::VectorStyleTarget::Selected);

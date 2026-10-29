@@ -446,6 +446,16 @@ fn file_menu(
         actions.print.show_print_dialog = Some(true);
         ui.close();
     }
+    // Gói Pro: the ID cards of a folder of photos laid out on A4, each
+    // front beside its back, without an AI service.
+    #[cfg(feature = "pro")]
+    if ui
+        .add(menu_item_enabled("Xếp căn cước từ thư mục...", "", true))
+        .clicked()
+    {
+        actions.run("print.card_folder", serde_json::json!({}));
+        ui.close();
+    }
     if ui
         .add(menu_item_enabled(
             "CMYK Separations...",

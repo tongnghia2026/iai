@@ -328,6 +328,11 @@ impl App {
     /// Edit-Contents session. Broad enough that the menu still appears for a raster
     /// photo placed inside a PowerClip frame (not only for vector layers).
     pub(crate) fn has_right_click_object(&self) -> bool {
+        // An ID photo print being worked on: "Xong — thay vào tờ in".
+        #[cfg(feature = "pro")]
+        if self.photo_fix_in_front() {
+            return true;
+        }
         let canvas = &self.docs.active().canvas;
         if canvas.powerclip_edit_frame.is_some() {
             return true;
@@ -337,7 +342,9 @@ impl App {
             l.selected
                 && (matches!(l.layer_type, crate::core::layer::LayerType::Vector(_))
                     || l.clip_parent_id.is_some()
-                    || stack.layers.iter().any(|c| c.clip_parent_id == Some(l.id)))
+                    || stack.layers.iter().any(|c| c.clip_parent_id == Some(l.id))
+                    // A card of an ID card sheet: fixed from its menu.
+                    || (cfg!(feature = "pro") && l.cut.is_some()))
         })
     }
 

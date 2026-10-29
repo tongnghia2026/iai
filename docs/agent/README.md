@@ -223,21 +223,32 @@ The test `agent::e2e` runs this through MCP (a light one in the suite; the full 
 ## ID cards and ID photos a customer sent
 
 A folder holds, in no order, ID card fronts and backs photographed at a slant, phone
-screenshots of the electronic ID, and portraits:
+screenshots of the electronic ID, and portraits.
+
+For the ID cards alone, `print.card_folder {path}` does it all without looking at a photo:
+each card found and laid flat upright, each front put beside its back by the ID number both
+carry (read off the cards on this machine), people in the order their photos came, one
+document of as many A4 pages as it takes. Cards worth a look are marked; `alone`,
+`unread` and `skipped` say what it could not place (a screenshot, a portrait: add those
+with `print.card_sheet`). Otherwise:
 
 1. `file.contact_sheet {path}` — every photo small and numbered in one picture, with the
    list of what each number is: tell the fronts, backs, screenshots and portraits apart, and
    whose they are (the name and number on the card);
 2. `print.card_sheet {items: [{front: {path}, back: {path}}, {screen: {path}}], copies}` —
    each card found and laid flat at 85.6 × 53.98 mm, front and back in a row, a screenshot
-   turned to lie down, four rows an A4 page, one document; a photo whose card is not found
-   is named in the error: give its `corners` (read off a preview);
+   turned to lie down, four rows an A4 page, one document; a Vietnamese ID card (2021 or
+   2024 kind, either side) is known by its print and comes out upright by itself (its
+   `kind` in the result; no `turn`); a photo whose card is not found is named in the
+   error: give its `corners` (read off a preview);
 3. `id_photo.batch {items: [{path, copies, name}], size, backdrop, paper}` — an ID photo of
    each portrait, all on photo paper, each person as many times as asked;
-4. `export.pdf {doc, path}` for each.
+4. stop there: the person looks the pages over, fixes a card from its right-click menu
+   (or `print.card_fix {layer, corners}` after `print.card_source {layer}`) and prints.
+   `export.pdf {doc, path}` only when asked for a PDF.
 
 `image.perspective_crop` lays one card (or any sheet, with `widthMm`/`heightMm`, e.g. an A4
-page 210 × 297) flat in a document; follow it with `image.scan_cleanup` for a paper. The saved skills `in-can-cuoc-len-a4` and `anh-the-nhieu-nguoi` do steps 2–4.
+page 210 × 297) flat in a document; follow it with `image.scan_cleanup` for a paper. The saved skills `in-can-cuoc-len-a4` and `anh-the-nhieu-nguoi` do steps 2–3.
 
 ## A many-page PDF
 

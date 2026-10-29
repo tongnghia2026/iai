@@ -1484,6 +1484,10 @@ impl App {
                     file_io::FileDialogResult::PickedPrintFolder(dir) => {
                         self.set_print_folder(dir);
                     }
+                    #[cfg(feature = "pro")]
+                    file_io::FileDialogResult::PickedCardFolder(dir) => {
+                        self.card_folder_picked(dir);
+                    }
                     file_io::FileDialogResult::PickedErrandFolder(dir) => {
                         self.shell.errands.folder = Some(dir);
                     }

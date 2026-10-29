@@ -269,6 +269,12 @@ impl App {
     /// `commit_active_crop`'s post-resize bookkeeping (GPU texture, uniforms,
     /// fit-to-screen) since the canvas dimensions change.
     pub fn commit_active_perspective_crop(&mut self) -> bool {
+        // On the photo of a card being fixed, the frame cuts the card again
+        // into its sheet instead.
+        #[cfg(feature = "pro")]
+        if self.card_edit_commit() {
+            return true;
+        }
         // Perspective Crop is tile-native now (chunked homography resample), so it
         // runs under Viewport Streaming with no >25M px gate. crop_perspective still
         // rejects an output past MAX_DIMENSION.

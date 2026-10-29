@@ -73,6 +73,7 @@ upstream terms.
 | GFPGAN v1.4 | Apache-2.0 except upstream-listed third-party components | `licenses/GFPGAN.txt` |
 | Real-ESRGAN General/x2/x4 | BSD-3-Clause | `licenses/Real-ESRGAN-BSD-3-Clause.txt` |
 | MediaPipe Face Mesh V2 (face landmarker) | Apache-2.0 | `licenses/Apache-2.0.txt` |
+| PaddleOCR PP-OCRv4 text recogniser (RapidOCR's ONNX), fetched on first use | Apache-2.0 | `licenses/Apache-2.0.txt` |
 | Meta Sapiens2 seg 0.4B | Sapiens2 License (use restrictions apply) | `licenses/Sapiens2-LICENSE.md` |
 
 The Sapiens2 License must travel with any copy of the Sapiens2 weights and

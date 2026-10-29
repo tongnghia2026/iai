@@ -154,30 +154,55 @@ fn scan_recipe() -> Recipe {
     })
 }
 
+/// The ID cards of the photos in `vao` laid out on A4, each front beside
+/// its back, in one document shown as a tab: no PDF (the person looks it
+/// over and prints it).
+fn id_card_recipe() -> Recipe {
+    serde_json::from_value(json!({
+        "version": 1,
+        "meta": {
+            "title": "Xếp căn cước lên A4",
+            "description": "Mọi ảnh căn cước trong thư mục, mặt trước cạnh mặt sau, một tab.",
+            "tier": 1
+        },
+        "params": {
+            "vao": {"type": "folder", "default": null, "label": "Thư mục ảnh"},
+            "ban": {"type": "number", "default": 1, "label": "Số bản mỗi người"}
+        },
+        "steps": [
+            {"id": "make", "command": "print.card_folder", "args": {
+                "path": "${vao}", "copies": "${ban}"
+            }}
+        ]
+    }))
+    .unwrap_or_else(|_| Recipe {
+        version: 1,
+        meta: Default::default(),
+        params: Default::default(),
+        steps: Vec::new(),
+    })
+}
+
 /// An ID photo of each portrait in `anh`, laid out on photo paper, the
-/// sheets written as `ra\ten.pdf`.
+/// sheets a tab: no PDF (the person looks them over, fixes a print from its
+/// right-click menu, and prints them).
 fn id_photo_recipe() -> Recipe {
     serde_json::from_value(json!({
         "version": 1,
         "meta": {
             "title": "Ảnh thẻ cho nhiều người",
-            "description": "Ảnh thẻ cho mọi ảnh chân dung trong thư mục, xếp lên giấy ảnh, xuất PDF.",
+            "description": "Ảnh thẻ cho mọi ảnh chân dung trong thư mục, xếp lên giấy ảnh, một tab.",
             "tier": 1
         },
         "params": {
             "anh": {"type": "list", "default": null, "label": "Ảnh chân dung"},
             "size": {"type": "text", "default": "3x4", "label": "Cỡ"},
             "backdrop": {"type": "text", "default": "white", "label": "Nền"},
-            "paper": {"type": "text", "default": "10x15", "label": "Giấy"},
-            "ra": {"type": "folder", "default": null, "label": "Thư mục kết quả", "write": true},
-            "ten": {"type": "text", "default": "anh_the", "label": "Tên file PDF"}
+            "paper": {"type": "text", "default": "10x15", "label": "Giấy"}
         },
         "steps": [
             {"id": "make", "command": "id_photo.batch", "args": {
                 "items": "${anh}", "size": "${size}", "backdrop": "${backdrop}", "paper": "${paper}"
-            }},
-            {"id": "pdf", "command": "export.pdf", "args": {
-                "doc": {"$ref": "make", "path": "/doc"}, "path": "${ra}/${ten}.pdf"
             }}
         ]
     }))
@@ -289,7 +314,8 @@ fn done_line(task: &QuickTask, run: &Run) -> String {
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
             let mut line = format!(
-                "Xong: {} tấm của {people} người trên {} tờ (tab mới); PDF trong thư mục {RESULTS}.",
+                "Xong: {} tấm của {people} người trên {} tờ (tab mới). Tấm nào chưa ưng: \
+                 chuột phải lên tấm đó ▸ «Sửa ảnh thẻ này…».",
                 count("prints").unwrap_or(0),
                 count("sheets").unwrap_or(0),
             );
@@ -310,6 +336,40 @@ fn done_line(task: &QuickTask, run: &Run) -> String {
                 .unwrap_or_default();
             if !failed.is_empty() {
                 line.push_str(&format!(" Không làm được: {}.", failed.join(", ")));
+            }
+            line
+        }
+        QuickTask::IdCards => {
+            let made = run.result("make");
+            let count = |key: &str| made.and_then(|m| m.get(key)).and_then(Value::as_u64);
+            let names = |key: &str| -> Vec<String> {
+                made.and_then(|m| m.get(key))
+                    .and_then(Value::as_array)
+                    .map(|v| {
+                        v.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut line = format!(
+                "Xong: {} người trên {} trang A4 (tab mới).",
+                count("people").unwrap_or(0),
+                count("pages").unwrap_or(0),
+            );
+            let look = names("unsure").len();
+            if look > 0 {
+                line.push_str(&format!(
+                    " {look} thẻ cần xem (viền đỏ): bấm chuột phải lên thẻ để sửa."
+                ));
+            }
+            let skipped = names("skipped");
+            if !skipped.is_empty() {
+                line.push_str(&format!(
+                    " Không phải căn cước / không tìm thấy thẻ: {}.",
+                    skipped.join(", ")
+                ));
             }
             line
         }
@@ -361,6 +421,18 @@ fn work(job: Job, stop: &AtomicBool, tell: &dyn Fn(String)) -> Ended {
     match host.commands() {
         Ok(list) => gate.learn(&list),
         Err(e) => return failed(error_line(&e)),
+    }
+    // The OCR model card_folder reads numbers with, fetched once: the person
+    // asked for this job at the window, as from the File menu.
+    #[cfg(feature = "pro")]
+    if job.task == crate::ui::QuickTask::IdCards {
+        tell("Đang chuẩn bị model đọc chữ…".to_string());
+        let fetched = iai_ai::ai::ocr::ensure_model(&|f| {
+            tell(format!("Đang tải model đọc chữ… {:.0}%", f * 100.0));
+        });
+        if let Err(why) = fetched {
+            return failed(format!("Không tải được model đọc chữ: {why}"));
+        }
     }
     let store = Store::new(iai_automation::skills::default_root());
     let saved = job.recipe.is_none();
@@ -533,10 +605,27 @@ impl App {
                         "size": form.size,
                         "backdrop": form.backdrop,
                         "paper": form.paper,
-                        "ra": results.display().to_string(),
                     }),
+                    // Nothing is written: the sheets are a tab.
+                    write: read.clone(),
                     read,
-                    write,
+                })
+            }
+            QuickTask::IdCards => {
+                if !self.pro_open() {
+                    return Err("Xếp căn cước cần Gói Pro (Help ▸ Gói Pro).".to_string());
+                }
+                if photos.is_empty() {
+                    return Err("Thư mục không có ảnh (JPG, PNG…).".to_string());
+                }
+                Ok(Job {
+                    task: form.task.clone(),
+                    name: "xep-can-cuoc-thu-muc".to_string(),
+                    recipe: Some(id_card_recipe()),
+                    params: json!({"vao": folder.display().to_string(), "ban": 1}),
+                    // Nothing is written: the pages are a tab.
+                    write: read.clone(),
+                    read,
                 })
             }
             QuickTask::Skill(name) => {
@@ -566,6 +655,7 @@ impl App {
             let what = match &form.task {
                 QuickTask::ScanCleanup => "Làm sạch ảnh chụp giấy tờ".to_string(),
                 QuickTask::IdPhotos => "Ảnh thẻ cho nhiều người".to_string(),
+                QuickTask::IdCards => "Xếp căn cước lên A4".to_string(),
                 QuickTask::Skill(name) => self
                     .shell
                     .quick
@@ -581,9 +671,16 @@ impl App {
             format!("{what} · {place}")
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let job = std::fs::create_dir_all(&results)
-            .map_err(|e| format!("Không tạo được thư mục {}: {e}", results.display()))
-            .and_then(|()| self.quick_job(form, &folder, &results));
+        // Only the jobs that write files have a results' folder.
+        let writes = matches!(form.task, QuickTask::ScanCleanup | QuickTask::Skill(_));
+        let results = if writes { results } else { PathBuf::new() };
+        let job = (if writes {
+            std::fs::create_dir_all(&results)
+        } else {
+            Ok(())
+        })
+        .map_err(|e| format!("Không tạo được thư mục {}: {e}", results.display()))
+        .and_then(|()| self.quick_job(form, &folder, &results));
         let (stage, rx) = match job {
             Err(why) => (Stage::Failed(why), None),
             Ok(job) => {
@@ -688,10 +785,11 @@ mod tests {
 
     #[test]
     fn the_recipes_iai_carries_read_and_run_without_an_agent() {
-        for recipe in [scan_recipe(), id_photo_recipe()] {
+        for recipe in [scan_recipe(), id_photo_recipe(), id_card_recipe()] {
             assert!(!recipe.steps.is_empty(), "{}", recipe.meta.title);
         }
         assert!(scan_recipe().runs_on_a_folder());
+        assert!(id_card_recipe().runs_on_a_folder());
     }
 
     #[test]
@@ -817,10 +915,9 @@ mod tests {
             recipe: Some(id_photo_recipe()),
             params: json!({
                 "anh": items, "size": "3x4", "backdrop": "blue", "paper": "10x15",
-                "ra": results.display().to_string(),
             }),
             read: dir.clone(),
-            write: results.clone(),
+            write: dir.clone(),
         };
         let started = Instant::now();
         let ended = work(job, &AtomicBool::new(false), &|line| eprintln!("{line}"));
@@ -829,7 +926,7 @@ mod tests {
             Stage::Failed(why) => panic!("{why}"),
             _ => panic!("not done"),
         }
-        assert!(results.join("anh_the.pdf").is_file());
+        assert!(!results.join("anh_the.pdf").exists(), "no PDF any more");
         assert_eq!(ended.docs.len(), 1);
         assert!(ended.docs[0].path.is_none());
     }
@@ -887,5 +984,32 @@ mod tests {
         );
         assert!(!app.shell.quick.running());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Xếp căn cước lên A4" run as the window runs it, on the photos of
+    /// `IAI_CARD_FOLDER` (needs the OCR model, or the network to fetch it).
+    #[cfg(feature = "pro")]
+    #[test]
+    #[ignore = "probe: needs IAI_CARD_FOLDER"]
+    fn probe_quick_id_cards() {
+        let Some(dir) = std::env::var_os("IAI_CARD_FOLDER") else {
+            return;
+        };
+        let folder = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(folder.join(RESULTS));
+        let job = Job {
+            task: QuickTask::IdCards,
+            name: "xep-can-cuoc-thu-muc".to_string(),
+            recipe: Some(id_card_recipe()),
+            params: json!({"vao": folder.display().to_string(), "ban": 1}),
+            read: folder.clone(),
+            write: folder.join(RESULTS),
+        };
+        let ended = work(job, &AtomicBool::new(false), &|line| println!("{line}"));
+        match ended.stage {
+            Stage::Done(line) | Stage::Failed(line) => println!("{line}"),
+            _ => println!("stopped"),
+        }
+        println!("{} tab(s)", ended.docs.len());
     }
 }

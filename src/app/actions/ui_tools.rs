@@ -229,7 +229,11 @@ impl App {
             self.edit.selection_ctx_menu_pos = None;
         }
 
-        if actions.tool.crop_cancel {
+        #[cfg(feature = "pro")]
+        let card_left = actions.tool.crop_cancel && self.card_edit_cancel();
+        #[cfg(not(feature = "pro"))]
+        let card_left = false;
+        if actions.tool.crop_cancel && !card_left {
             self.edit.tools.active_on_cancel();
             self.update_crop_preview();
             if let Some(w) = &self.win.window {

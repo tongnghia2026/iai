@@ -3133,6 +3133,57 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
         ui.ctx().request_repaint();
     }
     row_resp.context_menu(|ui| {
+        let card = data.layers.layer_card.get(idx).copied().unwrap_or(0);
+        // A print of an ID photo sheet: worked on in a tab of its own.
+        if card == 3 {
+            if ui.button("Sửa ảnh thẻ này…").clicked() {
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "print.card_source",
+                    serde_json::json!({}),
+                );
+                ui.close();
+            }
+            if ui.button("Làm lại từ ảnh chụp gốc…").clicked() {
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "print.card_source",
+                    serde_json::json!({"fromPortrait": true}),
+                );
+                ui.close();
+            }
+            ui.separator();
+        }
+        // A card of an ID card sheet: cut again from its photo.
+        if card == 1 || card == 2 {
+            if ui.button("Sửa góc thẻ căn cước…").clicked() {
+                actions.run_on_layer(
+                    &data.layers.layer_ids,
+                    idx,
+                    "print.card_source",
+                    serde_json::json!({}),
+                );
+                ui.close();
+            }
+            for (label, turn) in [
+                ("Xoay thẻ 90° phải", 90),
+                ("Xoay thẻ 90° trái", 270),
+                ("Xoay thẻ 180°", 180),
+            ] {
+                if ui.button(label).clicked() {
+                    actions.run_on_layer(
+                        &data.layers.layer_ids,
+                        idx,
+                        "print.card_fix",
+                        serde_json::json!({"turnBy": turn}),
+                    );
+                    ui.close();
+                }
+            }
+            ui.separator();
+        }
         if ui.button("Duplicate").clicked() {
             actions.run_on_layer(
                 &data.layers.layer_ids,

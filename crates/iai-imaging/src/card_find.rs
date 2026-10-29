@@ -6,6 +6,9 @@
 
 use rayon::prelude::*;
 
+mod print;
+pub use print::{CardPrint, PrintFound, find_by_print, upright};
+
 /// The long side of an ID card over its short side (85.6 × 53.98 mm).
 pub const ID_CARD_ASPECT: f32 = 85.6 / 53.98;
 
@@ -33,7 +36,30 @@ const LEADING: usize = 16;
 /// is `aspect` times its short side; none when nothing card-like is there.
 pub fn find_card(rgba: &[u8], width: u32, height: u32, aspect: f32) -> Option<Found> {
     let full = Photo::new(rgba, width, height)?;
-    let small = Small::of(&full)?;
+    let (score, corners) = choose(&fitted(&full, aspect)?)?;
+    (score >= 0.08).then(|| Found {
+        corners: order(corners),
+        score: score.clamp(0.0, 1.0),
+    })
+}
+
+/// Of `fitted` (the most card-like first), the card: the first, or a card
+/// in a clear sleeve. The sleeve's rim is as clear and of much the same
+/// shape; the card is the one a little way in from it, on two sides at
+/// least (where the card lies against the sleeve, the two share a side).
+fn choose(fitted: &[(f32, [(f32, f32); 4])]) -> Option<(f32, [(f32, f32); 4])> {
+    let &(score, outer) = fitted.first()?;
+    let inner = fitted
+        .iter()
+        .skip(1)
+        .find(|(s, c)| *s >= score * 0.75 && sleeved(&outer, c));
+    Some(*inner.unwrap_or(&(score, outer)))
+}
+
+/// The leading few quadrilaterals the edges of `full` make, fitted to it,
+/// the most card-like first, with how card-like.
+fn fitted(full: &Photo<'_>, aspect: f32) -> Option<Vec<(f32, [(f32, f32); 4])>> {
+    let small = Small::of(full)?;
     let edges = Edges::of(&small);
     let quads = scored_quads(&edges, &edges.lines(), aspect);
     let scale = small.scale;
@@ -55,24 +81,12 @@ pub fn find_card(rgba: &[u8], width: u32, height: u32, aspect: f32) -> Option<Fo
         let rough = q
             .corners
             .map(|(x, y)| ((x + 0.5) * scale - 0.5, (y + 0.5) * scale - 0.5));
-        let corners = fit_sides(&full, rough, reach);
+        let corners = fit_sides(full, rough, reach);
         let shape = (seen_aspect(&corners, centre) / aspect).ln() / 0.06;
         fitted.push((q.base * (-shape * shape).exp(), corners));
     }
     fitted.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let &(score, outer) = fitted.first()?;
-    // A card in a clear sleeve: the sleeve's rim is as clear and of much the
-    // same shape; the card is the one a little way in from it, on two sides
-    // at least (where the card lies against the sleeve, the two share a side).
-    let inner = fitted
-        .iter()
-        .skip(1)
-        .find(|(s, c)| *s >= score * 0.75 && sleeved(&outer, c));
-    let (score, corners) = *inner.unwrap_or(&(score, outer));
-    (score >= 0.08).then(|| Found {
-        corners: order(corners),
-        score: score.clamp(0.0, 1.0),
-    })
+    Some(fitted)
 }
 
 /// Whether `inner` lies in `outer` as a card in its sleeve: each side of it

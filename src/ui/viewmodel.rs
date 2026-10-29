@@ -116,6 +116,16 @@ pub struct LayerViewModel {
     pub layer_types: std::sync::Arc<Vec<String>>,
     /// Made by Chỉnh chân dung: a double-click reopens it there.
     pub layer_is_portrait: std::sync::Arc<Vec<bool>>,
+    /// A card cut from a photo (Xếp căn cước): 0 not one, 1 a card, 2 a card
+    /// worth a look, 3 a print of an ID photo sheet. Its right-click menu
+    /// fixes it.
+    pub layer_card: std::sync::Arc<Vec<u8>>,
+    /// The tab in front holds an ID photo print being worked on: its
+    /// right-click menu puts it back into its sheet.
+    pub photo_fix_tab: bool,
+    /// Where the cards worth a look lie on the page shown (x, y, w, h), for
+    /// the red frame drawn round them on screen.
+    pub doubtful_cards: std::sync::Arc<Vec<[f32; 4]>>,
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
@@ -919,13 +929,16 @@ pub enum QuickTask {
     /// Every portrait in the folder an ID photo, so many each, on photo
     /// paper (Pro).
     IdPhotos,
+    /// Every ID card photo in the folder laid flat on A4, each front beside
+    /// its back by the number both carry, in one tab (Pro).
+    IdCards,
     /// A saved skill that runs on a folder (its name).
     Skill(String),
 }
 
 impl QuickTask {
     pub fn pro(&self) -> bool {
-        matches!(self, QuickTask::IdPhotos)
+        matches!(self, QuickTask::IdPhotos | QuickTask::IdCards)
     }
 }
 
@@ -1232,6 +1245,9 @@ impl Default for UiData {
                 layer_mask_linked: std::sync::Arc::new(vec![true]),
                 layer_types: std::sync::Arc::new(vec!["Raster".to_string()]),
                 layer_is_portrait: std::sync::Arc::new(vec![false]),
+                layer_card: std::sync::Arc::new(vec![0]),
+                photo_fix_tab: false,
+                doubtful_cards: std::sync::Arc::new(Vec::new()),
                 layer_is_background: std::sync::Arc::new(vec![true]),
                 layer_lock_alpha: std::sync::Arc::new(vec![false]),
                 layer_selected: std::sync::Arc::new(vec![true]),

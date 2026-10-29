@@ -83,6 +83,9 @@ pub enum FileDialogResult {
     PickedFolder(PathBuf),
     /// A folder of photos chosen in "Xếp ảnh in", to lay out on print sheets.
     PickedPrintFolder(PathBuf),
+    /// The folder of ID card photos for "Xếp căn cước từ thư mục…".
+    #[cfg(feature = "pro")]
+    PickedCardFolder(PathBuf),
     /// The folder of photos an errand ("Nhờ AI làm") is about.
     PickedErrandFolder(PathBuf),
     /// A sponsor's logo chosen to send to the author.

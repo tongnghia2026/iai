@@ -1007,6 +1007,8 @@ pub struct UiDataCache {
     pub layer_types: std::sync::Arc<Vec<String>>,
     /// Made by Chỉnh chân dung (double-click reopens it).
     pub layer_is_portrait: std::sync::Arc<Vec<bool>>,
+    /// Cut from a photo by Xếp căn cước: 0 no, 1 yes, 2 worth a look.
+    pub layer_card: std::sync::Arc<Vec<u8>>,
     pub layer_is_background: std::sync::Arc<Vec<bool>>,
     pub layer_lock_alpha: std::sync::Arc<Vec<bool>>,
     pub layer_selected: std::sync::Arc<Vec<bool>>,
@@ -1633,6 +1635,8 @@ impl App {
                 scan_preview: None,
                 #[cfg(feature = "pro")]
                 portrait: None,
+                #[cfg(feature = "pro")]
+                card_edit: None,
                 #[cfg(feature = "pro")]
                 portrait_error: None,
                 #[cfg(feature = "pro")]

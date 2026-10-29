@@ -733,6 +733,17 @@ impl App {
                     .map(|l| cfg!(feature = "pro") && l.portrait.is_some())
                     .collect(),
             );
+            // Likewise a card of an ID card sheet.
+            self.shell.ui_data_cache.layer_card = std::sync::Arc::new(
+                layers
+                    .iter()
+                    .map(|l| match &l.cut {
+                        Some(c) if cfg!(feature = "pro") && c.kind == "id-photo" => 3,
+                        Some(c) if cfg!(feature = "pro") => 1 + u8::from(c.doubtful),
+                        _ => 0,
+                    })
+                    .collect(),
+            );
             self.shell.ui_data_cache.layer_is_background =
                 std::sync::Arc::new(layers.iter().map(|l| l.is_background).collect());
             self.shell.ui_data_cache.layer_lock_alpha =
@@ -1118,6 +1129,34 @@ impl App {
             layer_mask_linked: self.shell.ui_data_cache.layer_mask_linked.clone(),
             layer_types: self.shell.ui_data_cache.layer_types.clone(),
             layer_is_portrait: self.shell.ui_data_cache.layer_is_portrait.clone(),
+            layer_card: self.shell.ui_data_cache.layer_card.clone(),
+            #[cfg(feature = "pro")]
+            photo_fix_tab: self.photo_fix_in_front(),
+            #[cfg(not(feature = "pro"))]
+            photo_fix_tab: false,
+            // Read every frame: a card dragged with Move takes its frame along.
+            doubtful_cards: std::sync::Arc::new(
+                self.docs
+                    .active()
+                    .canvas
+                    .layer_stack
+                    .layers
+                    .iter()
+                    .filter(|l| {
+                        cfg!(feature = "pro")
+                            && l.visible
+                            && l.cut.as_ref().is_some_and(|c| c.doubtful)
+                    })
+                    .map(|l| {
+                        [
+                            l.offset.0 as f32,
+                            l.offset.1 as f32,
+                            l.width as f32,
+                            l.height as f32,
+                        ]
+                    })
+                    .collect(),
+            ),
             layer_is_background: self.shell.ui_data_cache.layer_is_background.clone(),
             layer_lock_alpha: self.shell.ui_data_cache.layer_lock_alpha.clone(),
             layer_selected: self.shell.ui_data_cache.layer_selected.clone(),

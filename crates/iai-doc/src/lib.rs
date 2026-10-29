@@ -8,6 +8,7 @@
 
 pub mod channels;
 pub mod connector;
+pub mod cut_source;
 pub mod layer;
 pub mod layer_clip;
 pub mod model;

@@ -2,6 +2,14 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+29/10/2026
+- Xếp căn cước lên A4: thẻ được nhận ra nhờ chữ in và hoa văn trên chính thẻ (quốc huy, dòng "Căn cước", chip, con dấu…) chứ không chỉ nhờ mép thẻ, nên thẻ đặt trên khăn kẻ sọc, trong bao nhựa, cầm trên tay hay đã cắt sát vẫn cắt đúng, và thẻ chụp ngược hay xoay ngang tự quay về đúng chiều.
+- Gói Pro: ⚡ Việc nhanh ▸ «Xếp căn cước lên A4 (tự ghép mặt trước – sau)» (hoặc File ▸ Xếp căn cước từ thư mục…) — chọn thư mục ảnh căn cước của khách, app tự tìm thẻ, đọc số căn cước để ghép mặt trước với mặt sau của cùng một người, rồi xếp tất cả vào một tab duy nhất, bao nhiêu trang cũng được. Không cần AI online; lần đầu dùng app tải một gói đọc chữ nhỏ (khoảng 11 MB).
+- Thẻ nào máy chưa chắc có viền đỏ trên màn hình (không in ra, chạy theo thẻ khi kéo, tạm ẩn khi mở cửa sổ In) và tên lớp có chữ «cần xem». Bấm chuột phải vào bất kỳ thẻ nào để «Sửa góc thẻ căn cước…»: app mở đúng ảnh gốc của thẻ đó với khung đặt sẵn, kéo góc rồi Enter là thẻ được thay ngay tại chỗ trên trang. Có cả «Xoay thẻ 90° phải / trái», «Xoay thẻ 180°» (thẻ bị cắt dọc, méo thì xoay 90° là ra đúng hình) và «Tới thẻ cần xem tiếp theo»; menu hiện ngay chỗ bấm chuột phải trên trang.
+- Ảnh thẻ cho nhiều người (⚡ Việc nhanh): không tự xuất PDF và không tạo thư mục kết quả nữa, tờ in mở ở tab mới. Tấm nào chưa ưng: chuột phải ▸ «Sửa ảnh thẻ này…» mở đúng ảnh đã làm đẹp để chỉnh tiếp (hoặc «Làm lại từ ảnh chụp gốc…»); bấm Áp dụng (hoặc chuột phải ▸ «Xong — thay vào tờ in») là mọi tấm của người đó trên tờ được thay và app quay về tờ in.
+- Xếp căn cước trong Việc nhanh: mỗi người một bản (muốn nhiều bản thì nhân bản hoặc in nhiều lần), không tạo thư mục kết quả.
+- Tài liệu nhiều trang nhẹ hơn hẳn: trang không xem không còn chiếm bộ nhớ cho ảnh ghép của nó.
+
 28/10/2026
 - Cắt ảnh (Crop) ra cỡ in trên file nhiều layer nhanh hơn nhiều và không còn làm đứng hình: trong lúc cắt khung cắt vẫn hiện, bấm Esc để hủy. Đổi cỡ ảnh (Image Size) cũng chạy ngầm như vậy.
 - Đổi cỡ ảnh (Image Size) giữ đường vẽ, hình và chữ sắc nét; trước đây chúng mờ đi như ảnh và sửa lại thì nhảy về cỡ cũ.

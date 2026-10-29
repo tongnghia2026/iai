@@ -11,6 +11,7 @@ const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(40, 160, 70);
 const FAIL_RED: egui::Color32 = egui::Color32::from_rgb(200, 60, 60);
 pub(crate) const QUICK_SCAN: &str = "Làm sạch ảnh chụp giấy tờ";
 pub(crate) const QUICK_IDS: &str = "Ảnh thẻ cho nhiều người";
+pub(crate) const QUICK_CARDS: &str = "Xếp căn cước lên A4 (tự ghép mặt trước – sau)";
 
 fn form_id() -> egui::Id {
     egui::Id::new("quick_form")
@@ -71,7 +72,7 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
     }
     let offered = |task: &QuickTask| match task {
         QuickTask::ScanCleanup => true,
-        QuickTask::IdPhotos => cfg!(feature = "pro"),
+        QuickTask::IdPhotos | QuickTask::IdCards => cfg!(feature = "pro"),
         QuickTask::Skill(name) => view.skills.iter().any(|s| &s.name == name),
     };
     if !offered(&form.task) {
@@ -135,6 +136,14 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                     };
                     ui.add_enabled_ui(view.pro, |ui| {
                         ui.radio_value(&mut form.task, QuickTask::IdPhotos, text)
+                    });
+                    let text = if view.pro {
+                        QUICK_CARDS.to_string()
+                    } else {
+                        format!("{QUICK_CARDS} (Gói Pro)")
+                    };
+                    ui.add_enabled_ui(view.pro, |ui| {
+                        ui.radio_value(&mut form.task, QuickTask::IdCards, text)
                     });
                 }
                 if !view.skills.is_empty() {
@@ -215,6 +224,18 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                             ui.label("tấm");
                         });
                     }
+                    QuickTask::IdCards => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Mọi ảnh căn cước trong thư mục: máy đọc số căn cước để ghép mặt \
+                                 trước với mặt sau của cùng người, xếp tất cả vào một tab, mỗi \
+                                 người một bản. Thẻ có viền đỏ là thẻ nên xem lại: bấm chuột phải \
+                                 lên thẻ để sửa.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
                     QuickTask::Skill(name) => {
                         if let Some(s) = view.skills.iter().find(|s| &s.name == name)
                             && !s.description.trim().is_empty()
@@ -225,11 +246,13 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                     }
                 }
                 ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Kết quả lưu vào thư mục iAi_ket_qua trong thư mục ảnh.")
-                        .small()
-                        .weak(),
-                );
+                let note = match form.task {
+                    QuickTask::ScanCleanup | QuickTask::Skill(_) => {
+                        "Kết quả lưu vào thư mục iAi_ket_qua trong thư mục ảnh."
+                    }
+                    _ => "Kết quả mở ở tab mới; soát xong thì in thẳng hoặc xuất PDF.",
+                };
+                ui.label(egui::RichText::new(note).small().weak());
                 ui.add_space(6.0);
                 let ready = !view.folder.is_empty() && (!form.task.pro() || view.pro);
                 let go = egui::Button::new(

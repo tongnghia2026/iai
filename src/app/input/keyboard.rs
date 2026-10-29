@@ -845,6 +845,10 @@ impl App {
                     self.edit.tools.active_id(),
                     ToolId::Crop | ToolId::PerspectiveCrop
                 ) {
+                    #[cfg(feature = "pro")]
+                    if self.card_edit_cancel() {
+                        return;
+                    }
                     self.cancel_crop_job();
                     self.edit.tools.active_on_cancel();
                     self.update_crop_preview();

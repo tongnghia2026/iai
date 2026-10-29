@@ -1024,6 +1024,9 @@ pub struct Layer {
     /// What a "Chân dung" layer was made with, so Chỉnh chân dung can reopen
     /// it; `None` for every other layer.
     pub portrait: Option<std::sync::Arc<crate::portrait_recipe::PortraitRecipe>>,
+    /// The photo and corners a piece laid flat into this layer was cut with
+    /// (a card on a print sheet), so it can be cut again; `None` otherwise.
+    pub cut: Option<std::sync::Arc<crate::cut_source::CutSource>>,
 }
 
 impl Layer {
@@ -1073,6 +1076,7 @@ impl Layer {
             expanded: true,
             connector: None,
             portrait: None,
+            cut: None,
         }
     }
 
@@ -1109,6 +1113,7 @@ impl Layer {
             expanded: true,
             connector: None,
             portrait: None,
+            cut: None,
         }
     }
 
@@ -1139,6 +1144,7 @@ impl Layer {
             expanded: true,
             connector: None,
             portrait: None,
+            cut: None,
         }
     }
 
@@ -1201,6 +1207,8 @@ impl Layer {
             connector: self.connector,
             // A duplicated "Chân dung" layer reopens from the same photo.
             portrait: self.portrait.clone(),
+            // A duplicated card is cut from the same photo.
+            cut: self.cut.clone(),
         }
     }
 

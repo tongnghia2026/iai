@@ -130,12 +130,22 @@ impl App {
     /// is: the same change, one undo step, what it says on the status line.
     pub(super) fn handle_command_actions(&mut self, actions: &mut UiActions) {
         for call in std::mem::take(&mut actions.commands) {
+            #[cfg(feature = "pro")]
+            if self.card_window_step(&call) {
+                continue;
+            }
             let call = if crate::app::engine::PAGE_JOBS.contains(&call.command.as_str()) {
                 call.in_background()
             } else {
                 call
             };
-            let _ = self.execute_command(call);
+            #[cfg(feature = "pro")]
+            let command = call.command.clone();
+            let reply = self.execute_command(call);
+            #[cfg(feature = "pro")]
+            self.card_window_after(&command, &reply.ok());
+            #[cfg(not(feature = "pro"))]
+            let _ = reply;
         }
     }
 

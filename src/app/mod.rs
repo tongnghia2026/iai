@@ -3,6 +3,9 @@ pub mod agent_link;
 pub mod arrow_ops;
 pub mod autosave;
 pub mod background_jobs;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
+pub mod card_edit;
 pub mod commands;
 mod cursor;
 pub mod develop_shell;

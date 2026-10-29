@@ -1137,7 +1137,11 @@ impl Document {
             return; // the target slot is unexpectedly empty; leave state untouched
         };
         let old = self.active_artboard;
-        let current = std::mem::replace(&mut self.canvas, target);
+        let mut current = std::mem::replace(&mut self.canvas, target);
+        // A page put away keeps its layers, not its flat picture (an A4 at
+        // 300 dpi is 35 MB): a document of hundreds of pages then costs what
+        // their layers do, and the picture is made again when it is shown.
+        current.flatten_full();
         self.pages[old] = Some(current);
         self.active_artboard = index;
     }
