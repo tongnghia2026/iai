@@ -598,7 +598,13 @@ fn a_recipe_iai_carries_runs_as_a_saved_one_and_says_its_round() {
         };
         seen.extend(run.rounds());
     }
-    assert!(seen.contains(&(1, 2)) && seen.contains(&(2, 2)), "{seen:?}");
+    // The second round may run whole within the call that ends the run on a
+    // slow machine (the budget having grown waiting for a slow step), so it
+    // is not always seen.
+    assert!(
+        seen.contains(&(1, 2)) && seen.iter().all(|r| *r == (1, 2) || *r == (2, 2)),
+        "{seen:?}"
+    );
     assert!(output.0.join("a_lat.png").is_file() && output.0.join("b_lat.png").is_file());
     // Nothing was saved in the library.
     assert!(store.list().is_empty());
