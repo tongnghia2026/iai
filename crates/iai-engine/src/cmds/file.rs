@@ -878,8 +878,8 @@ static EXPORT: CommandMeta = CommandMeta {
     label_en: "Export Image",
     doc: "Write the shown page, flattened over its master page if it has one, to an image file \
           (.png, .jpg, .tif, .webp, .bmp), optionally made smaller and sharpened for the web; or \
-          a copy of it as .iai, with its layers. The document is left as it is. For PDF use \
-          `export.pdf`.",
+          a copy as .iai, with its layers (every page of a document of pages). The document is \
+          left as it is. For PDF use `export.pdf`.",
     effects: &[Effect::WriteFiles],
     featured: false,
 };
@@ -920,6 +920,12 @@ impl Command for ExportImage {
         let merged = (!is_iai)
             .then(|| d.page_render_canvas(d.active_artboard))
             .flatten();
+        // A .iai copy of a document of pages holds every page, as saving it
+        // does: a copy of the shown page alone loses the rest.
+        let pages = (is_iai && !d.pages.is_empty()).then(|| {
+            let pages: Vec<Canvas> = d.all_page_canvases().into_iter().map(detached).collect();
+            (pages, d.active_artboard, d.master_canvas().map(detached))
+        });
         let canvas = match merged {
             Some(canvas) => canvas,
             None => detached(&d.canvas),
@@ -948,12 +954,17 @@ impl Command for ExportImage {
                 if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
                     std::fs::create_dir_all(dir)?;
                 }
-                FormatRegistry::new()
-                    .export(&canvas, &path, &opts)
-                    .map_err(|e| {
-                        CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
-                            .vi(format!("Không xuất được {}: {e}", file_name(&path)))
-                    })?;
+                match &pages {
+                    Some((pages, active, master)) => {
+                        let refs: Vec<&Canvas> = pages.iter().collect();
+                        iai_formats::iai::write_artboard_doc(&path, &refs, *active, master.as_ref())
+                    }
+                    None => FormatRegistry::new().export(&canvas, &path, &opts),
+                }
+                .map_err(|e| {
+                    CmdError::new(ErrorCode::Io, format!("{}: {e}", path.display()))
+                        .vi(format!("Không xuất được {}: {e}", file_name(&path)))
+                })?;
                 let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 Ok(Box::new(move |s: &mut Session<'_>| {
                     s.notice(

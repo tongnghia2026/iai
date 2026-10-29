@@ -3,6 +3,11 @@
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
 29/10/2026
+- Xếp căn cước lên A4: mặt sau luôn nằm cạnh mặt trước của cùng người. Thẻ khách gửi hai lần chỉ xếp một lần (lấy bản gửi kèm mặt sau). Thẻ đã cắt sát mép sẵn, bản photo hay kiểu thẻ lạ vẫn nhận ra mặt trước / mặt sau nhờ đọc số trên thẻ; dòng chữ số cuối mặt sau bị mờ, dính nhau hay lệch ra ngoài ảnh vẫn đọc được. Trước khi xếp ra trang, app tự kiểm lại việc ghép một lượt.
+- Viền đỏ «cần xem» ít hơn: thẻ chỉ có một mặt (khách không gửi mặt kia) mà đọc được số thì không còn bị đánh dấu.
+- Xuất (Export) ra file .iai từ tài liệu nhiều trang: lưu đủ mọi trang, không chỉ trang đang mở.
+
+29/10/2026
 - Xếp căn cước lên A4: thẻ được nhận ra nhờ chữ in và hoa văn trên chính thẻ (quốc huy, dòng "Căn cước", chip, con dấu…) chứ không chỉ nhờ mép thẻ, nên thẻ đặt trên khăn kẻ sọc, trong bao nhựa, cầm trên tay hay đã cắt sát vẫn cắt đúng, và thẻ chụp ngược hay xoay ngang tự quay về đúng chiều.
 - Gói Pro: ⚡ Việc nhanh ▸ «Xếp căn cước lên A4 (tự ghép mặt trước – sau)» (hoặc File ▸ Xếp căn cước từ thư mục…) — chọn thư mục ảnh căn cước của khách, app tự tìm thẻ, đọc số căn cước để ghép mặt trước với mặt sau của cùng một người, rồi xếp tất cả vào một tab duy nhất, bao nhiêu trang cũng được. Không cần AI online; lần đầu dùng app tải một gói đọc chữ nhỏ (khoảng 11 MB).
 - Thẻ nào máy chưa chắc có viền đỏ trên màn hình (không in ra, chạy theo thẻ khi kéo, tạm ẩn khi mở cửa sổ In) và tên lớp có chữ «cần xem». Bấm chuột phải vào bất kỳ thẻ nào để «Sửa góc thẻ căn cước…»: app mở đúng ảnh gốc của thẻ đó với khung đặt sẵn, kéo góc rồi Enter là thẻ được thay ngay tại chỗ trên trang. Có cả «Xoay thẻ 90° phải / trái», «Xoay thẻ 180°» (thẻ bị cắt dọc, méo thì xoay 90° là ra đúng hình) và «Tới thẻ cần xem tiếp theo»; menu hiện ngay chỗ bấm chuột phải trên trang.

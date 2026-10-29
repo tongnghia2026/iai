@@ -354,10 +354,18 @@ fn done_line(task: &QuickTask, run: &Run) -> String {
                     .unwrap_or_default()
             };
             let mut line = format!(
-                "Xong: {} người trên {} trang A4 (tab mới).",
+                "Xong: {} người trên {} trang A4 (tab mới); {} người ghép đủ hai mặt theo số \
+                 căn cước.",
                 count("people").unwrap_or(0),
                 count("pages").unwrap_or(0),
+                count("byNumber").unwrap_or(0),
             );
+            let twice = names("twice").len();
+            if twice > 0 {
+                line.push_str(&format!(
+                    " {twice} ảnh chụp trùng thẻ đã có (gửi hai lần) — không xếp lại."
+                ));
+            }
             let look = names("unsure").len();
             if look > 0 {
                 line.push_str(&format!(

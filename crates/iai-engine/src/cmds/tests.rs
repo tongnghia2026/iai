@@ -1065,6 +1065,12 @@ fn a_document_is_saved_reopened_and_exported() {
     t.run("page.select", json!({"page": 0}));
     assert_eq!(t.mean(json!({"x": 0, "y": 0, "w": 50, "h": 40})), "#123456");
 
+    // A .iai copy of a document of pages keeps them all.
+    t.run("file.export", json!({"path": dir.path("copy.iai")}));
+    let copy = t.run("file.open", json!({"path": dir.path("copy.iai")}));
+    assert_eq!(copy["pages"], json!(2));
+    t.run("doc.close", json!({"doc": copy["doc"]}));
+
     t.run("file.export", json!({"path": dir.path("page.png")}));
     let png = image::open(dir.path("page.png")).unwrap().to_rgba8();
     assert_eq!(png.dimensions(), (50, 40));
