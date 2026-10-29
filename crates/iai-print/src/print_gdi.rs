@@ -769,6 +769,30 @@ pub fn print_bands(
     )
 }
 
+/// No printer to ask away from Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn printer_state(_printer: &str) -> Option<PrinterState> {
+    None
+}
+
+/// Printing straight to a printer is Windows's; elsewhere it says so.
+#[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
+pub fn print_bands(
+    _printer: &str,
+    _settings: Option<&PrinterSettings>,
+    _doc_name: &str,
+    _img_w: u32,
+    _img_h: u32,
+    _dpi: f32,
+    _layout: &PrintLayout,
+    _copies: u32,
+    _progress: &PrintProgress,
+    _next_band: impl FnMut(u32, u32) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    Err("in thẳng ra máy in chỉ có trên Windows".to_string())
+}
+
 /// [`print_bands`], with the device's output sent to the file `output` when
 /// one is named. That is what lets a test drive a real device context
 /// ("Microsoft Print to PDF") with no dialog and no paper.
