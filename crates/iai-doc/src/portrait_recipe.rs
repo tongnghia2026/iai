@@ -258,6 +258,13 @@ pub struct PortraitSettings {
     pub clothes_brightness: f32,
     #[serde(default)]
     pub clothes_even: f32,
+    /// "Màu áo" / "Phủ màu áo": the clothes recoloured toward a hue picked
+    /// on the strip (degrees), as far as the tint goes (0..100); 0 keeps
+    /// their own colour. Layers saved before read 0.
+    #[serde(default)]
+    pub clothes_hue: f32,
+    #[serde(default)]
+    pub clothes_tint: f32,
 }
 
 impl Default for PortraitSettings {
@@ -266,7 +273,7 @@ impl Default for PortraitSettings {
             smooth: 40.0,
             volume: 30.0,
             texture: 0.0,
-            ai_detail: 60.0,
+            ai_detail: 40.0,
             neck: 0.0,
             fix_cast: AUTO_FIX.cast,
             fix_warmth: 0.0,
@@ -320,9 +327,14 @@ impl Default for PortraitSettings {
             clothes_sharpen: 0.0,
             clothes_brightness: 0.0,
             clothes_even: 0.0,
+            clothes_hue: CLOTHES_HUE,
+            clothes_tint: 0.0,
         }
     }
 }
+
+/// Where "Màu áo" stands until moved: a navy blue.
+pub const CLOTHES_HUE: f32 = 220.0;
 
 pub const DEFAULT_LOOK_STRENGTH: f32 = 70.0;
 
@@ -337,7 +349,7 @@ pub struct AutoFix {
 
 pub const AUTO_FIX: AutoFix = AutoFix {
     cast: 100.0,
-    exposure: 80.0,
+    exposure: 20.0,
     haze: 60.0,
     even_light: 60.0,
 };
@@ -401,6 +413,8 @@ impl PortraitSettings {
         clothes_sharpen: 0.0,
         clothes_brightness: 0.0,
         clothes_even: 0.0,
+        clothes_hue: CLOTHES_HUE,
+        clothes_tint: 0.0,
     };
 
     /// The settings a layer was saved with. The one-sided "Giảm màu" sliders

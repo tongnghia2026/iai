@@ -2,6 +2,23 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+03/11/2026
+- Làm ảnh thẻ xong, layer «Chân dung» không còn bị tắt con mắt: trong lúc cửa sổ AI chỉnh tiếp, phần xem trước hiện ngay trên layer đó. Bật / tắt con mắt giữ đúng như mình bấm, và chỉnh bằng Ctrl+U, Levels… lên layer «Chân dung» thấy tác dụng ngay. Bấm «Áp dụng» khi chưa đổi thanh nào thì app báo «giữ nguyên».
+- Công cụ Move quét khung chọn như CorelDRAW: chỉ layer nằm trọn trong khung mới được chọn, nên quét lấy được các hình nhỏ nằm trên một layer lớn mà không dính layer lớn. Giữ Alt khi quét thì chạm vào là chọn. Giữ Shift khi quét để chọn thêm; Shift + bấm vào một layer để thêm nó vào, hoặc bỏ nó ra nếu đang chọn.
+- Nút Select Subject có vòng quay và chữ «Running…» trong lúc đang chọn chủ thể, không còn trông như đứng im.
+- Công cụ Move: bấm vào bất kỳ chỗ nào trong một hình vector (kể cả hình chỉ có viền, bên trong để trống) là chọn đúng hình đó và hiện khung để phóng to, thu nhỏ; bấm ra ngoài thì khung biến mất.
+- Cắt ảnh (Crop) ra ngoài phạm vi ảnh: đổi hai ô màu trên thanh công cụ (nút đổi, phím X, phím D hay chọn màu mới) thì phần nền ngoài ảnh đổi màu theo ngay.
+- Thanh công cụ bên trái nhận cú bấm ngay lúc nhấn chuột xuống, nên bấm giữ lâu một chút cũng chọn được công cụ, không phải bấm lại. Nút đổi màu và nút đặt lại màu đen trắng dễ bấm trúng hơn.
+- Biểu tượng công cụ Gradient đổi thành một ô tô chuyển màu như Photoshop, dễ nhận ra.
+- Xếp căn cước từ thư mục: ảnh chụp chung hai (hoặc nhiều) thẻ nay cắt đủ từng thẻ, không bỏ sót thẻ thứ hai. Xếp xong app tự kiểm lại lần cuối: mọi thẻ tìm được đều có trên trang, và báo số ảnh, số thẻ đã kiểm.
+- Xếp căn cước từ thư mục: thẻ màu nhạt nằm trên nền nhạt (mép thẻ mờ) và ảnh đã cắt sát mép thẻ không còn bị bỏ qua — app đọc số căn cước trên thẻ để nhận ra, rồi ghép đúng với mặt kia.
+- Xếp căn cước từ thư mục: mặt trước và mặt sau đọc ra số lệch vài chữ số (máy đọc nhầm) vẫn được ghép thành một người, có viền đỏ để soát, thay vì mỗi mặt đứng lẻ cách nhau mấy trang. Người đăng ký cùng lúc (số chỉ khác mấy số cuối) không bị ghép nhầm. Còn sót cả mặt trước lẻ lẫn mặt sau lẻ thì tất cả đều có viền đỏ, và app báo có bao nhiêu thẻ chỉ có một mặt. Thẻ đã đọc được số và ghép đúng cặp không còn viền đỏ thừa.
+- Xếp căn cước từ thư mục: xong việc, ảnh đã xếp được chuyển vào thư mục con «Đã xếp», ảnh không tìm thấy thẻ (mờ, không phải căn cước…) gom vào thư mục con «Bỏ qua» — chỉ cần mở «Bỏ qua» để làm tay, không phải dò trong cả rừng ảnh gốc. Chuột phải «Sửa góc thẻ» vẫn mở đúng ảnh ở chỗ mới.
+- Cửa sổ AI, chỉnh chân dung: «Chi tiết mặt (AI)» bắt đầu ở 40 và «Cân sáng» ở 20 (nhẹ tay hơn); «Đều sáng da» chuyển sang mục Da; mục Áo có thêm «Màu áo» và «Phủ màu áo» để đổi màu áo như đổi màu mắt.
+- Help ▸ Model AI…: xem từng tính năng AI cần model gì, máy đã có chưa («đã kiểm», «tự đặt», «thiếu»); gói Pro có nút «Tải» để app tự tải (file luôn được kiểm); bản miễn phí tự tìm file model rồi chép vào, «Cài model từ file…» hoặc kéo thả file .onnx / .zip vào cửa sổ iAi để cài. Model để trong thư mục «models» cạnh iai.exe, trong thư mục con nào, tên gì cũng được.
+- Gói Pro: app biết học và điền giấy tờ theo mẫu Word có sẵn (sơ yếu lý lịch, đơn xin việc, hợp đồng thuê trọ, tờ khai CT01) — phần lõi đã xong, cửa sổ để dùng sẽ có ở bản sau.
+- Phần nối với trợ lý AI (nút «Nhờ AI làm», mục Help ▸ «Cho AI điều khiển iAi», nối với Antigravity) từ nay chỉ có trong gói Pro; bản miễn phí không còn phần này. «Việc nhanh» vẫn có ở bản miễn phí như cũ.
+
 29/10/2026
 - Xếp căn cước lên A4: mặt sau luôn nằm cạnh mặt trước của cùng người. Thẻ khách gửi hai lần chỉ xếp một lần (lấy bản gửi kèm mặt sau). Thẻ đã cắt sát mép sẵn, bản photo hay kiểu thẻ lạ vẫn nhận ra mặt trước / mặt sau nhờ đọc số trên thẻ; dòng chữ số cuối mặt sau bị mờ, dính nhau hay lệch ra ngoài ảnh vẫn đọc được. Trước khi xếp ra trang, app tự kiểm lại việc ghép một lượt.
 - Viền đỏ «cần xem» ít hơn: thẻ chỉ có một mặt (khách không gửi mặt kia) mà đọc được số thì không còn bị đánh dấu.

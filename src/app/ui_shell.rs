@@ -112,13 +112,22 @@ pub struct UiShell {
     pub(in crate::app) print_folder: Option<crate::app::actions::impose::PrintFolder>,
     /// AI agents on this machine may run commands in the window (Help ▸
     /// "Cho AI điều khiển iAi"); off when `None`.
+    #[cfg(feature = "pro")]
     pub(in crate::app) agent_link: Option<crate::app::agent_link::AgentLink>,
     /// Why turning it on failed, for the dialog to show.
+    #[cfg(feature = "pro")]
     pub(in crate::app) agent_link_error: Option<String>,
     /// The skill library as the agent dialog shows it, and when it was read.
+    #[cfg(feature = "pro")]
     pub(in crate::app) agent_skills: Option<(std::time::Instant, Vec<crate::ui::SkillRow>)>,
     /// "Nhờ AI làm": errands for Gemini in Antigravity.
+    #[cfg(feature = "pro")]
     pub(in crate::app) errands: crate::app::errands::Errands,
+    /// The folder of the customer's photos chosen, for "Việc nhanh" (and the
+    /// Pro pack's "Nhờ AI làm").
+    pub(in crate::app) photo_folder: Option<std::path::PathBuf>,
+    /// The "Model AI" window: its rows, and the fetch or install under way.
+    pub(in crate::app) models: crate::app::models_ops::ModelsWindow,
     /// "Việc nhanh": jobs iAi does on a folder by itself.
     pub(in crate::app) quick: crate::app::quick_tasks::QuickTasks,
     /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.

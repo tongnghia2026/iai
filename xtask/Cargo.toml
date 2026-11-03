@@ -2,12 +2,15 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2024"
-description = "Checks of the iAi workspace: the layer order of its crates and its lint budget."
+description = "Checks of the iAi workspace (the layer order of its crates, its lint budget) and the model packs."
 license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
+hmac-sha256 = "1.1.14"
 serde_json = "1"
+# Stored zips only: the model packs (`bundle-models`).
+zip = { version = "2", default-features = false }
 
 [lints]
 workspace = true

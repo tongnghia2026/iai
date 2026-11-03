@@ -189,28 +189,32 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     }
 
                     // "Nhờ AI làm": a job for Gemini in Antigravity, done on
-                    // this window; while it runs, the button says so.
-                    ui.add_space(6.0);
-                    let errand = &data.chrome.errand;
-                    let running = errand.run.as_ref().is_some_and(|r| r.running);
-                    let label = if running {
-                        format!("{}  AI đang làm…", ph::SPARKLE)
-                    } else {
-                        format!("{}  {}", ph::SPARKLE, super::dialogs::ERRAND_TITLE)
-                    };
-                    if ui
-                        .add(egui::Button::new(label).selected(errand.open))
-                        .on_hover_text("Giao việc cho Gemini (Antigravity) làm ngay trên iAi")
-                        .clicked()
+                    // this window; while it runs, the button says so. The AI
+                    // gateway is the Pro pack's: the free build has no button.
+                    #[cfg(feature = "pro")]
                     {
-                        actions.chrome.errand = Some(if errand.open {
-                            crate::ui::ErrandIntent::Close
+                        ui.add_space(6.0);
+                        let errand = &data.chrome.errand;
+                        let running = errand.run.as_ref().is_some_and(|r| r.running);
+                        let label = if running {
+                            format!("{}  AI đang làm…", ph::SPARKLE)
                         } else {
-                            crate::ui::ErrandIntent::Open
-                        });
-                    }
-                    if running {
-                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                            format!("{}  {}", ph::SPARKLE, super::dialogs::ERRAND_TITLE)
+                        };
+                        if ui
+                            .add(egui::Button::new(label).selected(errand.open))
+                            .on_hover_text("Giao việc cho Gemini (Antigravity) làm ngay trên iAi")
+                            .clicked()
+                        {
+                            actions.chrome.errand = Some(if errand.open {
+                                crate::ui::ErrandIntent::Close
+                            } else {
+                                crate::ui::ErrandIntent::Open
+                            });
+                        }
+                        if running {
+                            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                        }
                     }
                 });
                 if data.chrome.is_tool_modal
@@ -1905,6 +1909,14 @@ fn help_menu(
         actions.chrome.mark_problem = true;
         ui.close();
     }
+    if ui
+        .button("Model AI…")
+        .on_hover_text("Model AI của từng tính năng trên máy này: có chưa, tải, cài từ file")
+        .clicked()
+    {
+        actions.chrome.open_support = Some(crate::ui::SupportDialog::Models);
+        ui.close();
+    }
     if ui.button("Mở thư mục nhật ký lỗi").clicked() {
         crate::diag::open_folder();
         ui.close();
@@ -1915,16 +1927,20 @@ fn help_menu(
         ui.close();
     }
     ui.separator();
-    let agent = if data.chrome.agent.on {
-        format!("{} (đang bật)…", super::dialogs::AGENT_TITLE)
-    } else {
-        format!("{}…", super::dialogs::AGENT_TITLE)
-    };
-    if ui.button(agent).clicked() {
-        actions.chrome.open_support = Some(crate::ui::SupportDialog::Agent);
-        ui.close();
+    // The AI gateway is the Pro pack's: the free build has no entry.
+    #[cfg(feature = "pro")]
+    {
+        let agent = if data.chrome.agent.on {
+            format!("{} (đang bật)…", super::dialogs::AGENT_TITLE)
+        } else {
+            format!("{}…", super::dialogs::AGENT_TITLE)
+        };
+        if ui.button(agent).clicked() {
+            actions.chrome.open_support = Some(crate::ui::SupportDialog::Agent);
+            ui.close();
+        }
+        ui.separator();
     }
-    ui.separator();
     if ui.button("Kiểm tra cập nhật").clicked() {
         actions.chrome.update_check = true;
         ui.close();
@@ -2355,6 +2371,13 @@ mod tests {
         let row = bar.labels();
         assert!(row.iter().any(|label| label == "Help"), "{row:?}");
         assert!(!row.iter().any(|label| label == "AI"), "{row:?}");
+        // The AI gateway is the Pro pack's: no button for it, beside the
+        // one of "Việc nhanh" (which needs no AI).
+        assert!(
+            row.iter().any(|label| label.contains("Việc nhanh")),
+            "{row:?}"
+        );
+        assert!(!row.iter().any(|label| label.contains("Nhờ AI")), "{row:?}");
         bar.click("Help");
         let help = bar.labels();
         assert!(
@@ -2362,6 +2385,32 @@ mod tests {
             "{help:?}"
         );
         assert!(!help.iter().any(|label| label.contains("Pro")), "{help:?}");
+        assert!(
+            !help.iter().any(|label| label.contains("Cho AI điều khiển")),
+            "{help:?}"
+        );
+    }
+
+    /// The AI gateway's ways in: "Nhờ AI làm" beside "Việc nhanh", and
+    /// Help ▸ "Cho AI điều khiển iAi…", which opens its dialog.
+    #[cfg(feature = "pro")]
+    #[test]
+    fn the_pro_build_shows_the_ways_into_the_ai_gateway() {
+        use crate::ui::SupportDialog;
+        let mut data = UiData::default();
+        data.doc.has_doc = true;
+        let bar = Bar::new(&data);
+        let row = bar.labels();
+        let errand = crate::ui::dialogs::ERRAND_TITLE;
+        assert!(row.iter().any(|label| label.contains(errand)), "{row:?}");
+        bar.click("Help");
+        let entry = format!("{}…", crate::ui::dialogs::AGENT_TITLE);
+        let help = bar.labels();
+        assert!(help.contains(&entry), "{help:?}");
+        assert_eq!(
+            bar.click(&entry).chrome.open_support,
+            Some(SupportDialog::Agent)
+        );
     }
 
     /// Opt-in: IAI_UI_SNAPSHOT is a folder; the title bar is drawn there with

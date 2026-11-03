@@ -86,10 +86,13 @@ pub enum FileDialogResult {
     /// The folder of ID card photos for "Xếp căn cước từ thư mục…".
     #[cfg(feature = "pro")]
     PickedCardFolder(PathBuf),
-    /// The folder of photos an errand ("Nhờ AI làm") is about.
-    PickedErrandFolder(PathBuf),
+    /// The folder of the customer's photos a job ("Việc nhanh", the Pro
+    /// pack's "Nhờ AI làm") is about.
+    PickedPhotoFolder(PathBuf),
     /// A sponsor's logo chosen to send to the author.
     PickedSponsorLogo(PathBuf),
+    /// A model file (or a `.zip` of them) to install ("Model AI").
+    PickedModelFile(PathBuf),
     /// Files selected for insertion into an existing multi-page PDF document.
     InsertPdfPages {
         document_id: crate::core::document::DocumentId,
@@ -218,6 +221,17 @@ pub fn dialog_pick_logo(parent: Option<DialogParent>) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new()
         .add_filter("Ảnh logo (PNG, JPG)", &["png", "jpg", "jpeg"])
         .set_title("Chọn logo");
+    if let Some(p) = parent {
+        dialog = dialog.set_parent(&p);
+    }
+    dialog.pick_file()
+}
+
+/// Pick a model file, or a `.zip` of models ("Model AI"). CALL ON A WORKER THREAD.
+pub fn dialog_pick_model(parent: Option<DialogParent>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("Model AI (ONNX, ZIP)", &["onnx", "zip"])
+        .set_title("Chọn file model AI");
     if let Some(p) = parent {
         dialog = dialog.set_parent(&p);
     }

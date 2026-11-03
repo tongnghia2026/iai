@@ -1645,10 +1645,16 @@ impl App {
                 id_photo: Default::default(),
                 #[cfg(feature = "pro")]
                 print_folder: None,
+                #[cfg(feature = "pro")]
                 agent_link: None,
+                #[cfg(feature = "pro")]
                 agent_link_error: None,
+                #[cfg(feature = "pro")]
                 agent_skills: None,
+                #[cfg(feature = "pro")]
                 errands: Default::default(),
+                photo_folder: None,
+                models: Default::default(),
                 quick: Default::default(),
                 crop_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
                     crate::core::presets::SizePresetList::Crop,
@@ -1683,6 +1689,10 @@ impl App {
         self.note_build_started();
         crate::update::check_at_startup();
         crate::author_news::load_at_startup();
+        // The author's list of models, and a first look through the model
+        // folders, both in the background.
+        iai_ai::model_store::list::refresh_in_background();
+        iai_ai::model_store::rescan();
     }
 
     /// Guide that should appear "active" (highlighted + resize cursor): the one

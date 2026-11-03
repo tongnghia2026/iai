@@ -670,13 +670,7 @@ impl App {
             self.path_style_commit();
         }
         if actions.tool.swap_colors {
-            std::mem::swap(
-                &mut self.edit.tools.brush_mut().settings.color,
-                &mut self.edit.bg_color,
-            );
-            self.edit.fg_color = self.edit.tools.brush().settings.color;
-            self.edit.tools.fill_mut().color = self.edit.tools.brush().settings.color;
-            self.edit.tools.eraser_mut().bg_color = self.edit.bg_color;
+            self.swap_paint_colors();
         }
         if let Some(s) = actions.tool.set_clone_size.take() {
             self.edit.tools.clone_like_mut().size = s.clamp(1.0, 5000.0);

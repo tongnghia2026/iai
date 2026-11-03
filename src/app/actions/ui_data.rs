@@ -1679,7 +1679,10 @@ impl App {
             ellipse_sel_preview: self.edit.tools.selection_ellipse().preview_ellipse(),
             selection_ctx_menu_pos: self.edit.selection_ctx_menu_pos,
             has_selection: self.docs.active().canvas.selection.active,
-            select_subject_busy: self.jobs.select_subject.is_busy(),
+            // The model being fetched, or the command running on this tab
+            // (02/11: the button stayed as it was the seconds it ran).
+            select_subject_busy: self.jobs.select_subject.is_busy()
+                || self.shown_tab_runs("select.subject"),
             select_subject_status_msg: self.jobs.select_subject.status_text(),
             show_refine_panel: self.edit.show_refine_panel,
             refine_params: self.refine_params(),
@@ -2093,9 +2096,14 @@ impl App {
                 .is_some_and(|until| std::time::Instant::now() < until),
             update: self.update_view(),
             support: self.shell.ui.support_dialog,
+            models: (self.shell.ui.support_dialog == Some(crate::ui::SupportDialog::Models))
+                .then(|| self.shell.models.view()),
+            models_busy: self.shell.models.job.is_some(),
             news: crate::author_news::current(),
             mail: self.mail_view(),
+            #[cfg(feature = "pro")]
             agent: self.agent_view(),
+            #[cfg(feature = "pro")]
             errand: self.errand_view(),
             quick: self.quick_view(),
             #[cfg(feature = "pro")]

@@ -862,13 +862,18 @@ pub struct ChromeIntent {
     /// The author signs a Pro key (see `crate::pro::issue`).
     #[cfg(feature = "pro")]
     pub pro_issue: Option<crate::pro::issue::Ask>,
-    /// Let AI agents on this machine run commands in the window, or stop.
+    /// Let AI agents on this machine run commands in the window, or stop
+    /// (the Pro pack's AI gateway, as the four below).
+    #[cfg(feature = "pro")]
     pub agent_control: Option<bool>,
     /// Show the skill library's folder in Explorer.
+    #[cfg(feature = "pro")]
     pub open_skills_folder: bool,
     /// Take this skill out of the library (it is kept aside, not deleted).
+    #[cfg(feature = "pro")]
     pub remove_skill: Option<String>,
     /// "Nhờ AI làm": what the person did in its window.
+    #[cfg(feature = "pro")]
     pub errand: Option<ErrandIntent>,
     /// "Việc nhanh": what the person did in its window.
     pub quick: Option<QuickIntent>,
@@ -882,6 +887,7 @@ pub struct ChromeIntent {
     pub document_webview_rect: Option<egui::Rect>,
 }
 /// What the person does in "Nhờ AI làm".
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ErrandIntent {
     Open,

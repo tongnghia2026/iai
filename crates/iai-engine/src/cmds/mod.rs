@@ -17,6 +17,7 @@ pub mod free_transform;
 pub mod image;
 pub mod layer;
 pub mod mode;
+pub mod models;
 pub mod page;
 pub mod select;
 pub mod text;
@@ -98,6 +99,8 @@ pub fn register_core(r: &mut Registry) {
     r.register(ai::RemoveBackground);
     r.register(ai::Inpaint);
     r.register(ai::ModelDownload);
+    r.register(models::FetchModel);
+    r.register(models::InstallModels);
     r.register(export::ExportPdf);
     r.register(vector::AddShape);
     r.register(vector::AddPath);

@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "about": "Danh sách model của iAi. App đọc file này từ kho công khai (như news.json); không đọc được thì dùng bản dựng sẵn trong app. Mỗi model: các nguồn tải theo thứ tự (nguồn tác giả model -> GitHub Releases của kho công khai -> Google Drive của chủ). Chỗ ghi 'TODO chủ điền' là link chủ chưa có: app bỏ qua nguồn đó. Link Drive dùng dạng https://drive.usercontent.google.com/download?id=<ID>&export=download&confirm=t (file lớn khỏi trang hỏi quét virus). Không sửa sha256/file/dir của model đã có: app không nhận; muốn app nhận thêm một file (ví dụ đúng file video chỉ tới) thì thêm một mục mới có 'slot' là id của model nó thay và 'sha256' của file đó.",
+  "models": [
+    {
+      "id": "lama",
+      "name": "LaMa (xóa vật thể)",
+      "feature": "remove-object",
+      "dir": "",
+      "file": "lama_fp32.onnx",
+      "size": 208044816,
+      "approx_mb": 200,
+      "sha256": "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "author", "url": "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx" },
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "https://huggingface.co/Carve/LaMa-ONNX",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "birefnet-tiny",
+      "name": "BiRefNet Tiny (chọn chủ thể)",
+      "feature": "select-subject",
+      "dir": "",
+      "file": "birefnet-general-tiny-epoch_232.onnx",
+      "size": 224005088,
+      "approx_mb": 224,
+      "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+      "license": "MIT",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "author", "url": "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx" },
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "https://github.com/ZhengPeng7/BiRefNet/releases/tag/v1",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "ppocr-v4-rec",
+      "name": "PP-OCRv4 (đọc chữ)",
+      "feature": "read-text",
+      "dir": "ocr",
+      "file": "ch_PP-OCRv4_rec_infer.onnx",
+      "size": 10857958,
+      "approx_mb": 11,
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "author", "url": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx" },
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "https://huggingface.co/SWHL/RapidOCR",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "yunet",
+      "name": "YuNet (tìm khuôn mặt)",
+      "feature": "find-faces",
+      "dir": "face-detector",
+      "file": "face_detection_yunet_2026may.onnx",
+      "size": 229738,
+      "approx_mb": 1,
+      "sha256": "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+      "license": "MIT",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "author", "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_detection_yunet/face_detection_yunet_2026may.onnx" },
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "face-mesh",
+      "name": "Face Mesh (478 điểm mốc mặt)",
+      "feature": "face-landmarks",
+      "dir": "face-mesh",
+      "file": "face_landmarks_detector.onnx",
+      "size": 4920995,
+      "approx_mb": 0,
+      "sha256": "58b89dbbaca1d944bdca16ea3c3a0853c74d473c9b789f76d1ead580e59ed4cd",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "pose",
+      "name": "BlazePose (dáng người)",
+      "feature": "body-pose",
+      "dir": "pose",
+      "file": "pose_landmarks_detector.onnx",
+      "size": 55181696,
+      "approx_mb": 55,
+      "sha256": "e8c01bf5015def4137637fe38d65033ad6392a18ff8573dce5a22b247192d02f",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "sapiens2-seg",
+      "name": "Sapiens2 (tách vùng cơ thể)",
+      "feature": "body-parts",
+      "dir": "sapiens2-seg",
+      "file": "sapiens2_seg_0.4b_512x384.onnx",
+      "size": 5550800,
+      "approx_mb": 6,
+      "sha256": "90b5d000ef43eec947486bcca0d6419412a59336032801b34af4c2f30782e1f9",
+      "license": "Sapiens2 License",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền",
+      "companions": [
+        {
+          "file": "sapiens2_seg_0.4b_512x384.onnx.data",
+          "size": 1626537984,
+          "approx_mb": 1600,
+          "sha256": "1bb7df2dbb1b0c513cab993282c012065c668090869a8a4a4afcc3dece1f3f93",
+          "sources": [
+            { "from": "drive", "url": "TODO chủ điền" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gfpgan-1.4",
+      "name": "GFPGAN v1.4 (phục hồi mặt)",
+      "feature": "face-restore",
+      "dir": "gfpgan",
+      "file": "GFPGANv1.4.onnx",
+      "size": 340357897,
+      "approx_mb": 340,
+      "sha256": "0dac008dbd9c025b9a0acff35e769792a7b8b7c52464d17d3981369834803087",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "realesrgan-general-x4v3",
+      "name": "Real-ESRGAN General x4v3 (làm nét nhanh)",
+      "feature": "upscale",
+      "dir": "realesrgan",
+      "file": "RealESRGANv3-general-x4v3.onnx",
+      "size": 4866645,
+      "approx_mb": 5,
+      "sha256": "ac0920068b2c43da1944e788b1728e88b5e2b005a225e29c4c4c4e029bdbe926",
+      "license": "BSD-3-Clause",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "realesrgan-x2plus",
+      "name": "Real-ESRGAN x2plus (làm nét tự nhiên)",
+      "feature": "upscale",
+      "dir": "realesrgan",
+      "file": "RealESRGAN_x2plus.onnx",
+      "size": 67076397,
+      "approx_mb": 67,
+      "sha256": "517dcc8f74067504bee3be68fdae3ca399b52870a0dec6e8de7f8a2654dfdfed",
+      "license": "BSD-3-Clause",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    },
+    {
+      "id": "realesrgan-x4plus",
+      "name": "Real-ESRGAN x4plus (phóng to x4)",
+      "feature": "upscale",
+      "dir": "realesrgan",
+      "file": "RealESRGAN_x4plus.onnx",
+      "size": 67051889,
+      "approx_mb": 67,
+      "sha256": "b644aab83761a02489ef1cfd581a4ac677ba43380adb6a8c3c0a3ad801c9f17e",
+      "license": "BSD-3-Clause",
+      "redistributable": true,
+      "pack": "basic",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ],
+      "page": "TODO chủ điền",
+      "video": "TODO chủ điền"
+    }
+  ],
+  "packs": [
+    {
+      "id": "basic",
+      "name": "Gói model iAi (mọi model, một thư mục)",
+      "file": "iAi-models.zip",
+      "size": 2614712429,
+      "sha256": "154ee8cccd0b393b3d3e5cb7c902032892196884ee2d3048aad1d38130227074",
+      "sources": [
+        { "from": "drive", "url": "TODO chủ điền" }
+      ]
+    }
+  ]
+}

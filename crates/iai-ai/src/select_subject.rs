@@ -9,6 +9,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::model_store::{self, Slot};
+
 /// Models whose GPU (DirectML) inference has failed this session (e.g. a large
 /// model that OOMs on the GPU while it runs fine on the CPU). Keyed by the
 /// model file name. Once a model is here, `segment_kept` skips the GPU for it and
@@ -141,15 +143,13 @@ pub enum SelectSubjectModel {
     BiRefNetTiny,
 }
 
+/// How the code runs a model; which file it is, where it is fetched from
+/// and its hash are the model store's (`model_store::catalog`).
 #[derive(Clone, Copy)]
 struct ModelSpec {
     short_label: &'static str,
+    /// The model's file name: what its kept session is known by.
     file_name: &'static str,
-    url: &'static str,
-    /// SHA-256 of the file at `url`, as its source publishes it. A download
-    /// that does not match is refused.
-    sha256: &'static str,
-    size_hint: &'static str,
     apply_sigmoid: bool,
     soft_mask: bool,
     /// Worth trying on DirectML. BiRefNet is not: it fails there (out of
@@ -158,16 +158,18 @@ struct ModelSpec {
 }
 
 impl SelectSubjectModel {
+    /// Its place in the model store's table.
+    pub const fn slot(self) -> Slot {
+        match self {
+            SelectSubjectModel::BiRefNetTiny => Slot::BiRefNetTiny,
+        }
+    }
+
     fn spec(self) -> ModelSpec {
         match self {
             SelectSubjectModel::BiRefNetTiny => ModelSpec {
                 short_label: "BiRefNet",
-                file_name: "birefnet-general-tiny-epoch_232.onnx",
-                url: "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
-                // The release page gives no digest: hashed from a fresh
-                // download of this URL on 2026-10-07 (224 005 088 bytes).
-                sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
-                size_hint: "~214 MB",
+                file_name: self.slot().model().file,
                 apply_sigmoid: true,
                 soft_mask: true,
                 gpu: false,
@@ -216,22 +218,10 @@ impl SelectSubjectEngine {
         }
     }
 
-    fn models_dir() -> PathBuf {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            PathBuf::from(appdata).join("IAI").join("models")
-        } else if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("iai")
-                .join("models")
-        } else {
-            PathBuf::from(".").join("models")
-        }
-    }
-
+    /// Where `model` is on this machine (in any model folder, under its own
+    /// name or, after a scan, any other), or where it is put when fetched.
     pub fn model_path_for(model: SelectSubjectModel) -> PathBuf {
-        Self::models_dir().join(model.spec().file_name)
+        model_store::locate(model.slot()).unwrap_or_else(|| model_store::install_path(model.slot()))
     }
 
     pub fn model_path(&self) -> PathBuf {
@@ -252,7 +242,8 @@ impl SelectSubjectEngine {
         match self.status.lock().clone() {
             SubjectStatus::NoModel => format!(
                 "Select Subject: {} not downloaded (click to download {})",
-                spec.short_label, spec.size_hint
+                spec.short_label,
+                self.selected_model.size_hint()
             ),
             SubjectStatus::Downloading { progress } => {
                 format!(
@@ -295,79 +286,20 @@ impl SelectSubjectEngine {
     }
 }
 
-/// Download `model` on the calling thread, check its SHA-256 and put it in
-/// place. `progress` gets the share done, 0 to 1, when the size is known.
+/// Download `model` on the calling thread from the first of its sources in
+/// the author's list that gives the file its SHA-256 names, resumed where a
+/// last try stopped, and put it in place. `progress` gets the share done, 0
+/// to 1, when the size is known.
 pub fn download_model(model: SelectSubjectModel, progress: &dyn Fn(f32)) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let spec = model.spec();
-    let model_path = SelectSubjectEngine::model_path_for(model);
-    if let Some(parent) = model_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
-    let mut req = client.get(spec.url);
-    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
-        && !token.trim().is_empty()
-    {
-        req = req.bearer_auth(token.trim());
-    }
-    let resp = req.send().map_err(|e| format!("download failed: {e}"))?;
-    let status_code = resp.status();
-    if status_code == reqwest::StatusCode::UNAUTHORIZED
-        || status_code == reqwest::StatusCode::FORBIDDEN
-    {
-        return Err(format!(
-            "{} download is not accessible from this network. Place the ONNX file at {}",
-            spec.short_label,
-            model_path.display()
-        ));
-    }
-    let mut stream = resp
-        .error_for_status()
-        .map_err(|e| format!("download failed: {e}"))?;
-
-    let total = stream.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-    let tmp_path = model_path.with_extension("onnx.part");
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| format!("create file: {e}"))?;
-    let mut buf = vec![0u8; 65536];
-    let fail = |file: std::fs::File, e: String| {
-        drop(file);
-        let _ = std::fs::remove_file(&tmp_path);
-        Err(e)
-    };
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let Some(chunk) = buf.get(..n) else {
-                    return fail(file, "read past the buffer".to_string());
-                };
-                if let Err(e) = file.write_all(chunk) {
-                    return fail(file, format!("write: {e}"));
-                }
-                downloaded += n as u64;
-                if total > 0 {
-                    progress(downloaded as f32 / total as f32);
-                }
-            }
-            Err(e) => return fail(file, format!("read error: {e}")),
+    let report = |done: u64, total: u64| {
+        if total > 0 {
+            progress(done as f32 / total as f32);
         }
-    }
-    if let Err(e) = file.flush() {
-        return fail(file, format!("flush: {e}"));
-    }
-    drop(file);
-    if total > 0 && downloaded != total {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!(
-            "incomplete download ({downloaded}/{total} bytes) - please retry"
-        ));
-    }
-    crate::ai::download::install_verified(&tmp_path, &model_path, spec.sha256)
+    };
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    model_store::fetch::download(model.slot(), &report, &cancel)
+        .map(|_| ())
+        .map_err(|e| e.text())
 }
 
 impl SelectSubjectModel {
@@ -378,12 +310,23 @@ impl SelectSubjectModel {
 
     /// SHA-256 of the model file, as checked when it was downloaded.
     pub fn sha256(self) -> &'static str {
-        self.spec().sha256
+        self.slot().model().sha256
     }
 
-    /// Download size, for messages ("~214 MB").
+    /// Download size, for messages ("~224 MB"), from the model table.
     pub fn size_hint(self) -> &'static str {
-        self.spec().size_hint
+        let hint = || {
+            format!(
+                "~{}",
+                model_store::fetch::size_text(self.slot().model().total_bytes())
+            )
+        };
+        match self {
+            SelectSubjectModel::BiRefNetTiny => {
+                static HINT: OnceLock<String> = OnceLock::new();
+                HINT.get_or_init(hint)
+            }
+        }
     }
 
     /// The model file is on this machine.
@@ -405,13 +348,7 @@ pub fn segment_kept(
     loaded: &dyn Fn(),
 ) -> Result<(Vec<u8>, bool), String> {
     let spec = model.spec();
-    let path = SelectSubjectEngine::model_path_for(model);
-    if !path.is_file() {
-        return Err(format!(
-            "thiếu model {} ({})",
-            spec.short_label, spec.size_hint
-        ));
-    }
+    let path = runnable_path(model)?;
     let prefer_gpu = spec.gpu && crate::ai::ort_ep::prefer_gpu() && !gpu_blocked(spec.file_name);
     run_kept(spec, &path, prefer_gpu, (pixels, width, height), loaded)
 }
@@ -428,16 +365,17 @@ pub fn segment_blocking(
     prefer_gpu: bool,
 ) -> Result<Vec<u8>, String> {
     let spec = model.spec();
-    let path = SelectSubjectEngine::model_path_for(model);
-    if !path.is_file() {
-        return Err(format!(
-            "thiếu model {} ({})",
-            spec.short_label, spec.size_hint
-        ));
-    }
+    let path = runnable_path(model)?;
     let prefer_gpu = spec.gpu && prefer_gpu && !gpu_blocked(spec.file_name);
     let photo = (pixels, width, height);
     run_kept(spec, &path, prefer_gpu, photo, &|| {}).map(|(mask, _)| mask)
+}
+
+/// The file `model` runs from: where its slot keeps it, else anywhere in a
+/// model folder (a scan is waited for).
+fn runnable_path(model: SelectSubjectModel) -> Result<PathBuf, String> {
+    model_store::locate_or_wait(model.slot())
+        .ok_or_else(|| format!("thiếu model {} ({})", model.name(), model.size_hint()))
 }
 
 fn run_inference(

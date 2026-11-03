@@ -94,6 +94,42 @@ impl App {
                 self.edit.fg_color = color;
             }
         }
+        self.paint_colors_changed();
+    }
+
+    /// X, or the toolbar's swap mark: the foreground and background colours
+    /// trade places.
+    pub(crate) fn swap_paint_colors(&mut self) {
+        std::mem::swap(
+            &mut self.edit.tools.brush_mut().settings.color,
+            &mut self.edit.bg_color,
+        );
+        self.edit.fg_color = self.edit.tools.brush().settings.color;
+        self.edit.tools.fill_mut().color = self.edit.fg_color;
+        self.edit.tools.eraser_mut().bg_color = self.edit.bg_color;
+        self.paint_colors_changed();
+    }
+
+    /// D: black on white.
+    pub(crate) fn reset_paint_colors(&mut self) {
+        self.edit.bg_color = [255, 255, 255, 255];
+        self.edit.tools.brush_mut().settings.color = [0, 0, 0, 255];
+        self.edit.fg_color = self.edit.tools.brush().settings.color;
+        self.edit.tools.fill_mut().color = self.edit.fg_color;
+        self.edit.tools.eraser_mut().bg_color = self.edit.bg_color;
+        self.paint_colors_changed();
+    }
+
+    /// The toolbar's colours changed: what shows them follows at once. A
+    /// crop frame reaching past the photo fills with the background colour,
+    /// and was painted again only when the frame moved (02/11).
+    fn paint_colors_changed(&mut self) {
+        if self.edit.tools.active_id() == crate::tools::ToolId::Crop
+            && self.edit.tools.crop().has_selection()
+            && self.edit.pending_crop_job.is_none()
+        {
+            self.update_crop_preview();
+        }
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -130,6 +166,9 @@ impl App {
     /// is: the same change, one undo step, what it says on the status line.
     pub(super) fn handle_command_actions(&mut self, actions: &mut UiActions) {
         for call in std::mem::take(&mut actions.commands) {
+            if self.models_window_step(&call) {
+                continue;
+            }
             #[cfg(feature = "pro")]
             if self.card_window_step(&call) {
                 continue;

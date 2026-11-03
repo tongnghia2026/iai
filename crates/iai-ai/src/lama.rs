@@ -12,12 +12,14 @@
 // pixels (source pixels are never touched — same contract as PatchMatch `fill`).
 //
 // The ~200 MB session is cached process-wide so it loads once. Download runs on a
-// background thread with a shared progress status the UI can poll.
+// background thread with a shared progress status the UI can poll. Where the
+// file is, and where it is fetched from, is the model store's (`model_store`).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+
+use crate::model_store::{self, Slot};
 
 type OrtSession = ort::session::Session;
 
@@ -28,13 +30,15 @@ static LAMA_ON_GPU: AtomicBool = AtomicBool::new(false);
 /// straight to CPU instead of paying the failed-GPU cost again.
 static LAMA_GPU_DISABLED: AtomicBool = AtomicBool::new(false);
 
-const MODEL_FILE: &str = "lama_fp32.onnx";
-const MODEL_URL: &str = "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx";
-/// SHA-256 of the file at [`MODEL_URL`], as Hugging Face lists it. A download
-/// that does not match is refused.
-const MODEL_SHA256: &str = "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6";
-const MODEL_SIZE_HINT: &str = "~200 MB";
 const DIM: u32 = 512;
+
+/// The download's size, for messages ("~200 MB"), from the model table.
+fn size_hint() -> String {
+    format!(
+        "~{}",
+        model_store::fetch::size_text(Slot::Lama.model().total_bytes())
+    )
+}
 
 #[derive(Clone, Debug)]
 pub enum LamaStatus {
@@ -107,7 +111,8 @@ pub fn is_downloading() -> bool {
 pub fn status_text() -> Option<String> {
     match status() {
         LamaStatus::Downloading { progress } => Some(format!(
-            "Đang tải model AI inpainting ({MODEL_SIZE_HINT})… {:.0}%",
+            "Đang tải model AI inpainting ({})… {:.0}%",
+            size_hint(),
             progress * 100.0
         )),
         LamaStatus::Error(e) => Some(format!("Lỗi model AI inpainting: {e}")),
@@ -115,22 +120,10 @@ pub fn status_text() -> Option<String> {
     }
 }
 
-fn models_dir() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        PathBuf::from(appdata).join("IAI").join("models")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("iai")
-            .join("models")
-    } else {
-        PathBuf::from(".").join("models")
-    }
-}
-
+/// Where the model is on this machine (in any model folder, under its own
+/// name or, after a scan, any other), or where it is put when fetched.
 pub fn model_path() -> PathBuf {
-    models_dir().join(MODEL_FILE)
+    model_store::locate(Slot::Lama).unwrap_or_else(|| model_store::install_path(Slot::Lama))
 }
 
 /// Marker left next to the model once LaMa has failed on this machine's GPU,
@@ -138,7 +131,7 @@ pub fn model_path() -> PathBuf {
 /// DirectML attempt (seconds) again. It holds the adapter name: a different
 /// GPU gets tried afresh.
 fn gpu_failed_marker() -> PathBuf {
-    models_dir().join("lama_fp32.gpu-failed")
+    model_path().with_extension("gpu-failed")
 }
 
 fn adapter_name() -> String {
@@ -166,68 +159,21 @@ pub fn ensure_downloading() {
     });
 }
 
+/// Fetch the model from the first of its sources in the author's list that
+/// gives the right file (resumed where a last try stopped), reporting the
+/// share done to the status.
 fn download_blocking() -> Result<(), String> {
-    let path = model_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(1800))
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
-
-    let mut req = client.get(MODEL_URL);
-    if let Ok(token) = std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
-        && !token.trim().is_empty()
-    {
-        req = req.bearer_auth(token.trim());
-    }
-
-    let resp = req
-        .send()
-        .map_err(|e| format!("download failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("download failed: {e}"))?;
-
-    let total = resp.content_length().unwrap_or(0);
-    let tmp = path.with_extension("onnx.part");
-
-    use std::io::{Read, Write};
-    let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create file: {e}"))?;
-    let mut stream = resp;
-    let mut downloaded: u64 = 0;
-    let mut buf = vec![0u8; 1 << 16];
-    loop {
-        let n = match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                drop(file);
-                let _ = std::fs::remove_file(&tmp);
-                return Err(format!("read error: {e}"));
-            }
-        };
-        if let Err(e) = file.write_all(&buf[..n]) {
-            drop(file);
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("write: {e}"));
-        }
-        downloaded += n as u64;
+    let progress = |done: u64, total: u64| {
         if total > 0 {
             set_status(LamaStatus::Downloading {
-                progress: downloaded as f32 / total as f32,
+                progress: done as f32 / total as f32,
             });
         }
-    }
-    file.flush().map_err(|e| format!("flush: {e}"))?;
-    drop(file);
-
-    if total > 0 && downloaded != total {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("incomplete download ({downloaded}/{total} bytes)"));
-    }
-    crate::ai::download::install_verified(&tmp, &path, MODEL_SHA256)
+    };
+    let cancel = AtomicBool::new(false);
+    model_store::fetch::download(Slot::Lama, &progress, &cancel)
+        .map(|_| ())
+        .map_err(|e| e.text())
 }
 
 fn session_cell() -> &'static Mutex<Option<OrtSession>> {
@@ -383,7 +329,10 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
         if guard.is_none() && !load_session(&mut guard) {
             return false;
         }
-        match run_on(guard.as_mut().unwrap()) {
+        let Some(session) = guard.as_mut() else {
+            return false;
+        };
+        match run_on(session) {
             Ok(data) => data,
             Err(e) => {
                 // A GPU run failed (unsupported op / OOM). Disable the GPU for
@@ -402,7 +351,11 @@ pub fn inpaint(rgba: &mut [u8], w: usize, h: usize, hole: &[bool]) -> bool {
                             return false;
                         }
                     }
-                    match run_on(guard.as_mut().unwrap()) {
+                    let rerun = match guard.as_mut() {
+                        Some(session) => run_on(session),
+                        None => return false,
+                    };
+                    match rerun {
                         Ok(data) => data,
                         Err(e2) => {
                             set_status(LamaStatus::Error(format!("inference: {e2}")));

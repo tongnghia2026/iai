@@ -12,8 +12,12 @@
 //!   to probe its edges (`iai_engine::hunt`); fails on a panic or a hang.
 //! - `export-public [--sync] <folder>`: the public tree, HEAD less the Pro
 //!   part (`export_public.rs` says how).
+//! - `bundle-models --from <folder> --out <folder>`: the model packs of
+//!   link 2 («Gói cơ bản», «Gói chân dung»), from a folder of models, by the
+//!   model table of iai-ai (`bundle_models.rs` says how).
 #![forbid(unsafe_code)]
 
+mod bundle_models;
 mod export_public;
 mod intents;
 mod layers;
@@ -26,7 +30,8 @@ const USAGE: &str = "usage: cargo xtask layers
        cargo xtask lints [--update] [arguments for cargo clippy, e.g. --features iai/canvas-editor-webview]
        cargo xtask intents [--list] [--update]
        cargo xtask panic-hunt
-       cargo xtask export-public [--sync] <folder outside the repository>";
+       cargo xtask export-public [--sync] <folder outside the repository>
+       cargo xtask bundle-models --from <folder of models> --out <folder>";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -36,6 +41,7 @@ fn main() -> ExitCode {
         Some("intents") => intents::run(args.collect()),
         Some("panic-hunt") => panic_hunt(),
         Some("export-public") => export_public::run(args.collect()),
+        Some("bundle-models") => bundle_models::run(args.collect()),
         _ => Err(USAGE.to_owned()),
     };
     match result {

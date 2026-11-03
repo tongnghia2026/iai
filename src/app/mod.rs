@@ -1,4 +1,6 @@
 pub mod actions;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod agent_link;
 pub mod arrow_ops;
 pub mod autosave;
@@ -17,6 +19,8 @@ pub mod document_session;
 pub mod document_webview;
 pub mod editor_interaction;
 pub mod engine;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod errands;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
@@ -27,6 +31,7 @@ pub mod file_ops;
 pub mod id_photo_ops;
 pub mod input;
 pub mod library;
+pub mod models_ops;
 #[cfg(not(feature = "pro"))]
 mod no_pro;
 pub mod node_ops;

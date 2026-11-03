@@ -8,6 +8,7 @@
 /_photo_plan/
 /_tu-dong-in-fix/
 /models/**/*.onnx
+/models/**/*.onnx.data
 /models/**/*.pth
 /models/**/*.tflite
 **/*.rs.bk

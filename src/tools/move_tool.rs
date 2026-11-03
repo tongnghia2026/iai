@@ -27,6 +27,12 @@ pub struct MoveTool {
     pub marquee_start_y: f32,
     pub marquee_end_x: f32,
     pub marquee_end_y: f32,
+    /// The marquee began with Shift: what it catches is added to the layers
+    /// already selected, which stay.
+    pub marquee_adds: bool,
+    /// Shift was held on a layer already selected: released without a drag,
+    /// it leaves the selection.
+    pub shift_unpick: Option<usize>,
     /// Structure command captured on Alt+drag duplicate, pushed in the same group
     /// as the TranslateLayerCommand on release so undo also removes the copy.
     pub pending_dup_cmd: Option<crate::core::command::LayerStructureCommand>,
@@ -87,6 +93,8 @@ impl MoveTool {
             marquee_start_y: 0.0,
             marquee_end_x: 0.0,
             marquee_end_y: 0.0,
+            marquee_adds: false,
+            shift_unpick: None,
             pending_dup_cmd: None,
             last_duplicate_delta: None,
             took_duplicate: false,
@@ -251,6 +259,100 @@ impl MoveTool {
                 .is_some_and(|m| m.enabled && m.sample(lx, ly) < 0.5)
     }
 
+    /// The box, in layer pixels, of what shows of a layer: its ink, less what
+    /// a clipping frame hides of a clip child.
+    fn visible_box(layer: &crate::core::layer::Layer) -> Option<(i32, i32, i32, i32)> {
+        use crate::core::tile::TILE_SIZE;
+        let framed =
+            layer.clip_parent_id.is_some() && layer.mask.as_ref().is_some_and(|m| m.enabled);
+        if !framed {
+            return layer.tiles.content_bounds();
+        }
+        let size = TILE_SIZE as i32;
+        let mut found: Option<(i32, i32, i32, i32)> = None;
+        for (pos, tile) in layer.tiles.tiles.iter() {
+            for i in 0..size {
+                for j in 0..size {
+                    let (lx, ly) = (pos.x * size + j, pos.y * size + i);
+                    if lx < 0 || ly < 0 || lx >= layer.width as i32 || ly >= layer.height as i32 {
+                        continue;
+                    }
+                    let a = tile.pixels[((i * size + j) * 4 + 3) as usize];
+                    if a == 0 || Self::clip_hides(layer, lx as u32, ly as u32) {
+                        continue;
+                    }
+                    found = Some(found.map_or((lx, ly, lx + 1, ly + 1), |(a0, b0, a1, b1)| {
+                        (a0.min(lx), b0.min(ly), a1.max(lx + 1), b1.max(ly + 1))
+                    }));
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether the marquee `[x0,x1]x[y0,y1]` (canvas) holds all of what shows
+    /// of `layer`. A layer showing nothing is never caught.
+    fn marquee_encloses(
+        layer: &crate::core::layer::Layer,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> bool {
+        let Some((bx0, by0, bx1, by1)) = Self::visible_box(layer) else {
+            return false;
+        };
+        let (ox, oy) = layer.offset;
+        x1 > x0
+            && y1 > y0
+            && ((bx0 + ox) as f32) >= x0.floor()
+            && ((by0 + oy) as f32) >= y0.floor()
+            && ((bx1 + ox) as f32) <= x1.ceil()
+            && ((by1 + oy) as f32) <= y1.ceil()
+    }
+
+    /// Whether the marquee covers any pixel that shows of `layer`.
+    fn marquee_touches(
+        layer: &crate::core::layer::Layer,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    ) -> bool {
+        use crate::core::tile::TILE_SIZE;
+        let size = TILE_SIZE as i32;
+        let (ox, oy) = layer.offset;
+        for (pos, tile) in layer.tiles.tiles.iter() {
+            let tx0 = pos.x * size + ox;
+            let ty0 = pos.y * size + oy;
+            if tx0 >= x1 as i32
+                || tx0 + size <= x0 as i32
+                || ty0 >= y1 as i32
+                || ty0 + size <= y0 as i32
+            {
+                continue;
+            }
+            let start_x = (x0 as i32 - tx0).max(0);
+            let start_y = (y0 as i32 - ty0).max(0);
+            let end_x = (x1 as i32 - tx0).min(size);
+            let end_y = (y1 as i32 - ty0).min(size);
+            for i in start_y..end_y {
+                for j in start_x..end_x {
+                    let a = tile.pixels[((i * size + j) * 4 + 3) as usize];
+                    // A clip child's hidden pixels are invisible, so a marquee
+                    // over them (e.g. drawn outside the frame) must not select
+                    // the layer through them.
+                    let lx = (pos.x * size + j) as u32;
+                    let ly = (pos.y * size + i) as u32;
+                    if a > 0 && !Self::clip_hides(layer, lx, ly) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Canvas-space point `(x,y)` inside a layer's raster bounding box.
     fn point_in_layer_bounds(layer: &crate::core::layer::Layer, x: i32, y: i32) -> bool {
         let lx = x - layer.offset.0;
@@ -285,6 +387,8 @@ impl Tool for MoveTool {
                 && Self::point_in_layer_bounds(layer, cx as i32, cy as i32)
         });
         let mut changed_selection = false;
+        self.marquee_adds = false;
+        self.shift_unpick = None;
 
         self.is_moving_selection =
             canvas.selection.active && canvas.selection.is_selected(cx as u32, cy as u32);
@@ -307,6 +411,22 @@ impl Tool for MoveTool {
                 if lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height {
                     let (_r, _g, _b, a) = layer.tiles.get_pixel(lx as u32, ly as u32);
                     if a > 0 && !Self::clip_hides(layer, lx as u32, ly as u32) {
+                        hit_idx = Some(idx);
+                        break;
+                    }
+                    // A vector object is picked anywhere inside its box, as
+                    // if filled: a press inside an outline went through to
+                    // the photo beneath, and the object showed no frame
+                    // (02/11). A clip child keeps to its frame above.
+                    if matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
+                        && layer.clip_parent_id.is_none()
+                        && layer
+                            .tiles
+                            .content_bounds()
+                            .is_some_and(|(x0, y0, x1, y1)| {
+                                (x0..x1).contains(&lx) && (y0..y1).contains(&ly)
+                            })
+                    {
                         hit_idx = Some(idx);
                         break;
                     }
@@ -335,11 +455,22 @@ impl Tool for MoveTool {
             }
 
             if let Some(idx) = hit_idx {
+                let picked = canvas.layer_stack.layers[idx].selected;
                 // A press on something inside a selected, closed folder grabs
                 // the folder: the selection stays and the drag moves all of it.
-                if !canvas.layer_stack.layers[idx].selected
-                    && !Self::in_closed_selected_folder(&canvas.layer_stack, idx)
-                {
+                if Self::in_closed_selected_folder(&canvas.layer_stack, idx) {
+                } else if event.shift {
+                    // Shift adds a layer to the selection, or takes one picked
+                    // already out of it when let go without a drag.
+                    if picked {
+                        self.shift_unpick = Some(idx);
+                    } else {
+                        canvas.layer_stack.layers[idx].selected = true;
+                        canvas.layer_stack.active_idx = idx;
+                        canvas.layer_revision += 1;
+                        changed_selection = true;
+                    }
+                } else if !picked {
                     for l in &mut canvas.layer_stack.layers {
                         l.selected = false;
                     }
@@ -349,9 +480,13 @@ impl Tool for MoveTool {
                     changed_selection = true;
                 }
             } else {
-                changed_selection = canvas.layer_stack.layers.iter().any(|l| l.selected);
-                for l in &mut canvas.layer_stack.layers {
-                    l.selected = false;
+                // Shift keeps what is selected: the marquee adds to it.
+                self.marquee_adds = event.shift;
+                if !event.shift {
+                    changed_selection = canvas.layer_stack.layers.iter().any(|l| l.selected);
+                    for l in &mut canvas.layer_stack.layers {
+                        l.selected = false;
+                    }
                 }
                 self.marquee_dragging = true;
                 self.marquee_start_x = cx;
@@ -616,62 +751,32 @@ impl Tool for MoveTool {
             let x1 = self.marquee_start_x.max(self.marquee_end_x);
             let y1 = self.marquee_start_y.max(self.marquee_end_y);
 
-            let mut hit_indices = Vec::new();
-
-            for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
-                if !layer.visible || !Self::can_move_layer(layer) {
-                    continue;
-                }
-                let ox = layer.offset.0;
-                let oy = layer.offset.1;
-
-                let mut hit = false;
-                for (pos, tile) in layer.tiles.tiles.iter() {
-                    let tx0 = pos.x * crate::core::tile::TILE_SIZE as i32 + ox;
-                    let ty0 = pos.y * crate::core::tile::TILE_SIZE as i32 + oy;
-                    let tx1 = tx0 + crate::core::tile::TILE_SIZE as i32;
-                    let ty1 = ty0 + crate::core::tile::TILE_SIZE as i32;
-
-                    if tx0 < x1 as i32 && tx1 > x0 as i32 && ty0 < y1 as i32 && ty1 > y0 as i32 {
-                        let start_x = (x0 as i32 - tx0).max(0);
-                        let start_y = (y0 as i32 - ty0).max(0);
-                        let end_x = (x1 as i32 - tx0).min(crate::core::tile::TILE_SIZE as i32);
-                        let end_y = (y1 as i32 - ty0).min(crate::core::tile::TILE_SIZE as i32);
-
-                        for i in start_y..end_y {
-                            for j in start_x..end_x {
-                                let a = tile.pixels[((i * crate::core::tile::TILE_SIZE as i32 + j)
-                                    * 4
-                                    + 3)
-                                    as usize];
-                                // A clip child's hidden pixels are invisible, so a
-                                // marquee over them (e.g. drawn outside the frame)
-                                // must not select the layer through them.
-                                let lx = (pos.x * crate::core::tile::TILE_SIZE as i32 + j) as u32;
-                                let ly = (pos.y * crate::core::tile::TILE_SIZE as i32 + i) as u32;
-                                if a > 0 && !Self::clip_hides(layer, lx, ly) {
-                                    hit = true;
-                                    break;
-                                }
-                            }
-                            if hit {
-                                break;
-                            }
-                        }
+            // As in CorelDRAW: a layer is caught only when the marquee holds
+            // all of what shows of it, so small layers can be picked off a
+            // large one beneath (02/11); with Alt, whatever it touches.
+            let touch = event.alt;
+            let hit_indices: Vec<usize> = canvas
+                .layer_stack
+                .layers
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, layer)| layer.visible && Self::can_move_layer(layer))
+                .filter(|(_, layer)| {
+                    if touch {
+                        Self::marquee_touches(layer, x0, y0, x1, y1)
+                    } else {
+                        Self::marquee_encloses(layer, x0, y0, x1, y1)
                     }
-                    if hit {
-                        break;
-                    }
-                }
-
-                if hit {
-                    hit_indices.push(idx);
-                }
-            }
+                })
+                .map(|(idx, _)| idx)
+                .collect();
 
             if !hit_indices.is_empty() {
-                for l in &mut canvas.layer_stack.layers {
-                    l.selected = false;
+                if !self.marquee_adds {
+                    for l in &mut canvas.layer_stack.layers {
+                        l.selected = false;
+                    }
                 }
                 for &idx in &hit_indices {
                     canvas.layer_stack.layers[idx].selected = true;
@@ -710,6 +815,23 @@ impl Tool for MoveTool {
             && !event.ctrl
             && !event.alt;
         self.click_selected_vector = false;
+        if let Some(idx) = self.shift_unpick.take()
+            && !moved
+            && !duplicated
+        {
+            let canvas = ctx.canvas_mut();
+            let stack = &mut canvas.layer_stack;
+            if let Some(layer) = stack.layers.get_mut(idx) {
+                layer.selected = false;
+            }
+            if stack.active_idx == idx
+                && let Some(other) = stack.layers.iter().rposition(|l| l.selected)
+            {
+                stack.active_idx = other;
+            }
+            canvas.layer_revision += 1;
+            return ToolResponse::redraw();
+        }
         if dup_cmd.is_some() || moved {
             let canvas = ctx.canvas_mut();
             canvas.begin_undo_group("Duplicate & Move");
@@ -888,6 +1010,147 @@ mod tests {
             t.marquee_dragging,
             "an unselected empty vector box must not be grabbed"
         );
+    }
+
+    /// 02/11: a press inside an unfilled vector outline lying on a photo
+    /// picks the outline (its frame shows), not the photo beneath; a press
+    /// on the photo outside it picks the photo.
+    #[test]
+    fn a_press_inside_an_outline_picks_it_not_the_photo_beneath() {
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let outline = add_empty_vector_layer(&mut doc, 100, 100, 80, 60, false);
+        {
+            let tiles = &mut doc.canvas.layer_stack.layers[outline].tiles;
+            for i in 0..80 {
+                tiles.set_pixel(i, 0, 0, 0, 0, 255);
+                tiles.set_pixel(i, 59, 0, 0, 0, 255);
+            }
+            for i in 0..60 {
+                tiles.set_pixel(0, i, 0, 0, 0, 255);
+                tiles.set_pixel(79, i, 0, 0, 0, 255);
+            }
+        }
+        // The photo goes in beneath the outline.
+        let stack = &mut doc.canvas.layer_stack;
+        let id = stack.next_id();
+        let mut photo = crate::core::layer::Layer::from_rgba(
+            id,
+            "photo",
+            [90u8, 120, 160, 255].repeat(400 * 300),
+            400,
+            300,
+        );
+        photo.offset = (0, 0);
+        stack.layers.insert(outline, photo);
+        stack.set_next_id(id + 1);
+        let (photo, outline) = (outline, outline + 1);
+        let click = |doc: &mut Document, x: f32, y: f32| {
+            let mut t = MoveTool::new();
+            let mut c = ctx(doc);
+            t.on_press(PointerEvent::new(x, y), &mut c);
+            t.on_release(PointerEvent::new(x, y), &mut c);
+        };
+        let picked = |doc: &Document| {
+            let l = &doc.canvas.layer_stack.layers;
+            (l[photo].selected, l[outline].selected)
+        };
+
+        click(&mut doc, 140.0, 130.0);
+        assert_eq!(picked(&doc), (false, true), "inside the outline");
+        assert_eq!(doc.canvas.layer_stack.active_idx, outline);
+
+        click(&mut doc, 300.0, 250.0);
+        assert_eq!(picked(&doc), (true, false), "on the photo outside it");
+    }
+
+    /// 02/11, as in CorelDRAW: a marquee catches only the layers it holds
+    /// whole, so small layers are picked off a large one beneath; Alt makes
+    /// it catch what it touches; Shift adds to the selection, and a Shift
+    /// click adds a layer or takes one out.
+    #[test]
+    fn a_marquee_catches_what_it_holds_whole_and_shift_adds_or_takes_out() {
+        let ev = |x: f32, y: f32, shift: bool, alt: bool| {
+            let mut e = PointerEvent::new(x, y);
+            e.shift = shift;
+            e.alt = alt;
+            e
+        };
+        let gesture = |t: &mut MoveTool, doc: &mut Document, from, to, shift, alt| {
+            let (fx, fy): (f32, f32) = from;
+            let (tx, ty): (f32, f32) = to;
+            let mut c = ctx(doc);
+            t.on_press(ev(fx, fy, shift, alt), &mut c);
+            if (fx, fy) != (tx, ty) {
+                t.on_drag(ev(tx, ty, shift, alt), &ev(fx, fy, shift, alt), &mut c);
+            }
+            t.on_release(ev(tx, ty, shift, alt), &mut c);
+        };
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        // An unfilled vector outline (ink on its edge only), first: a layer
+        // added goes in above the active one, and would move those after it.
+        let outline = add_empty_vector_layer(&mut doc, 200, 150, 50, 50, false);
+        {
+            let tiles = &mut doc.canvas.layer_stack.layers[outline].tiles;
+            for i in 0..50 {
+                for (x, y) in [(i, 0), (i, 49), (0, i), (49, i)] {
+                    tiles.set_pixel(x, y, 0, 0, 0, 255);
+                }
+            }
+        }
+        let stack = &mut doc.canvas.layer_stack;
+        let mut square = |name: &str, (x, y): (i32, i32), side: u32| {
+            let id = stack.next_id();
+            let mut layer = crate::core::layer::Layer::from_rgba(
+                id,
+                name,
+                [200u8, 0, 0, 255].repeat((side * side) as usize),
+                side,
+                side,
+            );
+            layer.offset = (x, y);
+            stack.layers.push(layer);
+            stack.set_next_id(id + 1);
+            stack.layers.len() - 1
+        };
+        // A large layer over it, and two small ones on that.
+        let big = square("big", (20, 20), 300);
+        let one = square("one", (60, 60), 20);
+        let two = square("two", (120, 60), 20);
+        let picked = |doc: &Document| {
+            let l = &doc.canvas.layer_stack.layers;
+            [
+                l[big].selected,
+                l[one].selected,
+                l[two].selected,
+                l[outline].selected,
+            ]
+        };
+        let mut t = MoveTool::new();
+
+        // From outside everything, across the large layer around the two
+        // small ones: only they are caught.
+        gesture(&mut t, &mut doc, (5.0, 50.0), (150.0, 90.0), false, false);
+        assert_eq!(picked(&doc), [false, true, true, false]);
+
+        // Cutting through the outline does not catch it; holding it whole does.
+        gesture(&mut t, &mut doc, (5.0, 140.0), (230.0, 210.0), false, false);
+        assert_eq!(picked(&doc), [false, false, false, false]);
+        gesture(&mut t, &mut doc, (5.0, 140.0), (260.0, 210.0), false, false);
+        assert_eq!(picked(&doc), [false, false, false, true]);
+
+        // Shift adds what the next marquee holds.
+        gesture(&mut t, &mut doc, (5.0, 50.0), (90.0, 90.0), true, false);
+        assert_eq!(picked(&doc), [false, true, false, true]);
+
+        // Shift+click takes a picked layer out, and puts another in.
+        gesture(&mut t, &mut doc, (70.0, 70.0), (70.0, 70.0), true, false);
+        assert_eq!(picked(&doc), [false, false, false, true]);
+        gesture(&mut t, &mut doc, (130.0, 70.0), (130.0, 70.0), true, false);
+        assert_eq!(picked(&doc), [false, false, true, true]);
+
+        // Alt: whatever the marquee touches, the large layer too.
+        gesture(&mut t, &mut doc, (5.0, 50.0), (75.0, 75.0), false, true);
+        assert_eq!(picked(&doc), [true, true, false, false]);
     }
 
     /// Two opaque 20×20 squares in a folder, only the folder's header row

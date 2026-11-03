@@ -3,9 +3,10 @@
 //! window, polls the background jobs every frame, and turns what the engine
 //! reports into GPU uploads and the status line.
 
+#[cfg(feature = "pro")]
+use iai_engine::BatchReply;
 use iai_engine::{
-    BatchReply, CmdError, CommandCall, EngineEvent, JobId, Policy, Registry, Reply, Source,
-    Workspace,
+    CmdError, CommandCall, EngineEvent, JobId, Policy, Registry, Reply, Source, Workspace,
 };
 use serde_json::Value;
 
@@ -68,6 +69,23 @@ pub(crate) fn command_registry() -> Registry {
     registry
 }
 
+/// The commands of a job that runs on an engine of its own, away from the
+/// window ("Việc nhanh", and the Pro pack's AI gateway): the free core's,
+/// and the Pro pack's, which say Pro is locked when this machine's Pro is
+/// not open.
+pub(crate) fn registry_for_jobs() -> Registry {
+    #[cfg_attr(not(feature = "pro"), allow(unused_mut))]
+    let mut registry = iai_engine::cmds::core_registry();
+    // A test reads nothing of this machine's Pro: open, as a test's is.
+    #[cfg(feature = "pro")]
+    if cfg!(test) || crate::pro::Pro::load().status().open() {
+        crate::pro::cmds::register(&mut registry);
+    } else {
+        crate::pro::cmds::register_locked(&mut registry);
+    }
+    registry
+}
+
 /// The engine of the window: the person may do everything.
 pub(crate) fn new_engine() -> iai_engine::Engine {
     iai_engine::Engine::new(command_registry(), Source::Gui, Policy::all())
@@ -112,7 +130,9 @@ impl App {
     }
 
     /// Several calls in order, on the tabs (`atomic`: all or none), as the
-    /// engine runs a batch; what they changed is redrawn.
+    /// engine runs a batch; what they changed is redrawn. Asked for by the
+    /// Pro pack's AI gateway (an agent's batch on the window).
+    #[cfg(feature = "pro")]
     pub(crate) fn execute_batch(&mut self, calls: Vec<CommandCall>, atomic: bool) -> BatchReply {
         self.prepare_for_command();
         let over_welcome = self.has_only_welcome_placeholder();
@@ -202,6 +222,11 @@ impl App {
     /// A command job is running.
     pub(crate) fn engine_busy(&self) -> bool {
         self.engine.busy()
+    }
+
+    /// A job of `command` works on the tab shown.
+    pub(crate) fn shown_tab_runs(&self, command: &str) -> bool {
+        self.engine.working_on(self.docs.active().id.0) == Some(command)
     }
 
     /// A page-wide job (see [`PAGE_JOBS`]) works on the tab shown: what is
@@ -367,6 +392,9 @@ impl App {
         }
         if command == "file.open" {
             self.on_open_finished(job, error);
+        }
+        if command == "models.fetch" || command == "models.install" {
+            self.on_models_job_finished(job, error);
         }
         #[cfg(feature = "pro")]
         self.on_pro_job_finished(job, command, error);

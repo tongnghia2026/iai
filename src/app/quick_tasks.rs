@@ -17,7 +17,6 @@ use iai_automation::{Gate, Host, LocalHost, Roots};
 use iai_engine::{Engine, ErrorCode, Policy, Source, Workspace};
 use serde_json::{Value, json};
 
-use super::errands::RESULTS;
 use super::state::App;
 use crate::core::document::Document;
 use crate::ui::{
@@ -36,6 +35,8 @@ pub(crate) const PHOTOS: [&str; 7] = ["jpg", "jpeg", "png", "webp", "bmp", "tif"
 const MAX_PORTRAITS: usize = 40;
 /// The name a job is noted under in a skill's history.
 const HOW: &str = "Việc nhanh";
+/// The results' folder inside the customer's.
+pub(crate) const RESULTS: &str = "iAi_ket_qua";
 
 enum Stage {
     Working(String),
@@ -366,6 +367,12 @@ fn done_line(task: &QuickTask, run: &Run) -> String {
                     " {twice} ảnh chụp trùng thẻ đã có (gửi hai lần) — không xếp lại."
                 ));
             }
+            let lone = names("alone").len();
+            if lone > 0 {
+                line.push_str(&format!(
+                    " {lone} thẻ chỉ có một mặt (không thấy mặt kia trong thư mục)."
+                ));
+            }
             let look = names("unsure").len();
             if look > 0 {
                 line.push_str(&format!(
@@ -373,11 +380,31 @@ fn done_line(task: &QuickTask, run: &Run) -> String {
                 ));
             }
             let skipped = names("skipped");
+            // The folder's own name, as the person sees it inside theirs.
+            let folder = |key: &str| {
+                made.and_then(|m| m.get(key))
+                    .and_then(Value::as_str)
+                    .and_then(|p| Path::new(p).file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            };
+            if let (Some(photos), Some(cards)) = (count("photos"), count("cards")) {
+                line.push_str(&format!(" Đã kiểm: {photos} ảnh, {cards} thẻ."));
+            }
             if !skipped.is_empty() {
-                line.push_str(&format!(
-                    " Không phải căn cước / không tìm thấy thẻ: {}.",
-                    skipped.join(", ")
-                ));
+                match folder("leftFolder") {
+                    // Gathered apart: the person does them by hand from there.
+                    Some(name) => line.push_str(&format!(
+                        " {} ảnh không tìm thấy thẻ đã gom vào thư mục «{name}» để làm tay.",
+                        skipped.len(),
+                    )),
+                    None => line.push_str(&format!(
+                        " Không phải căn cước / không tìm thấy thẻ: {}.",
+                        skipped.join(", ")
+                    )),
+                }
+            }
+            if let Some(name) = folder("doneFolder") {
+                line.push_str(&format!(" Ảnh đã xếp chuyển vào thư mục «{name}»."));
             }
             line
         }
@@ -413,7 +440,7 @@ fn work(job: Job, stop: &AtomicBool, tell: &dyn Fn(String)) -> Ended {
         docs: Vec::new(),
     };
     let engine = Engine::new(
-        crate::agent::registry_for_agents(),
+        super::engine::registry_for_jobs(),
         Source::Cli,
         Policy::agent(),
     );
@@ -495,8 +522,7 @@ impl App {
             open: q.open,
             folder: self
                 .shell
-                .errands
-                .folder
+                .photo_folder
                 .as_ref()
                 .map(|f| f.display().to_string())
                 .unwrap_or_default(),
@@ -525,6 +551,34 @@ impl App {
         }
     }
 
+    /// This machine's Pro is open (unlocked or on trial).
+    pub(in crate::app) fn pro_open(&self) -> bool {
+        #[cfg(feature = "pro")]
+        {
+            self.shell.pro.status().open()
+        }
+        #[cfg(not(feature = "pro"))]
+        false
+    }
+
+    /// Ask for the folder of the customer's photos a job is about (the one
+    /// "Việc nhanh" and the Pro pack's "Nhờ AI làm" share).
+    pub(crate) fn pick_photo_folder(&mut self) {
+        let Some(window) = self.win.window.as_ref() else {
+            return;
+        };
+        let parent = crate::file_io::dialog_parent(window);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let title = "Chọn thư mục ảnh của khách";
+            if let Some(dir) = crate::file_io::dialog_pick_folder(parent, title) {
+                let _ = tx.send(crate::file_io::FileDialogResult::PickedPhotoFolder(dir));
+            }
+        });
+        self.jobs.pending_file_dialog = Some(rx);
+        window.request_redraw();
+    }
+
     pub(crate) fn quick_intent(&mut self, intent: QuickIntent) {
         match intent {
             QuickIntent::Open => {
@@ -539,7 +593,7 @@ impl App {
                 q.preset = Some((n, task));
             }
             QuickIntent::Close => self.shell.quick.open = false,
-            QuickIntent::PickFolder => self.errand_intent(crate::ui::ErrandIntent::PickFolder),
+            QuickIntent::PickFolder => self.pick_photo_folder(),
             QuickIntent::Start(form) => self.start_quick_task(&form),
             QuickIntent::Stop => {
                 if let Some(u) = &self.shell.quick.under {
@@ -655,7 +709,7 @@ impl App {
         if self.shell.quick.running() {
             return;
         }
-        let Some(folder) = self.shell.errands.folder.clone() else {
+        let Some(folder) = self.shell.photo_folder.clone() else {
             return;
         };
         let results = folder.join(RESULTS);
@@ -981,7 +1035,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new();
-        app.shell.errands.folder = Some(dir.clone());
+        app.shell.photo_folder = Some(dir.clone());
         app.quick_intent(QuickIntent::Start(QuickForm::default()));
         let view = app.quick_view();
         let run = view.run.unwrap();

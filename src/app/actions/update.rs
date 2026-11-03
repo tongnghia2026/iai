@@ -114,23 +114,31 @@ impl App {
                     crate::author_mail::reset();
                 }
                 self.forget_pro_outcome(kind);
+                if kind == SupportDialog::Models {
+                    self.models_window_shown();
+                }
                 self.shell.ui.support_dialog = Some(kind);
             }
         }
         if std::mem::take(&mut actions.chrome.close_support) {
             self.shell.ui.support_dialog = None;
         }
-        if let Some(on) = actions.chrome.agent_control.take() {
-            self.set_agent_control(on);
-        }
-        if std::mem::take(&mut actions.chrome.open_skills_folder) {
-            self.open_skills_folder();
-        }
-        if let Some(name) = actions.chrome.remove_skill.take() {
-            self.remove_skill(&name);
-        }
-        if let Some(intent) = actions.chrome.errand.take() {
-            self.errand_intent(intent);
+        // The Pro pack's AI gateway: the window's link for agents, and
+        // "Nhờ AI làm".
+        #[cfg(feature = "pro")]
+        {
+            if let Some(on) = actions.chrome.agent_control.take() {
+                self.set_agent_control(on);
+            }
+            if std::mem::take(&mut actions.chrome.open_skills_folder) {
+                self.open_skills_folder();
+            }
+            if let Some(name) = actions.chrome.remove_skill.take() {
+                self.remove_skill(&name);
+            }
+            if let Some(intent) = actions.chrome.errand.take() {
+                self.errand_intent(intent);
+            }
         }
         if let Some(intent) = actions.chrome.quick.take() {
             self.quick_intent(intent);

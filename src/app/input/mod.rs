@@ -754,6 +754,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(true) => {
                 self.win.window_focused = true;
+                // A model dropped into its folder meanwhile shows.
+                if self.shell.ui.support_dialog == Some(crate::ui::SupportDialog::Models) {
+                    self.models_window_shown();
+                }
                 // Likely visible again: retry a stalled present right away.
                 self.win.surface_retry_at = None;
             }
@@ -1183,6 +1187,10 @@ impl ApplicationHandler for App {
                 self.refresh_main_system_display_profile();
             }
 
+            WindowEvent::DroppedFile(path) if crate::app::models_ops::holds_models(&path) => {
+                // A model file, or a `.zip` of them: installed, not opened.
+                self.install_model_file(path);
+            }
             WindowEvent::DroppedFile(path) => {
                 // Strict modal lock: opening documents is refused while a
                 // modal operation is in progress. An ID photo being made

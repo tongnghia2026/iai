@@ -722,8 +722,10 @@ fn group_btn(
     // Flat design: only the active tool keeps a filled box (the accent); inactive
     // slots are transparent and reveal a hover fill via the egui widget visuals.
     let icon_color = pal.icon;
+    // Gradient has a mark of its own, painted below.
+    let painted = *shown_id == ToolId::Gradient;
     let mut btn = egui::Button::new(
-        egui::RichText::new(*shown_icon)
+        egui::RichText::new(if painted { "" } else { *shown_icon })
             .size(TOOLBAR_ICON_SIZE)
             .color(icon_color),
     )
@@ -733,8 +735,14 @@ fn group_btn(
     }
 
     let resp = ui.add(btn).on_hover_text(*shown_tip);
+    if painted {
+        paint_gradient_icon(ui.painter(), resp.rect.center(), icon_color);
+    }
 
-    if resp.clicked() {
+    // Picked on the press, as in Photoshop. A click is a press let go
+    // within 0.8 s and a few points: one held a moment longer picked
+    // nothing, and had to be made again (02/11).
+    if pressed_on(ui, &resp) {
         actions.tool.select_tool = Some(*shown_id);
     }
 
@@ -795,6 +803,33 @@ fn group_btn(
     }
 }
 
+/// The Gradient tool's mark: a bar shading from the icon colour into the
+/// dark, as Photoshop draws it. The font's gradient glyph (a few dots) told
+/// a newcomer nothing (02/11).
+fn paint_gradient_icon(p: &egui::Painter, center: egui::Pos2, ink: egui::Color32) {
+    let rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 14.0));
+    let dark = egui::Color32::from_gray(24);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), ink);
+    mesh.colored_vertex(rect.right_top(), dark);
+    mesh.colored_vertex(rect.right_bottom(), dark);
+    mesh.colored_vertex(rect.left_bottom(), ink);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    p.add(egui::Shape::mesh(mesh));
+    p.rect_stroke(
+        rect,
+        1.5,
+        egui::Stroke::new(1.2_f32, ink),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// The primary button went down on `resp` this frame.
+fn pressed_on(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed())
+}
+
 fn color_swatches(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let pal = data.chrome.theme_mode.palette();
     let area_size = egui::vec2(38.0, 38.0);
@@ -808,6 +843,9 @@ fn color_swatches(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let swap_rect = egui::Rect::from_min_size(area.min + egui::vec2(27.0, 1.0), action_size);
     let reset_rect = egui::Rect::from_min_size(area.min + egui::vec2(1.0, 27.0), action_size);
 
+    // The swap and reset marks are drawn small, but take a press on a
+    // larger square around them: 11 points were easy to miss.
+    let target = |r: egui::Rect| r.expand(3.0);
     let bg_resp = ui
         .allocate_rect(bg_rect, egui::Sense::click())
         .on_hover_text("Background Color");
@@ -815,10 +853,10 @@ fn color_swatches(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .allocate_rect(fg_rect, egui::Sense::click())
         .on_hover_text("Foreground Color");
     let swap_resp = ui
-        .allocate_rect(swap_rect, egui::Sense::click())
+        .allocate_rect(target(swap_rect), egui::Sense::click())
         .on_hover_text("Swap FG/BG (X)");
     let reset_resp = ui
-        .allocate_rect(reset_rect, egui::Sense::click())
+        .allocate_rect(target(reset_rect), egui::Sense::click())
         .on_hover_text("Reset to Black/White (D)");
 
     let p = ui.painter();
@@ -840,10 +878,10 @@ fn color_swatches(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     paint_swap_button(p, swap_rect, swap_resp.hovered(), pal);
     paint_reset_button(p, reset_rect, reset_resp.hovered(), pal);
 
-    if swap_resp.clicked() {
+    if pressed_on(ui, &swap_resp) {
         actions.tool.swap_colors = true;
     }
-    if reset_resp.clicked() {
+    if pressed_on(ui, &reset_resp) {
         actions.tool.brush_color = Some([0, 0, 0, 255]);
         actions.tool.bg_color = Some([255, 255, 255, 255]);
     }
@@ -936,6 +974,105 @@ fn paint_reset_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One press and release at `pos`, the toolbar drawn each frame as the
+    /// app draws it: what tool it picked, if any.
+    fn press_at(ctx: &egui::Context, data: &UiData, pos: egui::Pos2, held: f64) -> Option<ToolId> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 1040.0));
+        let mut picked = None;
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>, dt: f64| {
+            time += dt;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            // The toolbar is a side panel shown on the context, as in the app.
+            #[allow(deprecated)]
+            let _ = ctx.run(input, |ctx| {
+                let mut actions = UiActions::default();
+                build(ctx, data, &mut actions);
+                if actions.tool.select_tool.is_some() {
+                    picked = actions.tool.select_tool;
+                }
+            });
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos)], 0.1);
+        frame(vec![button(true)], 0.016);
+        frame(Vec::new(), held);
+        frame(vec![button(false)], 0.016);
+        frame(vec![egui::Event::PointerGone], 0.016);
+        picked
+    }
+
+    /// Opt-in: IAI_UI_SNAPSHOT is a folder; the toolbar of a photo is drawn
+    /// into `thanh_cong_cu.png` there.
+    #[test]
+    #[ignore]
+    fn probe_toolbar_snapshot() {
+        let Ok(dir) = std::env::var("IAI_UI_SNAPSHOT") else {
+            return;
+        };
+        let data = photo_data();
+        let image = crate::ui::snapshot::render(60.0, 1000.0, 2.0, None, |ctx| {
+            crate::ui::theme::apply_theme(ctx, crate::ui::theme::ThemeMode::default());
+            let mut actions = UiActions::default();
+            build(ctx, &data, &mut actions);
+        });
+        let _ = std::fs::create_dir_all(&dir);
+        image
+            .save(std::path::Path::new(&dir).join("thanh_cong_cu.png"))
+            .expect("the snapshot is written");
+    }
+
+    fn photo_data() -> UiData {
+        let mut data = UiData::default();
+        data.layers.layer_types = std::sync::Arc::new(vec!["Raster".to_string()]);
+        data
+    }
+
+    /// 02/11: a press on the toolbar now and then picked nothing (the
+    /// journal: twice on Repair Brush, the owner then pressed again). A press
+    /// held past 0.8 s was no click to egui. Every point down the column of
+    /// tools picks a tool, pressed briefly or held.
+    #[test]
+    fn every_point_down_the_tools_picks_one_however_long_it_is_held() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply_theme(&ctx, crate::ui::theme::ThemeMode::default());
+        let data = photo_data();
+        let picks: Vec<(i32, Option<ToolId>)> = (0..1000)
+            .map(|y| {
+                let held = if y % 2 == 0 { 0.05 } else { 1.5 };
+                (y, press_at(&ctx, &data, egui::pos2(20.0, y as f32), held))
+            })
+            .collect();
+        let first = picks.iter().find(|(_, p)| p.is_some()).map(|(y, _)| *y);
+        let last = picks
+            .iter()
+            .rev()
+            .find(|(_, p)| p.is_some())
+            .map(|(y, _)| *y);
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("no press picked a tool");
+        };
+        let dead: Vec<i32> = picks
+            .iter()
+            .filter(|(y, p)| (first..=last).contains(y) && p.is_none())
+            .map(|(y, _)| *y)
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "tools {first}..{last}: presses that picked nothing at y = {dead:?}"
+        );
+    }
 
     #[test]
     fn layer_types_map_to_expected_toolbar_context() {

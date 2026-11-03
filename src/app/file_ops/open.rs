@@ -1488,11 +1488,14 @@ impl App {
                     file_io::FileDialogResult::PickedCardFolder(dir) => {
                         self.card_folder_picked(dir);
                     }
-                    file_io::FileDialogResult::PickedErrandFolder(dir) => {
-                        self.shell.errands.folder = Some(dir);
+                    file_io::FileDialogResult::PickedPhotoFolder(dir) => {
+                        self.shell.photo_folder = Some(dir);
                     }
                     file_io::FileDialogResult::PickedSponsorLogo(path) => {
                         self.set_sponsor_logo(path);
+                    }
+                    file_io::FileDialogResult::PickedModelFile(path) => {
+                        self.install_model_file(path);
                     }
                     file_io::FileDialogResult::InsertPdfPages {
                         document_id,

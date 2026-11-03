@@ -2782,6 +2782,7 @@ dependencies = [
  "serde",
  "serde_json",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
@@ -8230,7 +8231,9 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "hmac-sha256",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

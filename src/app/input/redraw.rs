@@ -123,8 +123,11 @@ impl App {
             }
         }
 
-        self.poll_agent_link();
-        self.poll_errands();
+        #[cfg(feature = "pro")]
+        {
+            self.poll_agent_link();
+            self.poll_errands();
+        }
         self.poll_quick_tasks();
         self.hand_steps_to_engine();
         self.poll_engine();

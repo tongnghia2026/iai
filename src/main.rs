@@ -9,7 +9,12 @@ fn main() {
         return;
     }
     // `iai.exe mcp` / `iai.exe run`: for AI agents and scripts, no window.
-    if let Some(code) = iai::agent::run_if_asked() {
+    // The gateway is the Pro pack's; the free build says so and ends.
+    #[cfg(feature = "pro")]
+    let gateway = iai::agent::run_if_asked();
+    #[cfg(not(feature = "pro"))]
+    let gateway = iai::no_gateway::refuse_if_asked();
+    if let Some(code) = gateway {
         std::process::exit(code);
     }
     iai::update::finish_previous();

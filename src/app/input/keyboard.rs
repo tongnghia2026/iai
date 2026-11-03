@@ -644,28 +644,12 @@ impl App {
             PhysicalKey::Code(KeyCode::KeyX)
                 if pressed && !repeat && !self.edit.input.ctrl_held =>
             {
-                std::mem::swap(
-                    &mut self.edit.tools.brush_mut().settings.color,
-                    &mut self.edit.bg_color,
-                );
-                self.edit.tools.fill_mut().color = self.edit.tools.brush().settings.color;
-                self.edit.tools.eraser_mut().bg_color = self.edit.bg_color;
-                self.edit.fg_color = self.edit.tools.brush().settings.color;
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+                self.swap_paint_colors();
             }
             PhysicalKey::Code(KeyCode::KeyD)
                 if pressed && !repeat && !self.edit.input.ctrl_held =>
             {
-                self.edit.bg_color = [255, 255, 255, 255];
-                self.edit.tools.brush_mut().settings.color = [0, 0, 0, 255];
-                self.edit.tools.fill_mut().color = self.edit.tools.brush().settings.color;
-                self.edit.tools.eraser_mut().bg_color = self.edit.bg_color;
-                self.edit.fg_color = self.edit.tools.brush().settings.color;
-                if let Some(w) = &self.win.window {
-                    w.request_redraw();
-                }
+                self.reset_paint_colors();
             }
             PhysicalKey::Code(KeyCode::KeyS) if pressed && !self.edit.input.ctrl_held => {
                 self.run_default(Command::ToolClone, event_loop, repeat);

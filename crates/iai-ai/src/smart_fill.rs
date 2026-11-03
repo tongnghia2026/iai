@@ -115,7 +115,9 @@ pub fn fill_with(rgba: &mut [u8], w: usize, h: usize, hole: &[bool], params: &CA
 
     let mut levels: Vec<Level> = vec![base];
     while levels.len() < params.max_levels {
-        let top = levels.last().unwrap();
+        let Some(top) = levels.last() else {
+            break;
+        };
         if top.w / 2 < 4 * patch || top.h / 2 < 4 * patch {
             break;
         }

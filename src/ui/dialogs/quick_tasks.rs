@@ -13,6 +13,16 @@ pub(crate) const QUICK_SCAN: &str = "Làm sạch ảnh chụp giấy tờ";
 pub(crate) const QUICK_IDS: &str = "Ảnh thẻ cho nhiều người";
 pub(crate) const QUICK_CARDS: &str = "Xếp căn cước lên A4 (tự ghép mặt trước – sau)";
 
+/// The ID photo sizes a job can ask for: the command's name, the label.
+pub(super) const ID_PHOTO_SIZES: &[(&str, &str)] = &[
+    ("3x4", "3×4"),
+    ("2x3", "2×3"),
+    ("4x6", "4×6"),
+    ("33x48", "3,3×4,8"),
+    ("35x45", "3,5×4,5"),
+    ("5x5", "5×5"),
+];
+
 fn form_id() -> egui::Id {
     egui::Id::new("quick_form")
 }
@@ -194,13 +204,7 @@ pub(crate) fn quick_window(ctx: &egui::Context, data: &UiData, actions: &mut UiA
                         );
                         ui.horizontal(|ui| {
                             ui.label("Cỡ");
-                            combo(
-                                ui,
-                                "quick_size",
-                                &mut form.size,
-                                super::ai_errand::ID_PHOTO_SIZES,
-                                78.0,
-                            );
+                            combo(ui, "quick_size", &mut form.size, ID_PHOTO_SIZES, 78.0);
                             ui.label("Nền");
                             combo(
                                 ui,

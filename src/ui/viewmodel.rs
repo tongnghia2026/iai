@@ -690,13 +690,19 @@ pub struct ChromeViewModel {
     pub update: UpdateView,
     /// The "Ủng hộ tác giả" dialog, when open, and what it opens with.
     pub support: Option<SupportDialog>,
+    /// What "Model AI" shows, while it is open, and whether a fetch or an
+    /// install it asked for is under way.
+    pub models: Option<std::sync::Arc<iai_ai::model_store::status::Overview>>,
+    pub models_busy: bool,
     /// Word from the author: the addresses that dialog opens, the sponsors.
     pub news: std::sync::Arc<crate::author_news::Loaded>,
     /// Word to the author: where the message being sent stands.
     pub mail: MailView,
-    /// AI agents' access to the window.
+    /// AI agents' access to the window (the Pro pack's AI gateway).
+    #[cfg(feature = "pro")]
     pub agent: AgentView,
-    /// "Nhờ AI làm": an errand for Gemini in Antigravity.
+    /// "Nhờ AI làm": an errand for Gemini in Antigravity (Pro).
+    #[cfg(feature = "pro")]
     pub errand: ErrandView,
     /// "Việc nhanh": jobs iAi does on a folder by itself, no AI.
     pub quick: QuickView,
@@ -747,11 +753,16 @@ pub enum SupportDialog {
     Pro,
     /// "Cấp mã Pro": the author signs a key.
     ProIssue,
-    /// "Cho AI điều khiển iAi": the switch, and what an agent is set up with.
+    /// "Model AI": the models of each feature on this machine.
+    Models,
+    /// "Cho AI điều khiển iAi": the switch, and what an agent is set up with
+    /// (the Pro pack's AI gateway).
+    #[cfg(feature = "pro")]
     Agent,
 }
 
 /// AI agents' access to the window, as its dialog shows it.
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentView {
     /// Agents on this machine may run commands in the window.
@@ -767,6 +778,7 @@ pub struct AgentView {
 }
 
 /// The jobs "Nhờ AI làm" offers.
+#[cfg(feature = "pro")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ErrandJob {
     /// ID cards shot at a slant, laid flat four to an A4 page (Pro).
@@ -787,6 +799,7 @@ pub enum ErrandJob {
     Other,
 }
 
+#[cfg(feature = "pro")]
 impl ErrandJob {
     pub const ALL: [ErrandJob; 6] = [
         ErrandJob::IdCards,
@@ -829,6 +842,7 @@ impl ErrandJob {
 }
 
 /// What an ID photo is dressed in when online AI may change it.
+#[cfg(feature = "pro")]
 pub const ERRAND_SHIRTS: [(&str, &str); 4] = [
     ("", "Giữ nguyên áo"),
     ("white_shirt", "Sơ mi trắng"),
@@ -837,6 +851,7 @@ pub const ERRAND_SHIRTS: [(&str, &str); 4] = [
 ];
 
 /// What the person filled in "Nhờ AI làm" (the folder is the app's).
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ErrandForm {
     pub job: ErrandJob,
@@ -858,6 +873,7 @@ pub struct ErrandForm {
     pub shirt: String,
 }
 
+#[cfg(feature = "pro")]
 impl Default for ErrandForm {
     fn default() -> Self {
         Self {
@@ -874,6 +890,7 @@ impl Default for ErrandForm {
 }
 
 /// Antigravity on this machine, as "Nhờ AI làm" sees it.
+#[cfg(feature = "pro")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AntigravityState {
     /// Not installed (or never opened).
@@ -885,6 +902,7 @@ pub enum AntigravityState {
 }
 
 /// The errand under way, as "Nhờ AI làm" shows it.
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ErrandRunView {
     pub title: String,
@@ -902,6 +920,7 @@ pub struct ErrandRunView {
 }
 
 /// "Nhờ AI làm" as its window shows it.
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ErrandView {
     pub open: bool,
@@ -975,10 +994,13 @@ pub struct QuickForm {
     pub task: QuickTask,
     /// Papers: "grayscale" or "bilevel".
     pub look: String,
-    /// ID photos, as in [`ErrandForm`].
+    /// ID photos: "3x4", "2x3", "4x6", "33x48", "35x45", "5x5".
     pub size: String,
+    /// ID photos: "white", "blue".
     pub backdrop: String,
+    /// ID photos: "10x15", "13x18".
     pub paper: String,
+    /// ID photos: copies of each person.
     pub copies: u32,
     /// A saved skill's values, by param.
     pub fields: Vec<QuickField>,
@@ -986,14 +1008,13 @@ pub struct QuickForm {
 
 impl Default for QuickForm {
     fn default() -> Self {
-        let errand = ErrandForm::default();
         Self {
             task: QuickTask::default(),
             look: "grayscale".to_string(),
-            size: errand.size,
-            backdrop: errand.backdrop,
-            paper: errand.paper,
-            copies: errand.copies,
+            size: "3x4".to_string(),
+            backdrop: "white".to_string(),
+            paper: "10x15".to_string(),
+            copies: 4,
             fields: Vec::new(),
         }
     }
@@ -1014,7 +1035,8 @@ pub struct QuickRunView {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QuickView {
     pub open: bool,
-    /// The folder of photos chosen (the one "Nhờ AI làm" uses).
+    /// The folder of photos chosen (the one the Pro pack's "Nhờ AI làm"
+    /// uses too).
     pub folder: String,
     /// Pro is open on this machine.
     pub pro: bool,
@@ -1026,6 +1048,7 @@ pub struct QuickView {
 }
 
 /// One saved skill as the agent dialog lists it.
+#[cfg(feature = "pro")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SkillRow {
     /// Its folder's name.
@@ -1627,9 +1650,13 @@ impl Default for UiData {
                 modal_flash: false,
                 update: UpdateView::default(),
                 support: None,
+                models: None,
+                models_busy: false,
                 news: Default::default(),
                 mail: Default::default(),
+                #[cfg(feature = "pro")]
                 agent: AgentView::default(),
+                #[cfg(feature = "pro")]
                 errand: ErrandView::default(),
                 quick: QuickView::default(),
                 #[cfg(feature = "pro")]

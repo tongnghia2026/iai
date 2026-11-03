@@ -17,7 +17,13 @@
 //! command/history and raster math. It must not reach up into `app`, `ui`,
 //! winit, wgpu or the format registry.
 
+// The AI gateway (`iai.exe mcp|run`, the Antigravity relay) is the Pro
+// pack's; the free build only says so (`no_gateway`).
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod agent;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod antigravity;
 pub mod app;
 pub mod author_mail;
@@ -31,6 +37,8 @@ pub mod extension;
 pub mod file_io;
 pub use iai_formats as formats;
 pub mod gpu;
+#[cfg(not(feature = "pro"))]
+pub mod no_gateway;
 #[cfg(feature = "pro")]
 pub use iai_pro::pro;
 pub mod tools;

@@ -1,5 +1,9 @@
 mod adjustment;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod agent;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod ai_errand;
 mod author_mail;
 mod document;
@@ -7,6 +11,7 @@ mod filter;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 mod id_photo;
+mod models;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 mod portrait;
@@ -27,11 +32,14 @@ mod text_font;
 mod update;
 mod vector_style;
 pub(crate) use adjustment::*;
+#[cfg(feature = "pro")]
 pub(crate) use agent::*;
+#[cfg(feature = "pro")]
 pub(crate) use ai_errand::*;
 pub(crate) use author_mail::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
+pub(crate) use models::*;
 #[cfg(feature = "pro")]
 pub(crate) use portrait::*;
 pub(crate) use print::*;
@@ -254,6 +262,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     // The save prompts of a closing app come before the news of a newer one,
     // and before the ask to support its author.
     let closing = data.dialogs.show_exit_dialog || data.dialogs.show_close_dialog || save_failed;
+    #[cfg(feature = "pro")]
     if data.chrome.errand.open && !closing {
         errand_window(ctx, data, actions);
     }
@@ -276,6 +285,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
             Some(SupportDialog::ProIssue) => pro_issue_dialog(ctx, data, actions),
             #[cfg(not(feature = "pro"))]
             Some(SupportDialog::Pro | SupportDialog::ProIssue) => {}
+            Some(SupportDialog::Models) => models_dialog(ctx, data, actions),
+            #[cfg(feature = "pro")]
             Some(SupportDialog::Agent) => agent_dialog(ctx, data, actions),
             None => {}
         }

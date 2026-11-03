@@ -2536,6 +2536,10 @@ fn smart_select_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
     ui.separator();
 
     let busy = data.sel.select_subject_busy;
+    if busy {
+        // Turning while it runs, so the button never looks stuck.
+        ui.add(egui::Spinner::new().size(14.0));
+    }
     let btn_label = if busy {
         format!("{} Running…", ph::HOURGLASS)
     } else {
