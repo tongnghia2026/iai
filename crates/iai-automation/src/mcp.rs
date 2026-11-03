@@ -279,6 +279,9 @@ struct Task {
     calls: Vec<Recorded>,
     /// Calls that changed something and failed.
     failed: usize,
+    /// A call gave a command's private params (a customer's name, ID
+    /// number…): the task is never kept, its calls hold them.
+    private: bool,
 }
 
 /// A tool's answer, before it becomes MCP content.
@@ -634,6 +637,11 @@ impl<'a> Server<'a> {
                 .all(|e| matches!(e, Effect::Query | Effect::ReadFiles))
         });
         let writes = info.is_some_and(|i| i.effects.contains(&Effect::WriteFiles));
+        let private = info.is_some_and(|i| {
+            i.private_params
+                .iter()
+                .any(|p| args.get(p).is_some_and(|v| !v.is_null()))
+        });
         if self.task.is_none() {
             if query {
                 return;
@@ -643,6 +651,7 @@ impl<'a> Server<'a> {
         let Some(task) = self.task.as_mut() else {
             return;
         };
+        task.private |= private;
         if task.calls.len() >= crate::limits::MAX_SCRIPT {
             return;
         }
@@ -1095,6 +1104,12 @@ impl<'a> Server<'a> {
         let Some(store) = self.skills.clone() else {
             return Ok(json!({"saved": null}));
         };
+        if task.private {
+            return Ok(json!({
+                "saved": null,
+                "reason": "the task gave a customer's details to a command: it is not kept as a skill"
+            }));
+        }
         let changes = task.calls.iter().filter(|c| !c.query).count();
         let ran_skill = task.calls.iter().any(|c| c.skill.is_some());
         if unconfirmed && (task.failed > 0 || (changes < 2 && !ran_skill)) {

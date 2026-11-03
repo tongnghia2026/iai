@@ -1656,6 +1656,8 @@ impl App {
                 photo_folder: None,
                 models: Default::default(),
                 quick: Default::default(),
+                #[cfg(feature = "pro")]
+                forms: Default::default(),
                 crop_presets: std::sync::Arc::new(crate::core::presets::SizePreset::load_all(
                     crate::core::presets::SizePresetList::Crop,
                 )),

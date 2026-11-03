@@ -10,6 +10,9 @@ mod document;
 mod filter;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
+mod forms;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod id_photo;
 mod models;
 #[cfg(feature = "pro")]
@@ -39,6 +42,8 @@ pub(crate) use ai_errand::*;
 pub(crate) use author_mail::*;
 pub(crate) use document::*;
 pub(crate) use filter::*;
+#[cfg(feature = "pro")]
+pub(crate) use forms::*;
 pub(crate) use models::*;
 #[cfg(feature = "pro")]
 pub(crate) use portrait::*;

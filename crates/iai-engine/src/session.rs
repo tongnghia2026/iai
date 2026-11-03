@@ -323,7 +323,11 @@ impl Session<'_> {
         let source = self.engine.source.as_str();
         iai_diag::note(
             "cmd",
-            &format!("{source} {} {}", meta.id, short(&call.args)),
+            &format!(
+                "{source} {} {}",
+                meta.id,
+                short(&for_journal(&call.args, cmd.private_params()))
+            ),
         );
 
         let txn = self.begin();
@@ -774,6 +778,26 @@ fn arg_doc(args: &Value) -> Option<u32> {
 }
 
 /// Args for the flight recorder: short, one line.
+/// `args` as the journal keeps them: a private param only said given.
+fn for_journal(args: &Value, private: &[&str]) -> Value {
+    match args {
+        Value::Object(fields) if !private.is_empty() => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| {
+                    let v = if private.contains(&k.as_str()) {
+                        Value::String("…".to_string())
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        _ => args.clone(),
+    }
+}
+
 fn short(args: &Value) -> String {
     let text = args.to_string();
     if text.chars().count() <= 300 {
@@ -790,4 +814,29 @@ pub(crate) fn no_document() -> CmdError {
 pub(crate) fn no_such_document(doc: u32) -> CmdError {
     CmdError::new(ErrorCode::NoDocument, format!("document {doc} is not open"))
         .vi(format!("Tài liệu {doc} không còn mở"))
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    #[test]
+    fn a_private_param_is_only_said_given_in_the_journal() {
+        let args = serde_json::json!({
+            "path": "C:/mau/đơn xin việc.docx",
+            "people": {"chinh": {"ho_ten": "TRẦN THỊ BÌNH", "so_dinh_danh": "079190001234"}},
+            "keepDots": true,
+        });
+        let kept = short(&for_journal(&args, &["people", "lists"]));
+        assert!(
+            kept.contains("đơn xin việc.docx") && kept.contains("keepDots"),
+            "{kept}"
+        );
+        assert!(
+            !kept.contains("BÌNH") && !kept.contains("079190001234"),
+            "{kept}"
+        );
+        // A command with nothing private is kept as it was asked.
+        assert_eq!(for_journal(&args, &[]), args);
+    }
 }

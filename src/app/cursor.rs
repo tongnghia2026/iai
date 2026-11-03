@@ -70,6 +70,22 @@ mod system {
         }
     }
 
+    /// The pointer over the window's client area, in its pixels: asked of
+    /// the system, which knows it even while files are dragged over (winit
+    /// hears no pointer then).
+    #[cfg(feature = "pro")]
+    pub fn pointer_on(window: &winit::window::Window) -> Option<(f32, f32)> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let hwnd = hwnd_of(window)?;
+        let mut at = POINT { x: 0, y: 0 };
+        // SAFETY: both write only into `at`, a point of ours; `hwnd` is this
+        // thread's own window.
+        let known = unsafe { GetCursorPos(&mut at) != 0 && ScreenToClient(hwnd, &mut at) != 0 };
+        known.then_some((at.x as f32, at.y as f32))
+    }
+
     pub fn is_in_front(window: &winit::window::Window) -> bool {
         // SAFETY: reads the system's own state.
         hwnd_of(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() } == hwnd)
@@ -114,6 +130,20 @@ mod system {
             }
         }
         Some(format!("{before} -> {}", held(hwnd)))
+    }
+}
+
+/// Where the pointer is over `window`, in its pixels (asked of the system:
+/// winit hears no pointer while files are dragged over the window). Only
+/// Windows is asked. Only the Pro part's form boxes ask.
+#[cfg(feature = "pro")]
+pub(super) fn pointer_on(window: &winit::window::Window) -> Option<(f32, f32)> {
+    #[cfg(target_os = "windows")]
+    return system::pointer_on(window);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
     }
 }
 

@@ -93,6 +93,10 @@ pub enum FileDialogResult {
     PickedSponsorLogo(PathBuf),
     /// A model file (or a `.zip` of them) to install ("Model AI").
     PickedModelFile(PathBuf),
+    /// What «Điền giấy tờ theo mẫu» asked for: its folder of templates, or
+    /// a person's ID card photos.
+    #[cfg(feature = "pro")]
+    PickedForForms(crate::app::forms_errand::FormsPick, Vec<PathBuf>),
     /// Files selected for insertion into an existing multi-page PDF document.
     InsertPdfPages {
         document_id: crate::core::document::DocumentId,
@@ -236,6 +240,40 @@ pub fn dialog_pick_model(parent: Option<DialogParent>) -> Option<PathBuf> {
         dialog = dialog.set_parent(&p);
     }
     dialog.pick_file()
+}
+
+/// Pick one file of the kinds `extensions` (named `kinds`). CALL ON A WORKER
+/// THREAD.
+pub fn dialog_pick_one(
+    parent: Option<DialogParent>,
+    title: &str,
+    kinds: &str,
+    extensions: &[&str],
+) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter(kinds, extensions)
+        .set_title(title);
+    if let Some(p) = parent {
+        dialog = dialog.set_parent(&p);
+    }
+    dialog.pick_file()
+}
+
+/// Pick one or more files of the kinds `extensions` (named `kinds`). CALL ON
+/// A WORKER THREAD.
+pub fn dialog_pick_many(
+    parent: Option<DialogParent>,
+    title: &str,
+    kinds: &str,
+    extensions: &[&str],
+) -> Option<Vec<PathBuf>> {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter(kinds, extensions)
+        .set_title(title);
+    if let Some(p) = parent {
+        dialog = dialog.set_parent(&p);
+    }
+    dialog.pick_files()
 }
 
 /// Pick a folder (the Library grid browser, "Xếp ảnh in"). CALL ON A WORKER THREAD.

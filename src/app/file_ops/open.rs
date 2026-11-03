@@ -1497,6 +1497,10 @@ impl App {
                     file_io::FileDialogResult::PickedModelFile(path) => {
                         self.install_model_file(path);
                     }
+                    #[cfg(feature = "pro")]
+                    file_io::FileDialogResult::PickedForForms(pick, paths) => {
+                        self.forms_picked(pick, paths);
+                    }
                     file_io::FileDialogResult::InsertPdfPages {
                         document_id,
                         position,

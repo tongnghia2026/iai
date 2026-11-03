@@ -2,9 +2,12 @@
 //! effects it may cause, the folders it may read from and write to, and the
 //! sizes of what goes back and forth.
 //!
-//! A file path in a call (any field named `path`) is read against the
-//! granted folders: a relative one is joined to the first folder of its
-//! kind, an absolute one must lie inside one of them. `..`, device names
+//! A file path in a call (any field named `path`, and a command's own
+//! `out`, `mapDir`, `photo` and `paths`) is read against the granted
+//! folders: a relative one is joined to the first folder of its kind, an
+//! absolute one must lie inside one of them. `photo` and `paths` are only
+//! read from; deeper down they may be other things (a sheet's `photo` is a
+//! size). `..`, device names
 //! (`CON`, `NUL`, `COM1`…), `\\?\` and `\\.\` forms and links that lead out
 //! of a folder are refused. What reaches the engine is the path made
 //! absolute.
@@ -209,7 +212,35 @@ impl Gate {
             ));
         }
         if writes || reads {
+            self.own_files(&mut call.args, writes)?;
             self.paths(&mut call.args, writes)?;
+        }
+        Ok(())
+    }
+
+    /// A command's own files besides `path`: where it writes (`out`,
+    /// `mapDir`) and the photos it reads (`photo`, `paths`).
+    fn own_files(&self, args: &mut Value, write: bool) -> Result<(), CmdError> {
+        let Value::Object(fields) = args else {
+            return Ok(());
+        };
+        let fix = |text: &mut String, write: bool| -> Result<(), CmdError> {
+            *text = self.resolve(text, write)?.display().to_string();
+            Ok(())
+        };
+        for (key, v) in fields.iter_mut() {
+            match (key.as_str(), v) {
+                ("out" | "mapDir", Value::String(text)) => fix(text, write)?,
+                ("photo", Value::String(text)) => fix(text, false)?,
+                ("paths", Value::Array(items)) => {
+                    for item in items.iter_mut() {
+                        if let Value::String(text) = item {
+                            fix(text, false)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -445,5 +476,86 @@ mod tests {
         let mut open = CommandCall::new("file.open", json!({"path": "a.png"}));
         let e = bare.check(&mut open).unwrap_err();
         assert!(e.message.contains("--read-root"), "{}", e.message);
+    }
+
+    /// A form's other files are held to the folders too: what it writes
+    /// (`out`, `mapDir`) inside one granted for writing, the photos it only
+    /// reads (`photo`, `paths`) inside any.
+    #[test]
+    fn a_forms_other_files_stay_inside_the_folders_granted() {
+        let (input, output, elsewhere) = (Dir::new("in4"), Dir::new("out4"), Dir::new("else4"));
+        let mut g = gate(&input.0, &output.0);
+        let info = |id: &str, effects: Vec<Effect>| CommandInfo {
+            id: id.to_string(),
+            label_vi: String::new(),
+            label_en: String::new(),
+            doc: String::new(),
+            effects,
+            featured: false,
+            can_dry_run: false,
+            params_schema: Value::Null,
+            output_schema: Value::Null,
+            private_params: Vec::new(),
+        };
+        g.learn(&[
+            info("forms.fill", vec![Effect::ReadFiles, Effect::WriteFiles]),
+            info("forms.read_card", vec![Effect::ReadFiles]),
+        ]);
+        let at = |d: &Dir, name: &str| d.0.join(name).display().to_string();
+        let check = |args: Value| {
+            let mut call = CommandCall::new("forms.fill", args);
+            g.check(&mut call).map(|()| call.args)
+        };
+        let args = check(json!({
+            "path": "mau.docx", "out": at(&output, "Đã điền"), "photo": at(&input, "anh.jpg")
+        }))
+        .unwrap();
+        for (key, name) in [
+            ("path", "mau.docx"),
+            ("out", "Đã điền"),
+            ("photo", "anh.jpg"),
+        ] {
+            let text = args[key].as_str().unwrap();
+            assert!(
+                Path::new(text).is_absolute() && text.ends_with(name),
+                "{key}: {text}"
+            );
+        }
+        // Deeper down a `photo` is no file: a sheet's photo size stays.
+        let args = check(json!({"path": "mau.docx", "sheet": {"photo": "3x4"}})).unwrap();
+        assert_eq!(args["sheet"]["photo"], "3x4");
+        let denied = |args: Value| check(args).unwrap_err().code;
+        // Written where only reading was granted, or outside every folder.
+        assert_eq!(
+            denied(json!({"path": "mau.docx", "out": at(&input, "x")})),
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            denied(json!({"path": "mau.docx", "mapDir": at(&elsewhere, "maps")})),
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            denied(json!({"path": "mau.docx", "photo": at(&elsewhere, "anh.jpg")})),
+            ErrorCode::PermissionDenied
+        );
+        // A card's photos: each inside a folder granted.
+        let read = |paths: Vec<String>| {
+            let mut call = CommandCall::new("forms.read_card", json!({"paths": paths}));
+            g.check(&mut call).map(|()| call.args)
+        };
+        let args = read(vec![at(&input, "truoc.jpg"), at(&output, "sau.jpg")]).unwrap();
+        assert!(
+            args["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| { Path::new(p.as_str().unwrap()).is_absolute() })
+        );
+        assert_eq!(
+            read(vec![at(&input, "truoc.jpg"), at(&elsewhere, "sau.jpg")])
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
     }
 }

@@ -28,6 +28,9 @@ pub mod ext_bridge;
 pub mod file_ops;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
+pub mod forms_errand;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod id_photo_ops;
 pub mod input;
 pub mod library;

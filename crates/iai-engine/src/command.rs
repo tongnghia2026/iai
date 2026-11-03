@@ -126,6 +126,13 @@ pub trait Command: Send + Sync + 'static {
     /// Check the documents and either do the change or return the job that
     /// will. Nothing may be changed before the last check has passed.
     fn plan(&self, s: &mut Session<'_>, p: Self::Params) -> Result<Plan<Self::Output>, CmdError>;
+
+    /// The params about people (a customer's name, ID number…): the
+    /// journal says only that they were given, and an agent's task that
+    /// gave them is never kept as a skill.
+    fn private_params(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// A command with its types erased, as the registry keeps it.
@@ -135,6 +142,8 @@ pub trait DynCommand: Send + Sync {
     fn output_schema(&self) -> &Value;
     /// Read `args` against the params' schema and type, then plan.
     fn plan_json(&self, s: &mut Session<'_>, args: Value) -> Result<Plan<Value>, CmdError>;
+    /// See [`Command::private_params`].
+    fn private_params(&self) -> &'static [&'static str];
 }
 
 struct Typed<C> {
@@ -169,6 +178,10 @@ impl<C: Command> DynCommand for Typed<C> {
 
     fn output_schema(&self) -> &Value {
         &self.output_schema
+    }
+
+    fn private_params(&self) -> &'static [&'static str] {
+        self.cmd.private_params()
     }
 
     fn plan_json(&self, s: &mut Session<'_>, args: Value) -> Result<Plan<Value>, CmdError> {
@@ -212,6 +225,9 @@ pub struct CommandInfo {
     pub can_dry_run: bool,
     pub params_schema: Value,
     pub output_schema: Value,
+    /// Params said only as given (see [`Command::private_params`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_params: Vec<String>,
 }
 
 /// Every command, by id.
@@ -276,6 +292,7 @@ impl Registry {
                     can_dry_run: m.can_dry_run(),
                     params_schema: c.params_schema().clone(),
                     output_schema: c.output_schema().clone(),
+                    private_params: c.private_params().iter().map(|p| p.to_string()).collect(),
                 }
             })
             .collect()

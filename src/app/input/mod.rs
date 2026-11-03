@@ -1192,6 +1192,12 @@ impl ApplicationHandler for App {
                 self.install_model_file(path);
             }
             WindowEvent::DroppedFile(path) => {
+                // An ID card photo dropped on a person's box of «Điền giấy
+                // tờ theo mẫu» is theirs, not a document to open.
+                #[cfg(feature = "pro")]
+                if self.forms_take_drop(&path) {
+                    return;
+                }
                 // Strict modal lock: opening documents is refused while a
                 // modal operation is in progress. An ID photo being made
                 // holds only its tab: a photo dropped opens in a tab of its

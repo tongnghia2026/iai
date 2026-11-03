@@ -3,6 +3,11 @@
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
 03/11/2026
+- Gói Pro: «Nhờ AI làm» có thêm việc «Điền giấy tờ theo mẫu». Chọn mẫu Word của cửa hàng (hợp đồng, đơn xin việc, sơ yếu lý lịch, tờ khai CT01…), app hiện mỗi người trong mẫu một ô (Bên A, Bên B, người làm đơn…). Kéo ảnh căn cước hai mặt của từng người thả vào ô của người đó (hoặc bấm vào ô để chọn ảnh), gõ yêu cầu (ví dụ: thuê 12 tháng từ 01/12, 5 triệu một tháng, cọc 2 tháng), bấm «Gửi cho Gemini». AI tự đọc căn cước (ảnh được gửi cho Gemini đọc), tự tính ngày hết hạn, số tiền bằng chữ…, rồi điền ra một file Word mới trong thư mục «Đã điền» cạnh mẫu; xong bấm «Mở file Word» để soát rồi in. File mẫu không bị sửa.
+- Thả ảnh căn cước mới lên ô của một người là thay cho ảnh khách trước; chuột phải lên ô để bỏ ảnh.
+- Menu File bỏ mục «Xếp căn cước từ thư mục» (việc này đã có trong «Việc nhanh»).
+
+03/11/2026
 - Làm ảnh thẻ xong, layer «Chân dung» không còn bị tắt con mắt: trong lúc cửa sổ AI chỉnh tiếp, phần xem trước hiện ngay trên layer đó. Bật / tắt con mắt giữ đúng như mình bấm, và chỉnh bằng Ctrl+U, Levels… lên layer «Chân dung» thấy tác dụng ngay. Bấm «Áp dụng» khi chưa đổi thanh nào thì app báo «giữ nguyên».
 - Công cụ Move quét khung chọn như CorelDRAW: chỉ layer nằm trọn trong khung mới được chọn, nên quét lấy được các hình nhỏ nằm trên một layer lớn mà không dính layer lớn. Giữ Alt khi quét thì chạm vào là chọn. Giữ Shift khi quét để chọn thêm; Shift + bấm vào một layer để thêm nó vào, hoặc bỏ nó ra nếu đang chọn.
 - Nút Select Subject có vòng quay và chữ «Running…» trong lúc đang chọn chủ thể, không còn trông như đứng im.

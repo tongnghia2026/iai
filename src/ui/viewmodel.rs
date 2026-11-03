@@ -786,6 +786,9 @@ pub enum ErrandJob {
     IdCards,
     /// An ID photo of each person, so many each, on photo paper (Pro).
     IdPhotos,
+    /// A Word template of the shop's filled for its people from their ID
+    /// cards and what the person asks (Pro).
+    FillForm,
     /// The ID photo open in the window, dressed anew or its missing
     /// shoulders filled by online AI; its face, hair and backdrop stay the
     /// photo's (Pro).
@@ -801,9 +804,10 @@ pub enum ErrandJob {
 
 #[cfg(feature = "pro")]
 impl ErrandJob {
-    pub const ALL: [ErrandJob; 6] = [
+    pub const ALL: [ErrandJob; 7] = [
         ErrandJob::IdCards,
         ErrandJob::IdPhotos,
+        ErrandJob::FillForm,
         ErrandJob::DressIdPhoto,
         ErrandJob::EditPhoto,
         ErrandJob::ScanCleanup,
@@ -814,6 +818,7 @@ impl ErrandJob {
         match self {
             ErrandJob::IdCards => "In căn cước lên A4",
             ErrandJob::IdPhotos => "Ảnh thẻ cho nhiều người",
+            ErrandJob::FillForm => crate::ui::dialogs::FORMS_TITLE,
             ErrandJob::DressIdPhoto => "Thay áo, lấp vai ảnh thẻ đang mở (AI online)",
             ErrandJob::EditPhoto => "Sửa ảnh đang mở (AI online)",
             ErrandJob::ScanCleanup => "Làm sạch ảnh chụp giấy tờ",
@@ -830,7 +835,10 @@ impl ErrandJob {
     pub fn pro(self) -> bool {
         matches!(
             self,
-            ErrandJob::IdCards | ErrandJob::IdPhotos | ErrandJob::DressIdPhoto
+            ErrandJob::IdCards
+                | ErrandJob::IdPhotos
+                | ErrandJob::FillForm
+                | ErrandJob::DressIdPhoto
         )
     }
 
@@ -917,6 +925,8 @@ pub struct ErrandRunView {
     pub failed: bool,
     /// The results' folder, once it is there.
     pub results: Option<String>,
+    /// The Word file a form errand filled, once it is done.
+    pub file: Option<String>,
 }
 
 /// "Nhờ AI làm" as its window shows it.
@@ -937,6 +947,8 @@ pub struct ErrandView {
     /// A job to show chosen, asked for elsewhere (the ID photo's "Thay áo"),
     /// counted so that the window takes it once.
     pub preset: Option<(u64, ErrandJob)>,
+    /// «Điền giấy tờ theo mẫu»: its template and each person's ID cards.
+    pub forms: crate::ui::dialogs::FormsView,
 }
 
 /// What "Việc nhanh" does.

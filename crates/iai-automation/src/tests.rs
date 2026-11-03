@@ -375,6 +375,102 @@ fn the_server_serves_a_stream_line_by_line() {
     assert_eq!(answers[2]["id"], 2);
 }
 
+/// A command about a customer, as `forms.fill` is: `who` is private.
+struct Customer;
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct CustomerParams {
+    who: String,
+}
+
+impl iai_engine::Validate for CustomerParams {}
+
+static CUSTOMER: iai_engine::CommandMeta = iai_engine::CommandMeta {
+    id: "test.customer",
+    label_vi: "Khách",
+    label_en: "Customer",
+    doc: "Says who the customer is.",
+    effects: &[iai_engine::Effect::Query],
+    featured: false,
+};
+
+impl iai_engine::Command for Customer {
+    type Params = CustomerParams;
+    type Output = String;
+
+    fn meta(&self) -> &'static iai_engine::CommandMeta {
+        &CUSTOMER
+    }
+
+    fn private_params(&self) -> &'static [&'static str] {
+        &["who"]
+    }
+
+    fn plan(
+        &self,
+        _s: &mut iai_engine::Session<'_>,
+        p: CustomerParams,
+    ) -> Result<iai_engine::Plan<String>, iai_engine::CmdError> {
+        Ok(iai_engine::Plan::Done(p.who))
+    }
+}
+
+/// A customer's name or ID number given to a command stays out of the
+/// skill library: the task that gave it is not kept, however well it went.
+#[test]
+fn a_task_given_a_customers_details_is_never_kept_as_a_skill() {
+    use crate::skills::Store;
+
+    let (input, output, lib) = (Dir::new("pv-in"), Dir::new("pv-out"), Dir::new("pv-lib"));
+    let roots = Roots::new(&[input.0.clone()], &[output.0.clone()]).unwrap();
+    let mut registry = iai_engine::cmds::core_registry();
+    registry.register(Customer);
+    let mut host = LocalHost::new(Engine::new(registry, Source::Agent, Policy::agent()));
+    let gate = Gate::new(Policy::agent(), roots);
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(Store::new(&lib.0));
+    rpc(
+        &mut server,
+        "initialize",
+        json!({"protocolVersion": "2025-06-18"}),
+    );
+    tool(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "Điền hợp đồng cho khách"}),
+    );
+    tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "test.customer", "args": {"who": "NGUYỄN VĂN A"}}),
+    );
+    for _ in 0..2 {
+        let made = tool(
+            &mut server,
+            "iai_command_run",
+            json!({"command": "file.new", "args": {"widthPx": 20, "heightPx": 20}}),
+        );
+        let doc = made["result"]["doc"].clone();
+        tool(
+            &mut server,
+            "iai_command_run",
+            json!({"command": "image.flip", "args": {"doc": doc, "axis": "horizontal"}}),
+        );
+    }
+    let ended = tool(
+        &mut server,
+        "iai_task_end",
+        json!({"status": "done", "title": "Điền hợp đồng"}),
+    );
+    assert_eq!(ended["saved"], Value::Null, "{ended}");
+    assert!(
+        ended["reason"].as_str().unwrap().contains("customer"),
+        "{ended}"
+    );
+    assert!(Store::new(&lib.0).list().is_empty());
+}
+
 #[test]
 fn an_agents_task_is_kept_as_a_skill_and_the_next_agent_runs_it_instead() {
     use crate::skills::Store;

@@ -130,6 +130,10 @@ pub struct UiShell {
     pub(in crate::app) models: crate::app::models_ops::ModelsWindow,
     /// "Việc nhanh": jobs iAi does on a folder by itself.
     pub(in crate::app) quick: crate::app::quick_tasks::QuickTasks,
+    /// «Điền giấy tờ theo mẫu» in "Nhờ AI làm": its templates, the one
+    /// picked, each person's ID card photos.
+    #[cfg(feature = "pro")]
+    pub(in crate::app) forms: crate::app::forms_errand::FormsErrand,
     /// Sizes saved by the user, the Crop tool's and the New Canvas dialog's.
     pub(in crate::app) crop_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,
     pub(in crate::app) canvas_presets: std::sync::Arc<Vec<crate::core::presets::SizePreset>>,

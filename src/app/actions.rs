@@ -170,6 +170,10 @@ impl App {
                 continue;
             }
             #[cfg(feature = "pro")]
+            if self.forms_step(&call) {
+                continue;
+            }
+            #[cfg(feature = "pro")]
             if self.card_window_step(&call) {
                 continue;
             }
