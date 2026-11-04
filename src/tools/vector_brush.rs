@@ -47,6 +47,9 @@ pub struct VectorBrushTool {
     pub min_ratio: f32,
     /// End-cap for Expand Stroke (the live ribbon is always round).
     pub cap: LineCap,
+    /// Freehand line: the drag becomes a plain outlined path of `width`,
+    /// closed when it ends where it began, instead of a brush ribbon.
+    pub freehand: bool,
 
     /// Captured `(canvas point, width ratio)` samples for the active stroke.
     samples: Vec<(Point, f32)>,
@@ -67,6 +70,7 @@ impl VectorBrushTool {
             velocity: true,
             min_ratio: 0.15,
             cap: LineCap::Round,
+            freehand: true,
             samples: Vec::new(),
             pen: Point::new(0.0, 0.0),
             speed: 0.0,
@@ -160,7 +164,24 @@ impl VectorBrushTool {
     pub fn take_stroke_object(&mut self, fg_color: [u8; 4]) -> Option<VectorObjectData> {
         let samples = std::mem::take(&mut self.samples);
         self.drawing = false;
-        let (path, profile) = brush::build_centerline(&samples, MIN_POINT_DIST, SIMPLIFY_TOL)?;
+        let (mut path, profile) = brush::build_centerline(&samples, MIN_POINT_DIST, SIMPLIFY_TOL)?;
+        if self.freehand {
+            // Ending near the start closes the shape so it can take a fill.
+            let close_px = (self.width * 2.0).max(8.0);
+            let ends_meet = match (samples.first(), samples.last()) {
+                (Some(&(a, _)), Some(&(b, _))) => samples.len() > 3 && a.distance_to(b) <= close_px,
+                _ => false,
+            };
+            if ends_meet && let Some(ci) = (!path.contours.is_empty()).then_some(0) {
+                let _ = crate::core::vector::ops::close_contour(&mut path, ci, close_px);
+            }
+            let style = VectorStyle::stroked(ColorValue::from_rgba8(fg_color), self.width.max(0.1));
+            return Some(VectorObjectData::new(
+                path,
+                style,
+                AffineTransform::IDENTITY,
+            ));
+        }
         let profile = simplify_uniform(profile);
         let brush = BrushStroke {
             base_width: self.width.max(0.1),
@@ -276,8 +297,33 @@ mod tests {
     }
 
     #[test]
+    fn freehand_draws_an_outline_and_closes_where_it_began() {
+        let mut t = VectorBrushTool::new();
+        t.smoothing = 0.0;
+        let mut doc = Document::new(DocumentId(1), 200, 200);
+        let open = [(10.0, 100.0), (60.0, 60.0), (110.0, 100.0), (160.0, 60.0)];
+        drag(&mut t, &mut ctx(&mut doc), &open);
+        let obj = t.take_stroke_object([20, 40, 200, 255]).expect("object");
+        assert!(!obj.is_brush(), "a plain path, not a ribbon");
+        assert!(obj.style.stroke.is_visible() && !obj.style.fill.is_visible());
+        assert!(!obj.path.contours[0].closed);
+
+        let ring = [
+            (50.0, 50.0),
+            (150.0, 50.0),
+            (150.0, 150.0),
+            (50.0, 150.0),
+            (52.0, 52.0),
+        ];
+        drag(&mut t, &mut ctx(&mut doc), &ring);
+        let obj = t.take_stroke_object([20, 40, 200, 255]).expect("object");
+        assert!(obj.path.contours[0].closed, "ending at the start closes it");
+    }
+
+    #[test]
     fn stroke_commits_a_brush_object() {
         let mut t = VectorBrushTool::new();
+        t.freehand = false;
         // No smoothing so the samples land where drawn (deterministic test).
         t.smoothing = 0.0;
         t.pressure = false;
@@ -303,6 +349,7 @@ mod tests {
     #[test]
     fn pressure_produces_a_width_profile() {
         let mut t = VectorBrushTool::new();
+        t.freehand = false;
         t.smoothing = 0.0;
         t.pressure = true;
         t.velocity = false;

@@ -737,8 +737,9 @@ pub(crate) fn gradient_editor(
     });
     ui.add_space(8.0);
 
-    let bar_w = 256.0;
-    let bar_h = 24.0;
+    // The bar and the picker take the editor's whole width.
+    let bar_w = ui.available_width().max(256.0);
+    let bar_h = 28.0;
     let marker_h = 14.0;
     let (area, _) =
         ui.allocate_exact_size(Vec2::new(bar_w, bar_h + 4.0 + marker_h), Sense::hover());
@@ -845,14 +846,6 @@ pub(crate) fn gradient_editor(
 
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Color");
-            let mut rgb = [stops[sel].1[0], stops[sel].1[1], stops[sel].1[2]];
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                stops[sel].1[0] = rgb[0];
-                stops[sel].1[1] = rgb[1];
-                stops[sel].1[2] = rgb[2];
-                changed = true;
-            }
             if show_opacity {
                 ui.add_space(10.0);
                 ui.label("Opacity");
@@ -905,6 +898,19 @@ pub(crate) fn gradient_editor(
                 changed = true;
             }
         });
+        // The picker sits in the editor itself: a pop-up one covered the
+        // editor's own buttons.
+        ui.add_space(6.0);
+        let [r, g, b, _] = stops[sel].1;
+        let mut colour = Color32::from_rgb(r, g, b);
+        ui.spacing_mut().slider_width = ui.available_width();
+        ui.spacing_mut().interact_size.y = 22.0;
+        if crate::ui::color_picker::color_picker_compact(ui, &mut colour) {
+            stops[sel].1[0] = colour.r();
+            stops[sel].1[1] = colour.g();
+            stops[sel].1[2] = colour.b();
+            changed = true;
+        }
     });
     ui.add_space(4.0);
     ui.label(
@@ -921,8 +927,13 @@ pub(crate) fn gradient_editor(
 
 /// The Gradient tool's pop-up Gradient Editor window (opened from the options bar).
 pub(crate) fn gradient_editor_window(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
-    let mut stops = data.tool.gradient_stops.clone();
-    let mut changed = false;
+    // The edits stay a draft in the editor and reach the document on Done:
+    // repainting the shape at every pointer move in the picker lagged.
+    let draft_id = egui::Id::new("gradient_editor_draft");
+    let mut stops: Vec<(f32, [u8; 4])> = ctx
+        .data(|d| d.get_temp(draft_id))
+        .unwrap_or_else(|| data.tool.gradient_stops.clone());
+    let mut done = false;
     let (enter_pressed, esc_pressed) = consume_dialog_enter_escape(ctx);
     let mut open = !esc_pressed;
     egui::Window::new("Gradient Editor")
@@ -934,27 +945,36 @@ pub(crate) fn gradient_editor_window(ctx: &egui::Context, data: &UiData, actions
         .open(&mut open)
         .show(ctx, |ui| {
             ui.add_space(4.0);
-            changed = gradient_editor(ui, &mut stops, true);
+            gradient_editor(ui, &mut stops, true);
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Reset").clicked() {
                     stops = vec![(0.0, [0, 0, 0, 255]), (1.0, [255, 255, 255, 255])];
-                    changed = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Done").clicked() || enter_pressed {
-                        actions.tool.toggle_gradient_editor = Some(false);
+                    if ui
+                        .button("Done")
+                        .on_hover_text("Áp dụng dải màu và đóng (Enter)")
+                        .clicked()
+                        || enter_pressed
+                    {
+                        done = true;
                     }
                 });
             });
             ui.add_space(2.0);
         });
-    if changed {
+    if done {
         actions.tool.set_gradient_stops = Some(stops);
-    }
-    if !open {
         actions.tool.toggle_gradient_editor = Some(false);
+        ctx.data_mut(|d| d.remove::<Vec<(f32, [u8; 4])>>(draft_id));
+    } else if !open {
+        // Closed with × or Esc: the draft is dropped.
+        actions.tool.toggle_gradient_editor = Some(false);
+        ctx.data_mut(|d| d.remove::<Vec<(f32, [u8; 4])>>(draft_id));
+    } else {
+        ctx.data_mut(|d| d.insert_temp(draft_id, stops));
     }
 }
 

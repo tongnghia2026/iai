@@ -453,6 +453,162 @@ impl App {
         true
     }
 
+    /// The Node options bar's point buttons (`vector.node_op` with an `op`):
+    /// they work on the points picked here, which the engine does not see.
+    pub(in crate::app) fn node_step(&mut self, call: &iai_engine::CommandCall) -> bool {
+        if call.command != "vector.node_op" {
+            return false;
+        }
+        let op = call.args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match op {
+            "delete" => {
+                self.node_delete_selected();
+            }
+            "break" => {
+                self.node_break_at_selected();
+            }
+            "join" => {
+                self.node_join_selected();
+            }
+            "align" => {
+                let axis = match call.args.get("axis").and_then(|v| v.as_str()) {
+                    Some("y") => Axis::Horizontal,
+                    _ => Axis::Vertical,
+                };
+                let reference = match call.args.get("to").and_then(|v| v.as_str()) {
+                    Some("min") => AlignRef::Min,
+                    Some("max") => AlignRef::Max,
+                    _ => AlignRef::Average,
+                };
+                self.node_align(axis, reference);
+            }
+            _ => {
+                self.node_apply_op(op);
+            }
+        }
+        true
+    }
+
+    /// Add / line / curve / corner / smooth / symmetric / reverse / close on the
+    /// picked points (reverse and close take the whole path when none is
+    /// picked). One `ReplacePathGeometry` = one undo.
+    fn node_apply_op(&mut self, op: &str) -> bool {
+        use crate::core::vector::ops;
+        let Some((layer_id, _t, mut path)) = self.active_node_object() else {
+            return false;
+        };
+        let sel = match self.node_effective_selection() {
+            Some((id, sel)) if id == layer_id => sel,
+            _ => Vec::new(),
+        };
+        let whole_path = matches!(op, "reverse" | "close");
+        if sel.is_empty() && !whole_path {
+            self.shell.status_msg = "Select a point first".to_string();
+            return true;
+        }
+        let contours: std::collections::BTreeSet<usize> = if sel.is_empty() {
+            (0..path.contours.len()).collect()
+        } else {
+            sel.iter().map(|&(c, _)| c).collect()
+        };
+        // High to low so an inserted point does not shift the ones still to do.
+        let mut points = sel.clone();
+        points.sort_unstable_by(|a, b| b.cmp(a));
+        points.dedup();
+        // The segment leaving a point; the last point of an open path has
+        // none, so it takes the one arriving.
+        let segment_from = |contour: &crate::core::vector::path::Contour, n: usize| {
+            let count = contour.segment_count();
+            if n < count {
+                Some(n)
+            } else {
+                (count > 0).then(|| count - 1)
+            }
+        };
+        let mut done = 0usize;
+        let label = match op {
+            "add" => {
+                for &(c, n) in &points {
+                    if let Some(contour) = path.contours.get_mut(c)
+                        && let Some(seg) = segment_from(contour, n)
+                        && ops::split_segment(contour, seg, 0.5).is_ok()
+                    {
+                        done += 1;
+                    }
+                }
+                "Add Point"
+            }
+            "to_line" | "to_curve" => {
+                for &(c, n) in &points {
+                    if let Some(contour) = path.contours.get_mut(c)
+                        && let Some(seg) = segment_from(contour, n)
+                    {
+                        let res = if op == "to_line" {
+                            ops::set_segment_straight(contour, seg)
+                        } else {
+                            ops::set_segment_curved(contour, seg)
+                        };
+                        done += usize::from(res.is_ok());
+                    }
+                }
+                if op == "to_line" {
+                    "To Line"
+                } else {
+                    "To Curve"
+                }
+            }
+            "cusp" | "smooth" | "symmetric" => {
+                for &(c, n) in &points {
+                    if let Some(contour) = path.contours.get_mut(c) {
+                        let res = match op {
+                            "cusp" => ops::set_node_cusp(contour, n),
+                            "smooth" => ops::set_node_smooth(contour, n),
+                            _ => ops::set_node_symmetric(contour, n),
+                        };
+                        done += usize::from(res.is_ok());
+                    }
+                }
+                match op {
+                    "cusp" => "Corner Point",
+                    "smooth" => "Smooth Point",
+                    _ => "Symmetric Point",
+                }
+            }
+            "reverse" => {
+                for &c in &contours {
+                    if let Some(contour) = path.contours.get_mut(c) {
+                        contour.reverse();
+                        done += 1;
+                    }
+                }
+                "Reverse Direction"
+            }
+            "close" => {
+                const WELD: f32 = 6.0;
+                for &c in &contours {
+                    if path.contours.get(c).is_some_and(|k| !k.closed)
+                        && ops::close_contour(&mut path, c, WELD).is_ok()
+                    {
+                        done += 1;
+                    }
+                }
+                "Close Path"
+            }
+            _ => return false,
+        };
+        if done == 0 {
+            self.shell.status_msg = format!("{label}: nothing to change here");
+            return true;
+        }
+        // Points moved index (add, reverse, close): pick none rather than the
+        // wrong ones.
+        if matches!(op, "add" | "reverse" | "close") {
+            self.clear_node_selection();
+        }
+        self.commit_node_geometry(layer_id, path, label);
+        true
+    }
+
     /// The geometry the overlay/hit-test should use: the live `pending` path
     /// during a drag, else the committed model path. Plus the object transform.
     fn node_edit_geometry(&self) -> Option<(u32, AffineTransform, PathData)> {
@@ -1640,6 +1796,45 @@ mod tests {
             model_path(&app, id).contours[0].nodes.len(),
             4,
             "both restored"
+        );
+    }
+
+    #[test]
+    fn the_point_buttons_add_straighten_and_close() {
+        let (mut app, id) = app_with_path();
+        let run = |app: &mut App, op: &str| {
+            let call =
+                iai_engine::CommandCall::new("vector.node_op", serde_json::json!({ "op": op }));
+            assert!(app.node_step(&call));
+        };
+        app.edit.node_selected = Some((id, 0, 0));
+        run(&mut app, "add");
+        assert_eq!(
+            model_path(&app, id).contours[0].nodes.len(),
+            5,
+            "one point added"
+        );
+        app.edit.node_selected = Some((id, 0, 1));
+        run(&mut app, "to_curve");
+        assert!(
+            model_path(&app, id).contours[0].nodes[1]
+                .out_handle
+                .is_some()
+        );
+        run(&mut app, "to_line");
+        assert!(
+            model_path(&app, id).contours[0].nodes[1]
+                .out_handle
+                .is_none()
+        );
+        let closed = model_path(&app, id).contours[0].closed;
+        run(&mut app, "reverse");
+        assert_eq!(model_path(&app, id).contours[0].closed, closed);
+        app.docs.documents[0].canvas.undo().expect("undo");
+        assert!(
+            model_path(&app, id).contours[0].nodes[1]
+                .out_handle
+                .is_none()
         );
     }
 

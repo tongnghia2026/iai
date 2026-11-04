@@ -4384,6 +4384,291 @@ struct VsOut {
             })
     }
 
+    /// Hybrid canvas: draws the contiguous run of GPU vector layers that starts
+    /// at `layer_slot` (members after the first are skipped by the caller). The
+    /// run is one ping/pong step of `composite_layers`.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_vector_run(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layer_stack: &LayerStack,
+        visible_layers: &[(usize, &Layer)],
+        gpu_eligible: &[bool],
+        layer_slot: usize,
+        use_partial: bool,
+        full_clear_color: wgpu::Color,
+        (view_offset_x, view_offset_y, zoom): (f32, f32, f32),
+        command_buffers: &mut Vec<wgpu::CommandBuffer>,
+        current_dst_is_ping: &mut bool,
+        first_layer: &mut bool,
+    ) {
+        let layer = visible_layers[layer_slot].1;
+        let n_layers = visible_layers.len();
+        let layer_has_mask = layer.mask.as_ref().is_some_and(|mask| mask.enabled);
+        let previous_joins = layer_slot > 0
+            && gpu_eligible[layer_slot - 1]
+            && visible_layers[layer_slot - 1].1.parent_id == layer.parent_id
+            && !layer_has_mask
+            && !visible_layers[layer_slot - 1]
+                .1
+                .mask
+                .as_ref()
+                .is_some_and(|mask| mask.enabled);
+        let is_run_start = !previous_joins;
+        if is_run_start {
+            use iai_doc::layer::LayerType;
+            use iai_doc::vector::object::VectorGeometry;
+            let mut run_end = layer_slot;
+            if layer_has_mask {
+                run_end += 1;
+            } else {
+                while run_end < n_layers
+                    && gpu_eligible[run_end]
+                    && visible_layers[run_end].1.parent_id == layer.parent_id
+                    && !visible_layers[run_end]
+                        .1
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.enabled)
+                {
+                    run_end += 1;
+                }
+            }
+            // Phase 6: a Primitive is drawn by converting it to the same
+            // `PathData` its raster twin uses (`ShapeData::to_vector_object`).
+            // The converted objects are owned temporaries, so they are built
+            // into `converted` *first* (capacity reserved so references never
+            // dangle), then borrowed alongside the Path objects in z-order.
+            let prim_count = (layer_slot..run_end)
+                .filter(|&j| {
+                    matches!(
+                        &visible_layers[j].1.layer_type,
+                        LayerType::Vector(VectorGeometry::Primitive(_))
+                    )
+                })
+                .count();
+            let mut converted: Vec<iai_doc::vector::object::VectorObjectData> =
+                Vec::with_capacity(prim_count);
+            for j in layer_slot..run_end {
+                if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
+                    &visible_layers[j].1.layer_type
+                {
+                    converted.push(shape.to_vector_object(visible_layers[j].1.offset));
+                }
+            }
+            let mut objects: Vec<(&iai_doc::vector::object::VectorObjectData, (i32, i32), f32)> =
+                Vec::with_capacity(run_end - layer_slot);
+            let mut ci = 0usize;
+            for j in layer_slot..run_end {
+                let run_layer = visible_layers[j].1;
+                match &run_layer.layer_type {
+                    LayerType::Vector(VectorGeometry::Path(obj)) => {
+                        objects.push((obj, run_layer.offset, run_layer.opacity));
+                    }
+                    LayerType::Vector(VectorGeometry::Primitive(_)) => {
+                        // The position is already baked into the converted
+                        // object's transform, so pass its own raster origin:
+                        // the drag-drift correction becomes a no-op and the
+                        // shape draws exactly where its raster twin sat.
+                        let obj = &converted[ci];
+                        let origin = iai_vector::vector::raster::raster_geometry(obj)
+                            .map(|(o, _, _)| o)
+                            .unwrap_or(run_layer.offset);
+                        objects.push((obj, origin, run_layer.opacity));
+                        ci += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if !objects.is_empty() {
+                let run_group = layer.parent_id.and_then(|parent_id| {
+                    layer_stack
+                        .layers
+                        .iter()
+                        .find(|candidate| candidate.id == parent_id)
+                });
+                let run_opacity = run_group.map_or(1.0, |group| group.opacity);
+                let run_blend_mode = run_group.map_or(layer.blend_mode, |group| group.blend_mode);
+                let run_mask_owner = run_group.unwrap_or(layer);
+                let vw = self.viewport_w;
+                let vh = self.viewport_h;
+                let ping_v = self.ping_view.clone();
+                let pong_v = self.pong_view.clone();
+                let (dst_read, dst_write) = if *current_dst_is_ping {
+                    (&ping_v, &pong_v)
+                } else {
+                    (&pong_v, &ping_v)
+                };
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vector_run_enc"),
+                });
+                // First drawn content: seed its background (dst_read)
+                // transparent, mirroring the raster first-layer clear.
+                if *first_layer && !use_partial {
+                    let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("vector_run_clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst_read,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(full_clear_color),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        ..Default::default()
+                    });
+                    drop(rp);
+                    self.ping_initialized = true;
+                }
+                *first_layer = false;
+                if let Some(stage) = self.vector_stage.as_mut() {
+                    stage.composite_run(
+                        device,
+                        queue,
+                        &mut enc,
+                        dst_read,
+                        dst_write,
+                        vw,
+                        vh,
+                        view_offset_x,
+                        view_offset_y,
+                        zoom,
+                        &objects,
+                        run_mask_owner
+                            .mask
+                            .as_ref()
+                            .filter(|mask| mask.enabled)
+                            .map(|mask| {
+                                crate::vector::composite::VectorMask {
+                                    layer_id: run_mask_owner.id,
+                                    // Group masks use canvas coordinates in
+                                    // the CPU synthetic-layer reference.
+                                    layer_offset: run_group.map_or(layer.offset, |_| (0, 0)),
+                                    sample_shift: if run_group.is_some() {
+                                        (0, 0)
+                                    } else {
+                                        layer.clip_parent_id.map_or((0, 0), |frame_id| {
+                                            let frame_now = layer_stack
+                                                .layers
+                                                .iter()
+                                                .find(|candidate| candidate.id == frame_id)
+                                                .map(|frame| frame.offset)
+                                                .unwrap_or(mask.bake_frame_offset);
+                                            (
+                                                (layer.offset.0 - mask.bake_offset.0)
+                                                    - (frame_now.0 - mask.bake_frame_offset.0),
+                                                (layer.offset.1 - mask.bake_offset.1)
+                                                    - (frame_now.1 - mask.bake_frame_offset.1),
+                                            )
+                                        })
+                                    },
+                                    mask,
+                                }
+                            }),
+                        run_opacity,
+                        run_blend_mode,
+                    );
+                }
+                command_buffers.push(enc.finish());
+                // The run is one ping/pong step: flip parity exactly once.
+                *current_dst_is_ping = !*current_dst_is_ping;
+            }
+        }
+    }
+
+    /// One raster pass of `composite_layers`: blends layer `layer_slot` (tiles
+    /// already gathered) from the current accumulator into the other one,
+    /// seeding a transparent background first when this is the first layer.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_layer_band(
+        &mut self,
+        device: &wgpu::Device,
+        layer_slot: usize,
+        current_dst_is_ping: bool,
+        band_scissor: Option<(u32, u32, u32, u32)>,
+        eff_zoom: f32,
+        use_partial: bool,
+        full_clear_color: wgpu::Color,
+        adjustment_pass: bool,
+        first_layer: &mut bool,
+    ) -> wgpu::CommandBuffer {
+        let (dst_view_render, dst_bg_read) = if current_dst_is_ping {
+            (&self.pong_view, &self.ping_bg)
+        } else {
+            (&self.ping_view, &self.pong_bg)
+        };
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("layer_comp_enc"),
+        });
+        // A zoomed-out pass reads the atlas mips: rebuild any stale
+        // ones (e.g. the tiles just uploaded) first. At 100 % and
+        // above nothing reads them, so edits there skip the work.
+        if eff_zoom < 1.0 {
+            self.tile_atlas.encode_mips(device, &mut enc);
+        }
+
+        if *first_layer && !use_partial {
+            let rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("full_clear_ping"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ping_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(full_clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            drop(rpass);
+            self.ping_initialized = true;
+        }
+        *first_layer = false;
+
+        {
+            let mut rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view_render,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // `first_layer` is already false here (the
+                        // full-clear pass above flipped it), and the pass
+                        // draws a fullscreen triangle that writes every
+                        // pixel — Load is correct for both full and
+                        // partial composites.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            if let Some((sx, sy, sw, sh)) = band_scissor {
+                rpass.set_scissor_rect(sx, sy, sw, sh);
+            }
+
+            if adjustment_pass {
+                rpass.set_pipeline(&self.adjustment_pipeline);
+            } else {
+                rpass.set_pipeline(&self.pipeline);
+            }
+            rpass.set_bind_group(0, &self.tile_atlas.bind_group, &[]);
+            rpass.set_bind_group(1, dst_bg_read, &[]);
+            rpass.set_bind_group(2, &self.layer_uniform_bgs[layer_slot], &[]);
+            rpass.draw(0..3, 0..1);
+        }
+
+        enc.finish()
+    }
+
     pub fn composite_layers(
         &mut self,
         device: &wgpu::Device,
@@ -4779,186 +5064,20 @@ struct VsOut {
             // halo). Handle the whole contiguous run at its first layer, then skip
             // the members here. A run participates in the ping/pong as one step.
             if gpu_eligible[layer_slot] {
-                let layer_has_mask = layer.mask.as_ref().is_some_and(|mask| mask.enabled);
-                let previous_joins = layer_slot > 0
-                    && gpu_eligible[layer_slot - 1]
-                    && visible_layers[layer_slot - 1].1.parent_id == layer.parent_id
-                    && !layer_has_mask
-                    && !visible_layers[layer_slot - 1]
-                        .1
-                        .mask
-                        .as_ref()
-                        .is_some_and(|mask| mask.enabled);
-                let is_run_start = !previous_joins;
-                if is_run_start {
-                    use iai_doc::layer::LayerType;
-                    use iai_doc::vector::object::VectorGeometry;
-                    let mut run_end = layer_slot;
-                    if layer_has_mask {
-                        run_end += 1;
-                    } else {
-                        while run_end < n_layers
-                            && gpu_eligible[run_end]
-                            && visible_layers[run_end].1.parent_id == layer.parent_id
-                            && !visible_layers[run_end]
-                                .1
-                                .mask
-                                .as_ref()
-                                .is_some_and(|mask| mask.enabled)
-                        {
-                            run_end += 1;
-                        }
-                    }
-                    // Phase 6: a Primitive is drawn by converting it to the same
-                    // `PathData` its raster twin uses (`ShapeData::to_vector_object`).
-                    // The converted objects are owned temporaries, so they are built
-                    // into `converted` *first* (capacity reserved so references never
-                    // dangle), then borrowed alongside the Path objects in z-order.
-                    let prim_count = (layer_slot..run_end)
-                        .filter(|&j| {
-                            matches!(
-                                &visible_layers[j].1.layer_type,
-                                LayerType::Vector(VectorGeometry::Primitive(_))
-                            )
-                        })
-                        .count();
-                    let mut converted: Vec<iai_doc::vector::object::VectorObjectData> =
-                        Vec::with_capacity(prim_count);
-                    for j in layer_slot..run_end {
-                        if let LayerType::Vector(VectorGeometry::Primitive(shape)) =
-                            &visible_layers[j].1.layer_type
-                        {
-                            converted.push(shape.to_vector_object(visible_layers[j].1.offset));
-                        }
-                    }
-                    let mut objects: Vec<(
-                        &iai_doc::vector::object::VectorObjectData,
-                        (i32, i32),
-                        f32,
-                    )> = Vec::with_capacity(run_end - layer_slot);
-                    let mut ci = 0usize;
-                    for j in layer_slot..run_end {
-                        let run_layer = visible_layers[j].1;
-                        match &run_layer.layer_type {
-                            LayerType::Vector(VectorGeometry::Path(obj)) => {
-                                objects.push((obj, run_layer.offset, run_layer.opacity));
-                            }
-                            LayerType::Vector(VectorGeometry::Primitive(_)) => {
-                                // The position is already baked into the converted
-                                // object's transform, so pass its own raster origin:
-                                // the drag-drift correction becomes a no-op and the
-                                // shape draws exactly where its raster twin sat.
-                                let obj = &converted[ci];
-                                let origin = iai_vector::vector::raster::raster_geometry(obj)
-                                    .map(|(o, _, _)| o)
-                                    .unwrap_or(run_layer.offset);
-                                objects.push((obj, origin, run_layer.opacity));
-                                ci += 1;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !objects.is_empty() {
-                        let run_group = layer.parent_id.and_then(|parent_id| {
-                            layer_stack
-                                .layers
-                                .iter()
-                                .find(|candidate| candidate.id == parent_id)
-                        });
-                        let run_opacity = run_group.map_or(1.0, |group| group.opacity);
-                        let run_blend_mode =
-                            run_group.map_or(layer.blend_mode, |group| group.blend_mode);
-                        let run_mask_owner = run_group.unwrap_or(layer);
-                        let vw = self.viewport_w;
-                        let vh = self.viewport_h;
-                        let ping_v = self.ping_view.clone();
-                        let pong_v = self.pong_view.clone();
-                        let (dst_read, dst_write) = if current_dst_is_ping {
-                            (&ping_v, &pong_v)
-                        } else {
-                            (&pong_v, &ping_v)
-                        };
-                        let mut enc =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("vector_run_enc"),
-                            });
-                        // First drawn content: seed its background (dst_read)
-                        // transparent, mirroring the raster first-layer clear.
-                        if first_layer && !use_partial {
-                            let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("vector_run_clear"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: dst_read,
-                                    resolve_target: None,
-                                    depth_slice: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(full_clear_color),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                ..Default::default()
-                            });
-                            drop(rp);
-                            self.ping_initialized = true;
-                        }
-                        first_layer = false;
-                        if let Some(stage) = self.vector_stage.as_mut() {
-                            stage.composite_run(
-                                device,
-                                queue,
-                                &mut enc,
-                                dst_read,
-                                dst_write,
-                                vw,
-                                vh,
-                                view_offset_x,
-                                view_offset_y,
-                                zoom,
-                                &objects,
-                                run_mask_owner
-                                    .mask
-                                    .as_ref()
-                                    .filter(|mask| mask.enabled)
-                                    .map(|mask| {
-                                        crate::vector::composite::VectorMask {
-                                            layer_id: run_mask_owner.id,
-                                            // Group masks use canvas coordinates in
-                                            // the CPU synthetic-layer reference.
-                                            layer_offset: run_group
-                                                .map_or(layer.offset, |_| (0, 0)),
-                                            sample_shift: if run_group.is_some() {
-                                                (0, 0)
-                                            } else {
-                                                layer.clip_parent_id.map_or((0, 0), |frame_id| {
-                                                    let frame_now = layer_stack
-                                                        .layers
-                                                        .iter()
-                                                        .find(|candidate| candidate.id == frame_id)
-                                                        .map(|frame| frame.offset)
-                                                        .unwrap_or(mask.bake_frame_offset);
-                                                    (
-                                                        (layer.offset.0 - mask.bake_offset.0)
-                                                            - (frame_now.0
-                                                                - mask.bake_frame_offset.0),
-                                                        (layer.offset.1 - mask.bake_offset.1)
-                                                            - (frame_now.1
-                                                                - mask.bake_frame_offset.1),
-                                                    )
-                                                })
-                                            },
-                                            mask,
-                                        }
-                                    }),
-                                run_opacity,
-                                run_blend_mode,
-                            );
-                        }
-                        command_buffers.push(enc.finish());
-                        // The run is one ping/pong step: flip parity exactly once.
-                        current_dst_is_ping = !current_dst_is_ping;
-                    }
-                }
+                self.composite_vector_run(
+                    device,
+                    queue,
+                    layer_stack,
+                    &visible_layers,
+                    &gpu_eligible,
+                    layer_slot,
+                    use_partial,
+                    full_clear_color,
+                    (view_offset_x, view_offset_y, zoom),
+                    &mut command_buffers,
+                    &mut current_dst_is_ping,
+                    &mut first_layer,
+                );
                 continue;
             }
             // Snapshot: capture the accumulated prefix [0..boundary) the moment
@@ -5450,11 +5569,6 @@ struct VsOut {
                     bytemuck::cast_slice(&self.mask_tile_map_scratch[..eff_total_tiles]),
                 );
 
-                let (dst_view_render, dst_bg_read) = if current_dst_is_ping {
-                    (&self.pong_view, &self.ping_bg)
-                } else {
-                    (&self.ping_view, &self.pong_bg)
-                };
                 // A banded layer scissors each pass to its block; the non-banded path
                 // keeps the original scissor (dirty rect, or none).
                 let band_scissor = if is_banded {
@@ -5462,74 +5576,18 @@ struct VsOut {
                 } else {
                     scissor
                 };
-
-                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("layer_comp_enc"),
-                });
-                // A zoomed-out pass reads the atlas mips: rebuild any stale
-                // ones (e.g. the tiles just uploaded) first. At 100 % and
-                // above nothing reads them, so edits there skip the work.
-                if eff_zoom < 1.0 {
-                    self.tile_atlas.encode_mips(device, &mut enc);
-                }
-
-                if first_layer && !use_partial {
-                    let rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("full_clear_ping"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.ping_view,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(full_clear_color),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        ..Default::default()
-                    });
-                    drop(rpass);
-                    self.ping_initialized = true;
-                }
-                first_layer = false;
-
-                {
-                    let mut rpass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("composite_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: dst_view_render,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                // `first_layer` is already false here (the
-                                // full-clear pass above flipped it), and the pass
-                                // draws a fullscreen triangle that writes every
-                                // pixel — Load is correct for both full and
-                                // partial composites.
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        ..Default::default()
-                    });
-
-                    if let Some((sx, sy, sw, sh)) = band_scissor {
-                        rpass.set_scissor_rect(sx, sy, sw, sh);
-                    }
-
-                    if is_adjustment_layer && adj_kind > 0 {
-                        rpass.set_pipeline(&self.adjustment_pipeline);
-                    } else {
-                        rpass.set_pipeline(&self.pipeline);
-                    }
-                    rpass.set_bind_group(0, &self.tile_atlas.bind_group, &[]);
-                    rpass.set_bind_group(1, dst_bg_read, &[]);
-                    rpass.set_bind_group(2, &self.layer_uniform_bgs[layer_slot], &[]);
-                    rpass.draw(0..3, 0..1);
-                }
-
-                command_buffers.push(enc.finish());
+                let pass = self.encode_layer_band(
+                    device,
+                    layer_slot,
+                    current_dst_is_ping,
+                    band_scissor,
+                    eff_zoom,
+                    use_partial,
+                    full_clear_color,
+                    is_adjustment_layer && adj_kind > 0,
+                    &mut first_layer,
+                );
+                command_buffers.push(pass);
 
                 // Banded: submit now so this block's slots are evict-safe before the
                 // next block uploads (each tile-map write flushes at its own submit,

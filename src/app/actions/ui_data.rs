@@ -1379,6 +1379,7 @@ impl App {
             vector_brush_smoothing: self.edit.tools.vector_brush().smoothing,
             vector_brush_pressure: self.edit.tools.vector_brush().pressure,
             vector_brush_velocity: self.edit.tools.vector_brush().velocity,
+            vector_brush_freehand: self.edit.tools.vector_brush().freehand,
             vector_brush_path: if self.edit.tools.active_id() == crate::tools::ToolId::VectorBrush {
                 self.edit.tools.vector_brush().preview_points()
             } else {
@@ -2619,6 +2620,8 @@ mod tests {
                     axis_x: (120.0, 0.0),
                     axis_y: (0.0, 80.0),
                     stops: vec![(240.0, 250.0), (360.0, 250.0)],
+                    start_color: [0, 0, 255, 255],
+                    end_color: [255, 0, 255, 255],
                 });
             }),
             ("gradient preview", |d| {

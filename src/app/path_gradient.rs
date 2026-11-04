@@ -65,7 +65,16 @@ impl App {
             .map(|stop| transform.apply_point(Point::new(stop.offset, 0.0)))
             .map(|point| (point.x, point.y))
             .collect();
+        let stops_now = gradient.active_stops();
+        let start_color = stops_now
+            .first()
+            .map_or([255, 255, 255, 255], |stop| stop.color.to_rgba8());
+        let end_color = stops_now
+            .last()
+            .map_or([255, 255, 255, 255], |stop| stop.color.to_rgba8());
         Some(crate::ui::PathGradientOverlay {
+            start_color,
+            end_color,
             kind: u8::from(gradient.kind == GradientKind::Radial),
             center: (center.x, center.y),
             axis_x: (axis_x.x, axis_x.y),

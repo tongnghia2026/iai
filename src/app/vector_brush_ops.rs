@@ -20,6 +20,7 @@ impl App {
     /// becomes the sole selection so the Move/Node transform box shows at once.
     pub fn commit_vector_brush_stroke(&mut self) {
         let fg = self.edit.fg_color;
+        let freehand = self.edit.tools.vector_brush().freehand;
         let Some(object) = self.edit.tools.vector_brush_mut().take_stroke_object(fg) else {
             return;
         };
@@ -27,7 +28,10 @@ impl App {
         let canvas = &mut self.docs.documents[doc_idx].canvas;
         let created = canvas
             .execute(
-                Box::new(CreatePathLayer::new(object, "Brush")),
+                Box::new(CreatePathLayer::new(
+                    object,
+                    if freehand { "Freehand" } else { "Brush" },
+                )),
                 ChangeKind::LayerStructure,
             )
             .is_ok();
@@ -47,7 +51,23 @@ impl App {
         canvas.reconcile_path_ink();
         canvas.layer_revision += 1;
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
-        self.shell.status_msg = "Vector brush stroke".to_string();
+        self.shell.status_msg = if freehand {
+            "Freehand line"
+        } else {
+            "Vector brush stroke"
+        }
+        .to_string();
+    }
+
+    /// The Vector Brush's Freehand / Brush switch on the options bar
+    /// (`tool.vector_brush_mode`).
+    pub(in crate::app) fn vector_brush_step(&mut self, call: &iai_engine::CommandCall) -> bool {
+        if call.command != "tool.vector_brush_mode" {
+            return false;
+        }
+        let freehand = call.args.get("freehand").and_then(|v| v.as_bool()) == Some(true);
+        self.edit.tools.vector_brush_mut().freehand = freehand;
+        true
     }
 
     /// The active layer's id if it is a Path holding a Vector Brush stroke, else

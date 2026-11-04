@@ -308,789 +308,748 @@ impl App {
                 if self.edit.input.space_held {
                     self.edit.input.space_dragging = pressed;
                     self.sync_cursor(event_loop);
+                } else if pressed {
+                    self.on_main_left_press();
                 } else {
-                    if pressed {
-                        // A click anywhere but on a guide lets go of the picked
-                        // one, so Delete goes back to the layer or the pixels.
-                        self.edit.selected_guide = None;
-                        if !self.edit.input.was_over_ui {
-                            let active_tool = self.edit.tools.active_id();
-                            if !self.alpha_view_allows_tool(active_tool) {
-                                self.deny_alpha_view_tool(active_tool);
-                                return;
-                            }
-                            if !self.cmyk_allows_tool(active_tool) {
-                                self.deny_cmyk_tool(active_tool);
-                                return;
-                            }
-                            // The tool works on a retouch applied, not on
-                            // its preview.
-                            self.portrait_pressed();
-
-                            // Grab an existing guide with the Move tool (before any
-                            // tool press): drag to reposition, drop off-canvas to
-                            // delete. The guide is picked too: Delete removes it.
-                            if self.edit.tools.active_id() == ToolId::Move
-                                && self.edit.transform_state.is_none()
-                                && let Some(gi) = self.guide_at_screen()
-                            {
-                                self.edit.selected_guide = Some((self.docs.active().id, gi));
-                                self.shell.status_msg =
-                                    "Đã chọn đường gióng — bấm Delete để xóa".to_string();
-                                let g = self.docs.active().guides[gi];
-                                let ev = self.tool_event();
-                                let pos = match g.orientation {
-                                    crate::core::document::GuideOrientation::Horizontal => {
-                                        ev.canvas_y
-                                    }
-                                    crate::core::document::GuideOrientation::Vertical => {
-                                        ev.canvas_x
-                                    }
-                                };
-                                self.edit.guide_op = Some(crate::app::state::GuideOp::Move {
-                                    idx: gi,
-                                    orientation: g.orientation,
-                                    pos,
-                                });
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-
-                            let is_double_click = self
-                                .edit
-                                .input
-                                .last_left_release_time
-                                .map(|t| t.elapsed().as_millis() < 400)
-                                .unwrap_or(false);
-                            if is_double_click
-                                && self.edit.tools.active_id() == ToolId::Move
-                                && self.edit.transform_state.is_none()
-                            {
-                                let ev = self.tool_event();
-                                if let Some(idx) = self.text_layer_at(ev.canvas_x, ev.canvas_y) {
-                                    self.begin_edit_text_layer(idx);
-                                    self.edit.input.last_left_release_time = None;
-                                    if let Some(win) = &self.win.window {
-                                        win.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-
-                            if is_double_click
-                                && self.edit.tools.active_id() == ToolId::PolygonLasso
-                                && self.edit.transform_state.is_none()
-                            {
-                                {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    self.edit.tools.active_on_confirm(&mut ctx);
-                                }
-                                self.docs.active_mut().canvas.selection.refresh_bbox();
-                                self.upload_selection_mask();
-                                self.push_selection_uniforms();
-                                self.edit.input.last_left_release_time = None;
-                                self.edit.input.painting = false;
-                                if let Some(win) = &self.win.window {
-                                    win.request_redraw();
-                                }
-                                return;
-                            }
-
-                            if self.edit.tools.active_id() == ToolId::Text
-                                && self.edit.transform_state.is_none()
-                            {
-                                // While a session is open the overlay owns all
-                                // pointer interaction; outside clicks are refused
-                                // by the action gate (bell) — not here, to avoid
-                                // double-chiming the same click.
-                                if self.edit.text_edit.is_none() {
-                                    let ev = self.tool_event();
-                                    if let Some(idx) = self.text_layer_at(ev.canvas_x, ev.canvas_y)
-                                    {
-                                        self.begin_edit_text_layer(idx);
-                                    } else {
-                                        self.text_tool_click(ev.canvas_x, ev.canvas_y);
-                                    }
-                                }
-                                self.edit.input.last_left_release_time = None;
-                                if let Some(win) = &self.win.window {
-                                    win.request_redraw();
-                                }
-                                return;
-                            }
-
-                            // Shape tool: grabbing a handle of the active
-                            // Shape layer starts a resize/edit drag;
-                            // otherwise the press falls through to start a
-                            // rubber-band for a brand-new shape.
-                            if self.edit.tools.active_id() == ToolId::Shape
-                                && self.edit.transform_state.is_none()
-                            {
-                                let ev = self.tool_event();
-                                if let Some(handle) = self.shape_handle_at(ev.canvas_x, ev.canvas_y)
-                                {
-                                    self.shape_begin_handle_drag(handle);
-                                    self.edit.input.painting = true;
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-
-                            // Gradient transform handles are interactive only
-                            // while the Gradient Tool is active.
-                            if self.edit.tools.active_id() == ToolId::Gradient
-                                && self.edit.transform_state.is_none()
-                            {
-                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
-                                if let Some(handle) = self.path_gradient_handle_at_screen(msx, msy)
-                                {
-                                    let ev = self.tool_event();
-                                    self.path_gradient_begin(handle, ev.canvas_x, ev.canvas_y);
-                                    self.edit.input.painting = true;
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
-                                    }
-                                    return;
-                                }
-                            }
-
-                            // Move tool: grabbing a transform handle (or the
-                            // rotate ring) of the active Path layer starts an
-                            // on-canvas scale/rotate that keeps the object
-                            // editable; otherwise the press falls through to the
-                            // normal Move (select / drag / marquee).
-                            if self.edit.tools.active_id() == ToolId::Move
-                                && self.edit.transform_state.is_none()
-                            {
-                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
-                                if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
-                                    use crate::app::vector_transform::PathBoxHit;
-                                    let ev = self.tool_event();
-                                    // Grabbing the pivot marker relocates the rotation
-                                    // centre (CorelDRAW style); a handle/ring starts a
-                                    // scale/rotate. Alt+rotate or Ctrl+scale instead
-                                    // transforms a fresh COPY (the repeat sample).
-                                    let dup = match hit {
-                                        PathBoxHit::Rotate => self.edit.input.alt_held,
-                                        PathBoxHit::Skew(_) => false,
-                                        PathBoxHit::Handle(_) => self.edit.input.ctrl_held,
-                                        PathBoxHit::Pivot => false,
-                                    };
-                                    if hit == PathBoxHit::Pivot {
-                                        self.path_pivot_drag_begin();
-                                    } else if dup {
-                                        self.path_transform_begin_duplicate(
-                                            hit,
-                                            ev.canvas_x,
-                                            ev.canvas_y,
-                                        );
-                                    } else {
-                                        self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
-                                    }
-                                    self.edit.input.painting = true;
-                                    if let Some(w) = &self.win.window {
-                                        w.request_redraw();
-                                    }
-                                    return;
-                                }
-                                // Other selected layer kinds use the same eight
-                                // handles and rotate ring directly in Move. Start
-                                // the transform engine only after a handle/ring
-                                // hit, so ordinary clicking and marquee selection
-                                // remain available while the idle box is visible.
-                                if self.move_selection_transform_hit(msx, msy) {
-                                    let ev = self.tool_event();
-                                    self.begin_move_transform();
-                                    if self.edit.transform_state.is_some() {
-                                        self.transform_on_press(ev.canvas_x, ev.canvas_y, msx, msy);
-                                        self.edit.input.painting = true;
-                                        if let Some(w) = &self.win.window {
-                                            w.request_redraw();
-                                        }
-                                        return;
-                                    }
-                                }
-                            }
-
-                            // Node tool: double-click an anchor cycles its kind
-                            // (Cusp→Smooth→Symmetric); a single press on a handle
-                            // reshapes the curve, on an anchor drags it, on a
-                            // segment inserts an anchor there and drags it, and on
-                            // empty space deselects. All routed to node_ops.
-                            if self.edit.tools.active_id() == ToolId::Node
-                                && self.edit.transform_state.is_none()
-                            {
-                                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
-                                let is_double_click = self
-                                    .edit
-                                    .input
-                                    .last_left_release_time
-                                    .map(|t| t.elapsed().as_millis() < 400)
-                                    .unwrap_or(false);
-                                if is_double_click
-                                    && let Some(crate::app::node_ops::NodeHit::Node(ci, ni)) =
-                                        self.node_hit_at_screen(msx, msy)
-                                    && self.node_toggle_kind(ci, ni)
-                                {
-                                    self.edit.input.last_left_release_time = None;
-                                    self.edit.input.painting = true;
-                                    return;
-                                }
-                                let ev = self.tool_event();
-                                if let Some(hit) = self.node_hit_at_screen(msx, msy) {
-                                    // Shift+click an anchor toggles it in the
-                                    // multi-selection instead of starting a drag.
-                                    if self.edit.input.shift_held
-                                        && let crate::app::node_ops::NodeHit::Node(ci, ni) = hit
-                                    {
-                                        self.node_shift_toggle(ci, ni);
-                                        self.edit.input.painting = true;
-                                        return;
-                                    }
-                                    if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
-                                        self.edit.input.painting = true;
-                                        return;
-                                    }
-                                } else if self.node_click_select_path(ev.canvas_x, ev.canvas_y) {
-                                    // Clicked another Path's body — make it the edit
-                                    // target (Shape-tool object switching), then grab
-                                    // a node of it if the click also landed on one.
-                                    if let Some(hit) = self.node_hit_at_screen(msx, msy) {
-                                        self.node_press(hit, ev.canvas_x, ev.canvas_y);
-                                    }
-                                    self.edit.input.painting = true;
-                                    return;
-                                } else {
-                                    // Empty canvas: begin a rubber-band selection.
-                                    // Release decides — select the enclosed anchors,
-                                    // or clear if it was really just a click.
-                                    self.node_marquee_start(msx, msy);
-                                }
-                                // Swallow the press so it never falls through to a
-                                // pixel tool on the (vector) Path layer.
-                                self.edit.input.painting = true;
-                                return;
-                            }
-
-                            if self.edit.tools.active_id() == ToolId::Repair
-                                && self.jobs.repair_ai.is_some()
-                                && self.edit.transform_state.is_none()
-                            {
-                                self.shell.status_msg =
-                                    "AI đang xoá vùng vừa tô — đợi vài giây".to_string();
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-
-                            if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair)
-                                && self.edit.input.alt_held
-                                && self.edit.transform_state.is_none()
-                            {
-                                let event = self.tool_event();
-                                {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    let _ = self.edit.tools.on_press(event, &mut ctx);
-                                }
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-
-                            let alt_paint_pick = matches!(
-                                self.edit.tools.active_id(),
-                                ToolId::Brush | ToolId::Pencil
-                            ) && self.edit.input.alt_held;
-                            if (self.edit.tools.active_id() == ToolId::Eyedropper || alt_paint_pick)
-                                && self.edit.transform_state.is_none()
-                            {
-                                let ev = self.tool_event();
-                                self.pick_color_at(ev.canvas_x, ev.canvas_y);
-                                self.edit.input.eyedropping = true;
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-
-                            // Zoom tool: press starts scrubby zoom. If the
-                            // user releases without dragging, it falls back
-                            // to the classic click zoom.
-                            if self.edit.tools.active_id() == ToolId::Zoom
-                                && self.edit.transform_state.is_none()
-                            {
-                                self.edit.input.zoom_dragging = true;
-                                self.edit.input.zoom_drag_moved = false;
-                                self.edit.input.zoom_drag_start_x = self.edit.input.mouse_x;
-                                self.edit.input.zoom_drag_start_y = self.edit.input.mouse_y;
-                                self.edit.input.zoom_drag_anchor_x = self.edit.input.mouse_x;
-                                self.edit.input.zoom_drag_anchor_y = self.edit.input.mouse_y;
-                                self.edit.input.zoom_drag_start_zoom = self.edit.view.zoom;
-                                return;
-                            }
-
-                            self.edit.input.painting = true;
-                            if self.edit.transform_state.is_some() {
-                                let ev = self.tool_event();
-                                let sx = self.edit.input.mouse_x;
-                                let sy = self.edit.input.mouse_y;
-                                self.transform_on_press(ev.canvas_x, ev.canvas_y, sx, sy);
-                                self.win.interactive_recompose_last = None;
-                                self.win.interactive_recompose_cost = std::time::Duration::ZERO;
-                                self.request_interactive_recompose();
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            } else {
-                                let event = self.tool_event();
-                                let active_tool = self.edit.tools.active_id();
-                                // Use the editable vector model for the second-click
-                                // candidate. Raster bounds can lag behind an affine
-                                // transform, which previously made this click silently
-                                // fail and left the newly-hidden pivot unreachable.
-                                let arm_path_toggle = active_tool == ToolId::Move
-                                    && self.active_path_layer().is_some_and(|active| {
-                                        self.path_layer_hit_at(event.canvas_x, event.canvas_y)
-                                            == Some(active)
-                                    });
-                                let tool_resp = {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    self.edit.tools.on_press(event, &mut ctx)
-                                };
-                                if arm_path_toggle {
-                                    self.edit
-                                        .tools
-                                        .move_tool_mut()
-                                        .arm_vector_transform_toggle();
-                                }
-                                if let Some(msg) = tool_resp.status {
-                                    self.shell.status_msg = msg.to_string();
-                                }
-                                let mut request_redraw = tool_resp.needs_redraw;
-                                if matches!(
-                                    active_tool,
-                                    ToolId::Move
-                                        | ToolId::Gradient
-                                        | ToolId::Crop
-                                        | ToolId::PerspectiveCrop
-                                ) {
-                                    // Plain mouse-down on these tools should be cheap.
-                                    // Move recomposes on first drag; Gradient only draws
-                                    // a UI direction guide until mouse-up bakes pixels.
-                                } else {
-                                    self.flush_canvas();
-                                    self.docs.active_mut().canvas.selection.refresh_bbox();
-                                    self.upload_selection_mask();
-                                    self.push_selection_uniforms();
-                                    request_redraw = true;
-                                }
-                                if request_redraw && let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            }
-                        }
-                    } else {
-                        self.edit.input.eyedropping = false;
-                        if self.edit.input.zoom_dragging {
-                            let clicked = !self.edit.input.zoom_drag_moved;
-                            self.edit.input.zoom_dragging = false;
-                            self.edit.input.zoom_drag_moved = false;
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            if clicked {
-                                self.zoom_at_cursor(!self.edit.input.alt_held);
-                            } else {
-                                self.sync_cursor(event_loop);
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            }
-                            return;
-                        }
-                        // Finish moving an existing guide: drop off-canvas → delete it.
-                        // NB: only consume guide_op for a Move. A Create (ruler drag) is
-                        // committed by the egui side via `ruler_guide_commit`, which runs
-                        // a frame later — taking it here would lose the new guide.
-                        if let Some(crate::app::state::GuideOp::Move {
-                            idx,
-                            orientation,
-                            pos,
-                        }) = self.edit.guide_op
-                        {
-                            self.edit.guide_op = None;
-                            let canvas = &self.docs.active().canvas;
-                            let dim = match orientation {
-                                crate::core::document::GuideOrientation::Horizontal => {
-                                    canvas.height as f32
-                                }
-                                crate::core::document::GuideOrientation::Vertical => {
-                                    canvas.width as f32
-                                }
-                            };
-                            if (pos < 0.0 || pos > dim) && idx < self.docs.active().guides.len() {
-                                self.docs.active_mut().guides.remove(idx);
-                                self.edit.selected_guide = None;
-                            }
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            if let Some(w) = &self.win.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        let releasing_move = self.edit.input.painting
-                            && self.edit.transform_state.is_none()
-                            && self.edit.path_transform.is_none()
-                            && self.edit.path_gradient_drag.is_none()
-                            && self.edit.tools.active_id() == ToolId::Move;
-                        if self.edit.path_gradient_drag.is_some() {
-                            // Commit from a settled input state. This makes the
-                            // final full composite take the normal (non-drag)
-                            // path and prevents any interactive cache policy
-                            // from surviving the release frame.
-                            self.edit.input.painting = false;
-                            self.path_gradient_finish();
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            if let Some(w) = &self.win.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        if self.edit.path_pivot_dragging {
-                            // Finish relocating the rotation-pivot marker. Pure tool
-                            // state — nothing recorded, no Move-tool release path.
-                            self.path_pivot_drag_finish();
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            self.edit.input.painting = false;
-                            if let Some(w) = &self.win.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        if self.edit.path_transform.is_some() {
-                            // Finish an on-canvas Path scale/rotate (records one
-                            // ChangeVectorTransform). Bypasses the Move tool's
-                            // own release path — the gesture never touched it.
-                            self.path_transform_finish();
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            self.edit.input.painting = false;
-                            if let Some(w) = &self.win.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        if self.edit.tools.active_id() == ToolId::Node
-                            && self.edit.transform_state.is_none()
-                        {
-                            // Finish a Node tool drag (records one
-                            // ReplacePathGeometry), a rubber-band selection, or just
-                            // release a no-hit press.
-                            if self.edit.node_drag.is_some() {
-                                self.node_drag_finish();
-                            } else if self.node_marquee_active() {
-                                self.node_marquee_finish();
-                            }
-                            self.edit.input.last_left_release_time =
-                                Some(std::time::Instant::now());
-                            self.edit.input.painting = false;
-                            if let Some(w) = &self.win.window {
-                                w.request_redraw();
-                            }
-                            return;
-                        }
-                        if self.edit.input.painting {
-                            if self.edit.transform_state.is_some() {
-                                self.transform_on_release();
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            } else if self.edit.tools.active_id() == ToolId::Shape {
-                                if self.shape_drag_active() {
-                                    // Finish resizing / editing a handle.
-                                    self.shape_drag_finish();
-                                } else {
-                                    // The rubber-band drag becomes a new,
-                                    // editable Shape layer (handled at App
-                                    // level so layer structure is undoable).
-                                    let ev = self.tool_event();
-                                    let span = self.edit.tools.shape_mut().finish_span(
-                                        ev.canvas_x,
-                                        ev.canvas_y,
-                                        ev.shift,
-                                        ev.alt,
-                                    );
-                                    if let Some((x0, y0, x1, y1)) = span {
-                                        self.begin_new_shape(x0, y0, x1, y1);
-                                    }
-                                }
-                                self.edit.input.painting = false;
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            } else if self.edit.tools.active_id() == ToolId::Arrow {
-                                let event = self.tool_event();
-                                {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    let _ = self.edit.tools.on_release(event, &mut ctx);
-                                }
-                                self.commit_arrow();
-                                self.edit.input.painting = false;
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            } else if self.edit.tools.active_id() == ToolId::VectorBrush {
-                                // A freehand drag becomes one editable Path stroke
-                                // (handled at App level so the new layer is undoable).
-                                let event = self.tool_event();
-                                {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    // Let the tool catch its stabilizer up to the
-                                    // release point before we read the stroke.
-                                    let _ = self.edit.tools.on_release(event, &mut ctx);
-                                }
-                                self.commit_vector_brush_stroke();
-                                self.edit.input.painting = false;
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            } else {
-                                if !self.edit.pending_stroke_inputs.is_empty() {
-                                    let events: Vec<_> =
-                                        self.edit.pending_stroke_inputs.drain(..).collect();
-                                    for event in events {
-                                        let mut ctx = ToolCtx::new(
-                                            self.docs.active_mut(),
-                                            self.edit.fg_color,
-                                            self.edit.bg_color,
-                                            self.edit.view.zoom,
-                                            self.edit.view.offset_x,
-                                            self.edit.view.offset_y,
-                                        );
-                                        let _ = self.edit.tools.on_drag(event, &mut ctx);
-                                    }
-                                    self.flush_canvas();
-                                }
-
-                                let event = self.tool_event();
-                                let active_tool = self.edit.tools.active_id();
-                                let releasing_vector_gradient = active_tool == ToolId::Gradient
-                                    && self.active_gradient_mode() == 2;
-                                let tool_resp = {
-                                    let mut ctx = ToolCtx::new(
-                                        self.docs.active_mut(),
-                                        self.edit.fg_color,
-                                        self.edit.bg_color,
-                                        self.edit.view.zoom,
-                                        self.edit.view.offset_x,
-                                        self.edit.view.offset_y,
-                                    );
-                                    self.edit.tools.on_release(event, &mut ctx)
-                                };
-                                if let Some(msg) = tool_resp.status {
-                                    self.shell.status_msg = msg.to_string();
-                                }
-                                let move_layer_release = matches!(
-                                    active_tool,
-                                    ToolId::Move | ToolId::Crop | ToolId::PerspectiveCrop
-                                ) && !tool_resp.needs_composite;
-                                if releasing_vector_gradient {
-                                    self.finish_vector_gradient_release();
-                                } else if !move_layer_release {
-                                    self.flush_canvas();
-                                }
-                                if active_tool == ToolId::Crop {
-                                    self.update_crop_preview();
-                                }
-
-                                // Mirror an Alt+drag duplicate into the unified
-                                // repeatable step so Repeat / Ctrl+D continues the row.
-                                if active_tool == ToolId::Move {
-                                    let toggle = {
-                                        let mt = self.edit.tools.move_tool_mut();
-                                        let value = mt.toggle_vector_transform_requested;
-                                        mt.toggle_vector_transform_requested = false;
-                                        value
-                                    };
-                                    if toggle {
-                                        self.toggle_path_transform_mode();
-                                    }
-                                    let dup = {
-                                        let mt = self.edit.tools.move_tool_mut();
-                                        if mt.took_duplicate {
-                                            mt.took_duplicate = false;
-                                            mt.last_duplicate_delta
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some((dx, dy)) = dup {
-                                        self.edit.last_repeat_transform = Some(
-                                            crate::core::vector::affine::AffineTransform::translate(
-                                                dx as f32, dy as f32,
-                                            ),
-                                        );
-                                    }
-                                }
-
-                                if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
-                                    // Large strokes go to the AI in the background;
-                                    // the rest heal right here.
-                                    let wash = self.build_repair_stroke_overlay();
-                                    let heal_now = self
-                                        .edit
-                                        .tools
-                                        .healing_mut()
-                                        .0
-                                        .take_pending_ca()
-                                        .and_then(|s| self.start_repair_ai(s, wash));
-                                    if let Some(s) = heal_now {
-                                        let ok =
-                                            self.docs.active_mut().canvas.spot_heal(
-                                                s.x0, s.y0, s.w, s.h, &s.cover, s.opacity,
-                                            );
-                                        if ok {
-                                            self.apply_canvas_event(
-                                                crate::app::render::CanvasEvent::LayerPixelsChanged,
-                                            );
-                                            self.shell.status_msg = "Smart Heal".to_string();
-                                        } else {
-                                            self.shell.status_msg =
-                                                "Smart Heal cần một layer raster mở khoá"
-                                                    .to_string();
-                                        }
-                                    }
-                                }
-
-                                if self.edit.tools.active_id() == crate::tools::ToolId::Patch {
-                                    use crate::tools::patch::PatchPending;
-                                    if let Some(pending) =
-                                        self.edit.tools.patch_mut().take_pending()
-                                    {
-                                        let canvas = &mut self.docs.active_mut().canvas;
-                                        let ok = match pending {
-                                            PatchPending::Clone { dx, dy } => {
-                                                canvas.patch_clone(dx, dy)
-                                            }
-                                            PatchPending::Fill => canvas.smart_fill_fill(false),
-                                        };
-                                        if ok {
-                                            self.apply_canvas_event(
-                                                crate::app::render::CanvasEvent::LayerPixelsChanged,
-                                            );
-                                            self.shell.status_msg = "Patch".to_string();
-                                        } else {
-                                            self.shell.status_msg =
-                                                "Patch cần một layer raster mở khoá".to_string();
-                                        }
-                                    }
-                                }
-
-                                if matches!(
-                                    self.edit.tools.active_id(),
-                                    crate::tools::ToolId::Brush | crate::tools::ToolId::Eraser
-                                ) {
-                                    self.win.pending_gpu_sync = self.docs.documents
-                                        [self.docs.active_doc_idx]
-                                        .canvas
-                                        .stroke_dirty
-                                        .clone();
-                                    self.win.pending_gpu_sync_layer_id =
-                                        self.docs.active().canvas.active_layer().id as usize;
-                                    self.sync_brush_gpu_to_cpu();
-                                }
-
-                                if !move_layer_release {
-                                    self.docs.active_mut().canvas.selection.refresh_bbox();
-                                    self.upload_selection_mask();
-                                    self.push_selection_uniforms();
-                                }
-
-                                if !move_layer_release {
-                                    self.docs.active_mut().canvas.end_stroke();
-                                }
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            }
-                        }
-                        self.edit.input.last_left_release_time = Some(std::time::Instant::now());
-                        self.edit.input.painting = false;
-                        if releasing_move {
-                            self.win.interactive_recompose_pending = false;
-                            // The clipping-mask / PowerClip re-fit is skipped every
-                            // frame during a Move drag (a full-content mask re-bake +
-                            // GPU re-upload per frame made large clipped images lag).
-                            // A plain Move release takes the `move_layer_release` fast
-                            // path and skips flush_canvas, so nothing would re-pin the
-                            // clip. Re-pin ONCE now that the move settled, so clipped
-                            // content snaps back onto its frame instead of being left
-                            // showing the dragged (stale) mask until an unrelated
-                            // recomposite. Fingerprint-gated inside refresh_clip_masks,
-                            // so a document with no clip that actually moved does no
-                            // recomposite work.
-                            if self.docs.active().canvas.has_clip_content() {
-                                // Defer the CPU flatten: a normal Move release skips
-                                // flush_canvas entirely, but we must flush here to
-                                // re-bake the clip. Marking pixels stale keeps the
-                                // flush to just the mask re-bake + GPU recomposite
-                                // (the CPU flatten rebuilds lazily when actually
-                                // needed), so a large clipped image doesn't stall the
-                                // next drag by a beat.
-                                self.docs.active_mut().canvas.pixels_stale = true;
-                                self.flush_canvas();
-                                if let Some(w) = &self.win.window {
-                                    w.request_redraw();
-                                }
-                            }
-                        }
-                    }
+                    self.on_main_left_release(event_loop);
                 }
             }
             _ => {}
+        }
+    }
+    /// Left button pressed on the canvas (not panning with Space).
+    fn on_main_left_press(&mut self) {
+        // A click anywhere but on a guide lets go of the picked
+        // one, so Delete goes back to the layer or the pixels.
+        self.edit.selected_guide = None;
+        if !self.edit.input.was_over_ui {
+            let active_tool = self.edit.tools.active_id();
+            if !self.alpha_view_allows_tool(active_tool) {
+                self.deny_alpha_view_tool(active_tool);
+                return;
+            }
+            if !self.cmyk_allows_tool(active_tool) {
+                self.deny_cmyk_tool(active_tool);
+                return;
+            }
+            // The tool works on a retouch applied, not on
+            // its preview.
+            self.portrait_pressed();
+
+            // Grab an existing guide with the Move tool (before any
+            // tool press): drag to reposition, drop off-canvas to
+            // delete. The guide is picked too: Delete removes it.
+            if self.edit.tools.active_id() == ToolId::Move
+                && self.edit.transform_state.is_none()
+                && let Some(gi) = self.guide_at_screen()
+            {
+                self.edit.selected_guide = Some((self.docs.active().id, gi));
+                self.shell.status_msg = "Đã chọn đường gióng — bấm Delete để xóa".to_string();
+                let g = self.docs.active().guides[gi];
+                let ev = self.tool_event();
+                let pos = match g.orientation {
+                    crate::core::document::GuideOrientation::Horizontal => ev.canvas_y,
+                    crate::core::document::GuideOrientation::Vertical => ev.canvas_x,
+                };
+                self.edit.guide_op = Some(crate::app::state::GuideOp::Move {
+                    idx: gi,
+                    orientation: g.orientation,
+                    pos,
+                });
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+
+            let is_double_click = self
+                .edit
+                .input
+                .last_left_release_time
+                .map(|t| t.elapsed().as_millis() < 400)
+                .unwrap_or(false);
+            if is_double_click
+                && self.edit.tools.active_id() == ToolId::Move
+                && self.edit.transform_state.is_none()
+            {
+                let ev = self.tool_event();
+                if let Some(idx) = self.text_layer_at(ev.canvas_x, ev.canvas_y) {
+                    self.begin_edit_text_layer(idx);
+                    self.edit.input.last_left_release_time = None;
+                    if let Some(win) = &self.win.window {
+                        win.request_redraw();
+                    }
+                    return;
+                }
+            }
+
+            if is_double_click
+                && self.edit.tools.active_id() == ToolId::PolygonLasso
+                && self.edit.transform_state.is_none()
+            {
+                {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    self.edit.tools.active_on_confirm(&mut ctx);
+                }
+                self.docs.active_mut().canvas.selection.refresh_bbox();
+                self.upload_selection_mask();
+                self.push_selection_uniforms();
+                self.edit.input.last_left_release_time = None;
+                self.edit.input.painting = false;
+                if let Some(win) = &self.win.window {
+                    win.request_redraw();
+                }
+                return;
+            }
+
+            if self.edit.tools.active_id() == ToolId::Text && self.edit.transform_state.is_none() {
+                // While a session is open the overlay owns all
+                // pointer interaction; outside clicks are refused
+                // by the action gate (bell) — not here, to avoid
+                // double-chiming the same click.
+                if self.edit.text_edit.is_none() {
+                    let ev = self.tool_event();
+                    if let Some(idx) = self.text_layer_at(ev.canvas_x, ev.canvas_y) {
+                        self.begin_edit_text_layer(idx);
+                    } else {
+                        self.text_tool_click(ev.canvas_x, ev.canvas_y);
+                    }
+                }
+                self.edit.input.last_left_release_time = None;
+                if let Some(win) = &self.win.window {
+                    win.request_redraw();
+                }
+                return;
+            }
+
+            // Shape tool: grabbing a handle of the active
+            // Shape layer starts a resize/edit drag;
+            // otherwise the press falls through to start a
+            // rubber-band for a brand-new shape.
+            if self.edit.tools.active_id() == ToolId::Shape && self.edit.transform_state.is_none() {
+                let ev = self.tool_event();
+                if let Some(handle) = self.shape_handle_at(ev.canvas_x, ev.canvas_y) {
+                    self.shape_begin_handle_drag(handle);
+                    self.edit.input.painting = true;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+
+            // Gradient transform handles are interactive only
+            // while the Gradient Tool is active.
+            if self.edit.tools.active_id() == ToolId::Gradient
+                && self.edit.transform_state.is_none()
+            {
+                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                if let Some(handle) = self.path_gradient_handle_at_screen(msx, msy) {
+                    let ev = self.tool_event();
+                    self.path_gradient_begin(handle, ev.canvas_x, ev.canvas_y);
+                    self.edit.input.painting = true;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+
+            // Move tool: grabbing a transform handle (or the
+            // rotate ring) of the active Path layer starts an
+            // on-canvas scale/rotate that keeps the object
+            // editable; otherwise the press falls through to the
+            // normal Move (select / drag / marquee).
+            if self.edit.tools.active_id() == ToolId::Move && self.edit.transform_state.is_none() {
+                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
+                    use crate::app::vector_transform::PathBoxHit;
+                    let ev = self.tool_event();
+                    // Grabbing the pivot marker relocates the rotation
+                    // centre (CorelDRAW style); a handle/ring starts a
+                    // scale/rotate. Alt+rotate or Ctrl+scale instead
+                    // transforms a fresh COPY (the repeat sample).
+                    let dup = match hit {
+                        PathBoxHit::Rotate => self.edit.input.alt_held,
+                        PathBoxHit::Skew(_) => false,
+                        PathBoxHit::Handle(_) => self.edit.input.ctrl_held,
+                        PathBoxHit::Pivot => false,
+                    };
+                    if hit == PathBoxHit::Pivot {
+                        self.path_pivot_drag_begin();
+                    } else if dup {
+                        self.path_transform_begin_duplicate(hit, ev.canvas_x, ev.canvas_y);
+                    } else {
+                        self.path_transform_begin(hit, ev.canvas_x, ev.canvas_y);
+                    }
+                    self.edit.input.painting = true;
+                    if let Some(w) = &self.win.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                // Other selected layer kinds use the same eight
+                // handles and rotate ring directly in Move. Start
+                // the transform engine only after a handle/ring
+                // hit, so ordinary clicking and marquee selection
+                // remain available while the idle box is visible.
+                if self.move_selection_transform_hit(msx, msy) {
+                    let ev = self.tool_event();
+                    self.begin_move_transform();
+                    if self.edit.transform_state.is_some() {
+                        self.transform_on_press(ev.canvas_x, ev.canvas_y, msx, msy);
+                        self.edit.input.painting = true;
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Node tool: double-click an anchor cycles its kind
+            // (Cusp→Smooth→Symmetric); a single press on a handle
+            // reshapes the curve, on an anchor drags it, on a
+            // segment inserts an anchor there and drags it, and on
+            // empty space deselects. All routed to node_ops.
+            if self.edit.tools.active_id() == ToolId::Node && self.edit.transform_state.is_none() {
+                let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                let is_double_click = self
+                    .edit
+                    .input
+                    .last_left_release_time
+                    .map(|t| t.elapsed().as_millis() < 400)
+                    .unwrap_or(false);
+                if is_double_click
+                    && let Some(crate::app::node_ops::NodeHit::Node(ci, ni)) =
+                        self.node_hit_at_screen(msx, msy)
+                    && self.node_toggle_kind(ci, ni)
+                {
+                    self.edit.input.last_left_release_time = None;
+                    self.edit.input.painting = true;
+                    return;
+                }
+                let ev = self.tool_event();
+                if let Some(hit) = self.node_hit_at_screen(msx, msy) {
+                    // Shift+click an anchor toggles it in the
+                    // multi-selection instead of starting a drag.
+                    if self.edit.input.shift_held
+                        && let crate::app::node_ops::NodeHit::Node(ci, ni) = hit
+                    {
+                        self.node_shift_toggle(ci, ni);
+                        self.edit.input.painting = true;
+                        return;
+                    }
+                    if self.node_press(hit, ev.canvas_x, ev.canvas_y) {
+                        self.edit.input.painting = true;
+                        return;
+                    }
+                } else if self.node_click_select_path(ev.canvas_x, ev.canvas_y) {
+                    // Clicked another Path's body — make it the edit
+                    // target (Shape-tool object switching), then grab
+                    // a node of it if the click also landed on one.
+                    if let Some(hit) = self.node_hit_at_screen(msx, msy) {
+                        self.node_press(hit, ev.canvas_x, ev.canvas_y);
+                    }
+                    self.edit.input.painting = true;
+                    return;
+                } else {
+                    // Empty canvas: begin a rubber-band selection.
+                    // Release decides — select the enclosed anchors,
+                    // or clear if it was really just a click.
+                    self.node_marquee_start(msx, msy);
+                }
+                // Swallow the press so it never falls through to a
+                // pixel tool on the (vector) Path layer.
+                self.edit.input.painting = true;
+                return;
+            }
+
+            if self.edit.tools.active_id() == ToolId::Repair
+                && self.jobs.repair_ai.is_some()
+                && self.edit.transform_state.is_none()
+            {
+                self.shell.status_msg = "AI đang xoá vùng vừa tô — đợi vài giây".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+
+            if matches!(self.edit.tools.active_id(), ToolId::Clone | ToolId::Repair)
+                && self.edit.input.alt_held
+                && self.edit.transform_state.is_none()
+            {
+                let event = self.tool_event();
+                {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    let _ = self.edit.tools.on_press(event, &mut ctx);
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+
+            let alt_paint_pick =
+                matches!(self.edit.tools.active_id(), ToolId::Brush | ToolId::Pencil)
+                    && self.edit.input.alt_held;
+            if (self.edit.tools.active_id() == ToolId::Eyedropper || alt_paint_pick)
+                && self.edit.transform_state.is_none()
+            {
+                let ev = self.tool_event();
+                self.pick_color_at(ev.canvas_x, ev.canvas_y);
+                self.edit.input.eyedropping = true;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+
+            // Zoom tool: press starts scrubby zoom. If the
+            // user releases without dragging, it falls back
+            // to the classic click zoom.
+            if self.edit.tools.active_id() == ToolId::Zoom && self.edit.transform_state.is_none() {
+                self.edit.input.zoom_dragging = true;
+                self.edit.input.zoom_drag_moved = false;
+                self.edit.input.zoom_drag_start_x = self.edit.input.mouse_x;
+                self.edit.input.zoom_drag_start_y = self.edit.input.mouse_y;
+                self.edit.input.zoom_drag_anchor_x = self.edit.input.mouse_x;
+                self.edit.input.zoom_drag_anchor_y = self.edit.input.mouse_y;
+                self.edit.input.zoom_drag_start_zoom = self.edit.view.zoom;
+                return;
+            }
+
+            self.edit.input.painting = true;
+            if self.edit.transform_state.is_some() {
+                let ev = self.tool_event();
+                let sx = self.edit.input.mouse_x;
+                let sy = self.edit.input.mouse_y;
+                self.transform_on_press(ev.canvas_x, ev.canvas_y, sx, sy);
+                self.win.interactive_recompose_last = None;
+                self.win.interactive_recompose_cost = std::time::Duration::ZERO;
+                self.request_interactive_recompose();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else {
+                let event = self.tool_event();
+                let active_tool = self.edit.tools.active_id();
+                // Use the editable vector model for the second-click
+                // candidate. Raster bounds can lag behind an affine
+                // transform, which previously made this click silently
+                // fail and left the newly-hidden pivot unreachable.
+                let arm_path_toggle = active_tool == ToolId::Move
+                    && self.active_path_layer().is_some_and(|active| {
+                        self.path_layer_hit_at(event.canvas_x, event.canvas_y) == Some(active)
+                    });
+                let tool_resp = {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    self.edit.tools.on_press(event, &mut ctx)
+                };
+                if arm_path_toggle {
+                    self.edit
+                        .tools
+                        .move_tool_mut()
+                        .arm_vector_transform_toggle();
+                }
+                if let Some(msg) = tool_resp.status {
+                    self.shell.status_msg = msg.to_string();
+                }
+                let mut request_redraw = tool_resp.needs_redraw;
+                if matches!(
+                    active_tool,
+                    ToolId::Move | ToolId::Gradient | ToolId::Crop | ToolId::PerspectiveCrop
+                ) {
+                    // Plain mouse-down on these tools should be cheap.
+                    // Move recomposes on first drag; Gradient only draws
+                    // a UI direction guide until mouse-up bakes pixels.
+                } else {
+                    self.flush_canvas();
+                    self.docs.active_mut().canvas.selection.refresh_bbox();
+                    self.upload_selection_mask();
+                    self.push_selection_uniforms();
+                    request_redraw = true;
+                }
+                if request_redraw && let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+    /// Left button released (not panning with Space).
+    fn on_main_left_release(&mut self, event_loop: &ActiveEventLoop) {
+        self.edit.input.eyedropping = false;
+        if self.edit.input.zoom_dragging {
+            let clicked = !self.edit.input.zoom_drag_moved;
+            self.edit.input.zoom_dragging = false;
+            self.edit.input.zoom_drag_moved = false;
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            if clicked {
+                self.zoom_at_cursor(!self.edit.input.alt_held);
+            } else {
+                self.sync_cursor(event_loop);
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
+        // Finish moving an existing guide: drop off-canvas → delete it.
+        // NB: only consume guide_op for a Move. A Create (ruler drag) is
+        // committed by the egui side via `ruler_guide_commit`, which runs
+        // a frame later — taking it here would lose the new guide.
+        if let Some(crate::app::state::GuideOp::Move {
+            idx,
+            orientation,
+            pos,
+        }) = self.edit.guide_op
+        {
+            self.edit.guide_op = None;
+            let canvas = &self.docs.active().canvas;
+            let dim = match orientation {
+                crate::core::document::GuideOrientation::Horizontal => canvas.height as f32,
+                crate::core::document::GuideOrientation::Vertical => canvas.width as f32,
+            };
+            if (pos < 0.0 || pos > dim) && idx < self.docs.active().guides.len() {
+                self.docs.active_mut().guides.remove(idx);
+                self.edit.selected_guide = None;
+            }
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        let releasing_move = self.edit.input.painting
+            && self.edit.transform_state.is_none()
+            && self.edit.path_transform.is_none()
+            && self.edit.path_gradient_drag.is_none()
+            && self.edit.tools.active_id() == ToolId::Move;
+        if self.edit.path_gradient_drag.is_some() {
+            // Commit from a settled input state. This makes the
+            // final full composite take the normal (non-drag)
+            // path and prevents any interactive cache policy
+            // from surviving the release frame.
+            self.edit.input.painting = false;
+            self.path_gradient_finish();
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.edit.path_pivot_dragging {
+            // Finish relocating the rotation-pivot marker. Pure tool
+            // state — nothing recorded, no Move-tool release path.
+            self.path_pivot_drag_finish();
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            self.edit.input.painting = false;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.edit.path_transform.is_some() {
+            // Finish an on-canvas Path scale/rotate (records one
+            // ChangeVectorTransform). Bypasses the Move tool's
+            // own release path — the gesture never touched it.
+            self.path_transform_finish();
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            self.edit.input.painting = false;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.edit.tools.active_id() == ToolId::Node && self.edit.transform_state.is_none() {
+            // Finish a Node tool drag (records one
+            // ReplacePathGeometry), a rubber-band selection, or just
+            // release a no-hit press.
+            if self.edit.node_drag.is_some() {
+                self.node_drag_finish();
+            } else if self.node_marquee_active() {
+                self.node_marquee_finish();
+            }
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            self.edit.input.painting = false;
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.edit.input.painting {
+            if self.edit.transform_state.is_some() {
+                self.transform_on_release();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else if self.edit.tools.active_id() == ToolId::Shape {
+                if self.shape_drag_active() {
+                    // Finish resizing / editing a handle.
+                    self.shape_drag_finish();
+                } else {
+                    // The rubber-band drag becomes a new,
+                    // editable Shape layer (handled at App
+                    // level so layer structure is undoable).
+                    let ev = self.tool_event();
+                    let span = self.edit.tools.shape_mut().finish_span(
+                        ev.canvas_x,
+                        ev.canvas_y,
+                        ev.shift,
+                        ev.alt,
+                    );
+                    if let Some((x0, y0, x1, y1)) = span {
+                        self.begin_new_shape(x0, y0, x1, y1);
+                    }
+                }
+                self.edit.input.painting = false;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else if self.edit.tools.active_id() == ToolId::Arrow {
+                let event = self.tool_event();
+                {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    let _ = self.edit.tools.on_release(event, &mut ctx);
+                }
+                self.commit_arrow();
+                self.edit.input.painting = false;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else if self.edit.tools.active_id() == ToolId::VectorBrush {
+                // A freehand drag becomes one editable Path stroke
+                // (handled at App level so the new layer is undoable).
+                let event = self.tool_event();
+                {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    // Let the tool catch its stabilizer up to the
+                    // release point before we read the stroke.
+                    let _ = self.edit.tools.on_release(event, &mut ctx);
+                }
+                self.commit_vector_brush_stroke();
+                self.edit.input.painting = false;
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            } else {
+                if !self.edit.pending_stroke_inputs.is_empty() {
+                    let events: Vec<_> = self.edit.pending_stroke_inputs.drain(..).collect();
+                    for event in events {
+                        let mut ctx = ToolCtx::new(
+                            self.docs.active_mut(),
+                            self.edit.fg_color,
+                            self.edit.bg_color,
+                            self.edit.view.zoom,
+                            self.edit.view.offset_x,
+                            self.edit.view.offset_y,
+                        );
+                        let _ = self.edit.tools.on_drag(event, &mut ctx);
+                    }
+                    self.flush_canvas();
+                }
+
+                let event = self.tool_event();
+                let active_tool = self.edit.tools.active_id();
+                let releasing_vector_gradient =
+                    active_tool == ToolId::Gradient && self.active_gradient_mode() == 2;
+                let tool_resp = {
+                    let mut ctx = ToolCtx::new(
+                        self.docs.active_mut(),
+                        self.edit.fg_color,
+                        self.edit.bg_color,
+                        self.edit.view.zoom,
+                        self.edit.view.offset_x,
+                        self.edit.view.offset_y,
+                    );
+                    self.edit.tools.on_release(event, &mut ctx)
+                };
+                if let Some(msg) = tool_resp.status {
+                    self.shell.status_msg = msg.to_string();
+                }
+                let move_layer_release = matches!(
+                    active_tool,
+                    ToolId::Move | ToolId::Crop | ToolId::PerspectiveCrop
+                ) && !tool_resp.needs_composite;
+                if releasing_vector_gradient {
+                    self.finish_vector_gradient_release();
+                } else if !move_layer_release {
+                    self.flush_canvas();
+                }
+                if active_tool == ToolId::Crop {
+                    self.update_crop_preview();
+                }
+
+                // Mirror an Alt+drag duplicate into the unified
+                // repeatable step so Repeat / Ctrl+D continues the row.
+                if active_tool == ToolId::Move {
+                    let toggle = {
+                        let mt = self.edit.tools.move_tool_mut();
+                        let value = mt.toggle_vector_transform_requested;
+                        mt.toggle_vector_transform_requested = false;
+                        value
+                    };
+                    if toggle {
+                        self.toggle_path_transform_mode();
+                    }
+                    let dup = {
+                        let mt = self.edit.tools.move_tool_mut();
+                        if mt.took_duplicate {
+                            mt.took_duplicate = false;
+                            mt.last_duplicate_delta
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((dx, dy)) = dup {
+                        self.edit.last_repeat_transform =
+                            Some(crate::core::vector::affine::AffineTransform::translate(
+                                dx as f32, dy as f32,
+                            ));
+                    }
+                }
+
+                if self.edit.tools.active_id() == crate::tools::ToolId::Repair {
+                    // Large strokes go to the AI in the background;
+                    // the rest heal right here.
+                    let wash = self.build_repair_stroke_overlay();
+                    let heal_now = self
+                        .edit
+                        .tools
+                        .healing_mut()
+                        .0
+                        .take_pending_ca()
+                        .and_then(|s| self.start_repair_ai(s, wash));
+                    if let Some(s) = heal_now {
+                        let ok = self
+                            .docs
+                            .active_mut()
+                            .canvas
+                            .spot_heal(s.x0, s.y0, s.w, s.h, &s.cover, s.opacity);
+                        if ok {
+                            self.apply_canvas_event(
+                                crate::app::render::CanvasEvent::LayerPixelsChanged,
+                            );
+                            self.shell.status_msg = "Smart Heal".to_string();
+                        } else {
+                            self.shell.status_msg =
+                                "Smart Heal cần một layer raster mở khoá".to_string();
+                        }
+                    }
+                }
+
+                if self.edit.tools.active_id() == crate::tools::ToolId::Patch {
+                    use crate::tools::patch::PatchPending;
+                    if let Some(pending) = self.edit.tools.patch_mut().take_pending() {
+                        let canvas = &mut self.docs.active_mut().canvas;
+                        let ok = match pending {
+                            PatchPending::Clone { dx, dy } => canvas.patch_clone(dx, dy),
+                            PatchPending::Fill => canvas.smart_fill_fill(false),
+                        };
+                        if ok {
+                            self.apply_canvas_event(
+                                crate::app::render::CanvasEvent::LayerPixelsChanged,
+                            );
+                            self.shell.status_msg = "Patch".to_string();
+                        } else {
+                            self.shell.status_msg =
+                                "Patch cần một layer raster mở khoá".to_string();
+                        }
+                    }
+                }
+
+                if matches!(
+                    self.edit.tools.active_id(),
+                    crate::tools::ToolId::Brush | crate::tools::ToolId::Eraser
+                ) {
+                    self.win.pending_gpu_sync = self.docs.documents[self.docs.active_doc_idx]
+                        .canvas
+                        .stroke_dirty
+                        .clone();
+                    self.win.pending_gpu_sync_layer_id =
+                        self.docs.active().canvas.active_layer().id as usize;
+                    self.sync_brush_gpu_to_cpu();
+                }
+
+                if !move_layer_release {
+                    self.docs.active_mut().canvas.selection.refresh_bbox();
+                    self.upload_selection_mask();
+                    self.push_selection_uniforms();
+                }
+
+                if !move_layer_release {
+                    self.docs.active_mut().canvas.end_stroke();
+                }
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+        self.edit.input.painting = false;
+        if releasing_move {
+            self.win.interactive_recompose_pending = false;
+            // The clipping-mask / PowerClip re-fit is skipped every
+            // frame during a Move drag (a full-content mask re-bake +
+            // GPU re-upload per frame made large clipped images lag).
+            // A plain Move release takes the `move_layer_release` fast
+            // path and skips flush_canvas, so nothing would re-pin the
+            // clip. Re-pin ONCE now that the move settled, so clipped
+            // content snaps back onto its frame instead of being left
+            // showing the dragged (stale) mask until an unrelated
+            // recomposite. Fingerprint-gated inside refresh_clip_masks,
+            // so a document with no clip that actually moved does no
+            // recomposite work.
+            if self.docs.active().canvas.has_clip_content() {
+                // Defer the CPU flatten: a normal Move release skips
+                // flush_canvas entirely, but we must flush here to
+                // re-bake the clip. Marking pixels stale keeps the
+                // flush to just the mask re-bake + GPU recomposite
+                // (the CPU flatten rebuilds lazily when actually
+                // needed), so a large clipped image doesn't stall the
+                // next drag by a beat.
+                self.docs.active_mut().canvas.pixels_stale = true;
+                self.flush_canvas();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+            }
         }
     }
     /// The main window's CursorMoved arm, verbatim: hover states, drags,
@@ -1526,6 +1485,8 @@ impl App {
             || active == ToolId::Move
             || active == ToolId::Shape
             || active == ToolId::Text
+            // A shape's gradient handles show the Move pointer.
+            || active == ToolId::Gradient
             // Marquee / lasso: the Move-selection pointer inside the selection.
             || matches!(
                 active,

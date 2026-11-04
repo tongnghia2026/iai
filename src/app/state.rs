@@ -3199,7 +3199,19 @@ impl App {
                         }
                     }
                     ToolId::Gradient => {
-                        if let Some(gc) = &self.win.cursor_gradient {
+                        // Over a handle of a shape's gradient: it can be
+                        // pressed and dragged.
+                        let on_handle = self.edit.path_gradient_drag.is_some()
+                            || self
+                                .path_gradient_handle_at_screen(
+                                    self.edit.input.mouse_x,
+                                    self.edit.input.mouse_y,
+                                )
+                                .is_some();
+                        if on_handle {
+                            w.set_cursor_visible(true);
+                            w.set_cursor(CursorIcon::Move);
+                        } else if let Some(gc) = &self.win.cursor_gradient {
                             w.set_cursor_visible(true);
                             w.set_cursor(gc.clone());
                         } else {

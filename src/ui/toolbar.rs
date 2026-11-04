@@ -50,7 +50,7 @@ const NODE_GROUP: &[(ToolId, &str, &str)] =
 const VECTOR_BRUSH_GROUP: &[(ToolId, &str, &str)] = &[(
     ToolId::VectorBrush,
     ph::SCRIBBLE_LOOP,
-    "Vector Brush — freehand editable stroke",
+    "Freehand / Vector Brush — draw a line you can edit",
 )];
 
 const BRUSH_GROUP: &[(ToolId, &str, &str)] = &[

@@ -239,6 +239,10 @@ pub struct PathGradientOverlay {
     pub axis_x: (f32, f32),
     pub axis_y: (f32, f32),
     pub stops: Vec<(f32, f32)>,
+    /// First and last stop colours: the start and end handles wear them, so
+    /// the start is told from the end at a glance.
+    pub start_color: [u8; 4],
+    pub end_color: [u8; 4],
 }
 
 #[derive(Clone)]
@@ -2304,10 +2308,29 @@ fn draw_path_gradient_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport
                 egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)),
             );
         }
-        let center_rect = egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0));
-        painter.rect_filled(center_rect, 1.0, egui::Color32::WHITE);
-        painter.rect_stroke(center_rect, 1.0, accent, egui::StrokeKind::Outside);
-        painter.circle(axis_x, 5.0, egui::Color32::WHITE, accent);
+        let rgb = |c: [u8; 4]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+        // An arrow head at the end shows which way the colours run.
+        let dir = (axis_x - center).normalized();
+        if dir.length() > 0.5 && (axis_x - center).length() > 24.0 {
+            let tip = axis_x - dir * 8.0;
+            let side = egui::vec2(-dir.y, dir.x) * 5.0;
+            let back = tip - dir * 9.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, back + side, back - side],
+                egui::Color32::from_rgb(255, 210, 70),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(150)),
+            ));
+        }
+        // The start: a larger square in the first colour, ringed white.
+        let ring = egui::Stroke::new(2.0_f32, egui::Color32::WHITE);
+        let dark = egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(200));
+        let center_rect = egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0));
+        painter.rect_filled(center_rect, 1.0, rgb(overlay.start_color));
+        painter.rect_stroke(center_rect, 1.0, ring, egui::StrokeKind::Inside);
+        painter.rect_stroke(center_rect, 1.0, dark, egui::StrokeKind::Outside);
+        // The end: a circle in the last colour.
+        painter.circle(axis_x, 6.0, rgb(overlay.end_color), ring);
+        painter.circle_stroke(axis_x, 7.0, dark);
         if overlay.kind == 1 {
             painter.circle(axis_y, 5.0, egui::Color32::WHITE, accent);
         }

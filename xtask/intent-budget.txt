@@ -15,5 +15,5 @@ LibraryIntent 6
 PrintIntent 20
 SelectionIntent 44
 SettingsIntent 5
-ToolIntent 160
+ToolIntent 157
 UiActions 0

@@ -542,7 +542,34 @@ fn arrow_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 }
 
 fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    ui.label(egui::RichText::new("Vector Brush").strong());
+    // Freehand is the thin line a Corel user draws by hand; Brush is the
+    // ribbon whose width follows pressure and speed.
+    let freehand = data.tool.vector_brush_freehand;
+    for (on, icon, label, tip) in [
+        (
+            true,
+            ph::SCRIBBLE,
+            "Freehand",
+            "Vẽ tay: kéo chuột vẽ một đường nét mảnh, sửa từng điểm được; kết thúc gần chỗ bắt đầu thì hình tự khép kín",
+        ),
+        (
+            false,
+            ph::PAINT_BRUSH_BROAD,
+            "Brush",
+            "Cọ: nét to nhỏ theo lực bút và tốc độ kéo",
+        ),
+    ] {
+        if ui
+            .selectable_label(freehand == on, format!("{icon} {label}"))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.run(
+                "tool.vector_brush_mode",
+                serde_json::json!({ "freehand": on }),
+            );
+        }
+    }
     ui.separator();
 
     ui.label("Width:");
@@ -569,6 +596,9 @@ fn vector_brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiAction
         actions.tool.set_vector_brush_smoothing = Some(s);
     }
 
+    if freehand {
+        return;
+    }
     ui.separator();
     let mut pressure = data.tool.vector_brush_pressure;
     if ui.checkbox(&mut pressure, "Pressure").changed() {
@@ -1501,6 +1531,9 @@ fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     let resp = resp.on_hover_text("Click to edit the gradient");
     if resp.clicked() {
         actions.tool.toggle_gradient_editor = Some(!data.tool.show_gradient_editor);
+        // Opened or shut from here, the editor starts again from the real stops.
+        ui.ctx()
+            .data_mut(|d| d.remove::<Vec<(f32, [u8; 4])>>(egui::Id::new("gradient_editor_draft")));
     }
     ui.separator();
 
@@ -1806,6 +1839,30 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui.checkbox(&mut auto_select, "Auto-Select Layer").changed() {
         actions.tool.set_move_auto_select = Some(auto_select ^ ctrl_held);
     }
+    // With a vector object picked the bar follows a Corel user's order:
+    // turn and mirror, outline, shaping, then align; pixels keep the
+    // Photoshop order.
+    let vector = data.tool.path_style.is_some() || selected_vector_count(data) > 0;
+    if vector {
+        move_rotate_flip(ui, actions);
+        if data.tool.path_style.is_some() {
+            ui.separator();
+            path_style_quick(ui, data, actions);
+        }
+        if selected_vector_count(data) >= 2 {
+            ui.separator();
+            shaping_buttons(ui, actions);
+        }
+        move_align(ui, actions);
+        move_duplicate(ui, actions);
+    } else {
+        move_align(ui, actions);
+        move_duplicate(ui, actions);
+        move_rotate_flip(ui, actions);
+    }
+}
+
+fn move_align(ui: &mut egui::Ui, actions: &mut UiActions) {
     ui.separator();
     align_button(
         ui,
@@ -1862,16 +1919,19 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.run("layer.distribute", LayerDistribute::VerticalCenters.args());
     }
+}
+
+fn move_duplicate(ui: &mut egui::Ui, actions: &mut UiActions) {
     ui.separator();
     if ui
-        .button("Duplicate")
-        .on_hover_text("Duplicate the selected objects (shortcut: +)")
+        .button(top_options_icon(ph::COPY))
+        .on_hover_text("Duplicate the selected objects (+)")
         .clicked()
     {
         actions.layers.duplicate_selected_step = true;
     }
     if ui
-        .button("Repeat")
+        .button(top_options_icon(ph::REPEAT))
         .on_hover_text(
             "Repeat the last step on a new copy — move, or Alt+rotate / Ctrl+scale \
              a copy first to set the pattern (Ctrl+D)",
@@ -1880,6 +1940,9 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     {
         actions.layers.repeat_duplicate_step = true;
     }
+}
+
+fn move_rotate_flip(ui: &mut egui::Ui, actions: &mut UiActions) {
     ui.separator();
     move_transform_button(
         ui,
@@ -1917,20 +1980,6 @@ fn move_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         ph::FLIP_VERTICAL,
         "Flip selected layers vertically",
     );
-
-    // When a vector object is active, expose a compact Fill/Outline/Width here;
-    // the full editor (gradient stops, dash, overprint) lives in the Color panel
-    // so this already-crowded bar stays reachable.
-    if data.tool.path_style.is_some() {
-        ui.separator();
-        path_style_quick(ui, data, actions);
-    }
-
-    // Shaping (Weld/Trim/Intersect/Simplify) once ≥2 vector objects are selected.
-    if selected_vector_count(data) >= 2 {
-        ui.separator();
-        shaping_buttons(ui, actions);
-    }
 }
 
 /// Compact outline width + cap/join + arrowhead quick-access for the Move
@@ -2061,87 +2110,148 @@ fn arrow_controls(
 }
 
 fn node_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
-    use crate::core::vector::ops::{AlignRef, Axis};
-    ui.label(egui::RichText::new("Node").strong());
-    ui.separator();
-    if data.tool.path_style.is_some() {
-        path_style_options(ui, data, actions);
+    use serde_json::json;
+    // Grouped the way a Corel user reads the bar, each group under a short
+    // caption; the tips say in plain Vietnamese what a button does.
+    let caption = |ui: &mut egui::Ui, text: &str| {
+        ui.label(
+            egui::RichText::new(text)
+                .size(11.0)
+                .color(egui::Color32::from_gray(150)),
+        );
+    };
+    let groups: [(&str, &[(&str, &str, &str)]); 5] = [
+        (
+            "Điểm",
+            &[
+                (
+                    ph::PLUS_CIRCLE,
+                    "add",
+                    "Thêm điểm: chèn một điểm vào giữa đoạn ngay sau điểm đang chọn",
+                ),
+                (
+                    ph::MINUS_CIRCLE,
+                    "delete",
+                    "Xóa các điểm đang chọn (phím Delete)",
+                ),
+            ],
+        ),
+        (
+            "Nối",
+            &[
+                (
+                    ph::LINK_SIMPLE_HORIZONTAL,
+                    "join",
+                    "Nối hai điểm đầu mút đang chọn thành một đường",
+                ),
+                (
+                    ph::LINK_SIMPLE_HORIZONTAL_BREAK,
+                    "break",
+                    "Cắt đường ra làm hai tại điểm đang chọn",
+                ),
+            ],
+        ),
+        (
+            "Đoạn",
+            &[
+                (
+                    ph::LINE_SEGMENT,
+                    "to_line",
+                    "Làm thẳng: đoạn sau điểm đang chọn thành đường thẳng",
+                ),
+                (
+                    ph::BEZIER_CURVE,
+                    "to_curve",
+                    "Làm cong: đoạn sau điểm đang chọn có tay nắm để uốn cong",
+                ),
+            ],
+        ),
+        (
+            "Kiểu điểm",
+            &[
+                (
+                    ph::ANGLE,
+                    "cusp",
+                    "Điểm góc: hai tay nắm kéo riêng, tạo góc nhọn",
+                ),
+                (
+                    ph::WAVE_SINE,
+                    "smooth",
+                    "Điểm mượt: hai tay nắm luôn thẳng hàng, đường cong trơn",
+                ),
+                (
+                    ph::ARROWS_HORIZONTAL,
+                    "symmetric",
+                    "Điểm đối xứng: hai tay nắm thẳng hàng và dài bằng nhau",
+                ),
+            ],
+        ),
+        (
+            "Đường",
+            &[
+                (
+                    ph::ARROWS_LEFT_RIGHT,
+                    "reverse",
+                    "Đảo chiều đường (đầu thành cuối)",
+                ),
+                (
+                    ph::POLYGON,
+                    "close",
+                    "Khép kín đường: nối điểm cuối về điểm đầu để đổ màu được",
+                ),
+            ],
+        ),
+    ];
+    for (title, buttons) in groups {
+        caption(ui, title);
+        for &(icon, op, tip) in buttons {
+            if ui
+                .button(top_options_icon(icon))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                actions.run("vector.node_op", json!({ "op": op }));
+            }
+        }
         ui.separator();
     }
-
-    // Align the multi-selected nodes (Shift+click to pick several). Snaps X for
-    // left/centre/right, Y for top/middle/bottom; a no-op below 2 selected nodes.
-    ui.label("Align:");
-    if ui
-        .button(top_options_icon(ph::ALIGN_LEFT))
-        .on_hover_text("Align left (selected points, ≥2)")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Min));
-    }
-    if ui
-        .button(top_options_icon(ph::ALIGN_CENTER_HORIZONTAL))
-        .on_hover_text("Align horizontal centres")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Average));
-    }
-    if ui
-        .button(top_options_icon(ph::ALIGN_RIGHT))
-        .on_hover_text("Align right")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Vertical, AlignRef::Max));
-    }
-    ui.separator();
-    if ui
-        .button(top_options_icon(ph::ALIGN_TOP))
-        .on_hover_text("Align top")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Min));
-    }
-    if ui
-        .button(top_options_icon(ph::ALIGN_CENTER_VERTICAL))
-        .on_hover_text("Align vertical centres")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Average));
-    }
-    if ui
-        .button(top_options_icon(ph::ALIGN_BOTTOM))
-        .on_hover_text("Align bottom")
-        .clicked()
-    {
-        actions.tool.node_align = Some((Axis::Horizontal, AlignRef::Max));
+    caption(ui, "Canh");
+    icon_menu_button(
+        ui,
+        ph::ALIGN_LEFT,
+        false,
+        "Canh các điểm đang chọn cho thẳng hàng (chọn từ 2 điểm)",
+        |ui| {
+            for (icon, label, axis, to) in [
+                (ph::ALIGN_LEFT, "Thẳng mép trái", "x", "min"),
+                (ph::ALIGN_CENTER_HORIZONTAL, "Thẳng giữa (dọc)", "x", "mid"),
+                (ph::ALIGN_RIGHT, "Thẳng mép phải", "x", "max"),
+                (ph::ALIGN_TOP, "Thẳng mép trên", "y", "min"),
+                (ph::ALIGN_CENTER_VERTICAL, "Thẳng giữa (ngang)", "y", "mid"),
+                (ph::ALIGN_BOTTOM, "Thẳng mép dưới", "y", "max"),
+            ] {
+                if ui.button(format!("{icon}  {label}")).clicked() {
+                    actions.run(
+                        "vector.node_op",
+                        json!({"op": "align", "axis": axis, "to": to}),
+                    );
+                    ui.close();
+                }
+            }
+        },
+    );
+    if data.tool.path_style.is_some() {
+        ui.separator();
+        path_style_options(ui, data, actions);
     }
     ui.separator();
-
-    // Break the path at the selected node / join two selected endpoints.
-    if ui
-        .button(format!("{}  Break", ph::LINK_SIMPLE_HORIZONTAL_BREAK))
-        .on_hover_text("Break the path at the selected point")
-        .clicked()
-    {
-        actions.tool.node_break = true;
-    }
-    if ui
-        .button(format!("{}  Join", ph::LINK_SIMPLE_HORIZONTAL))
-        .on_hover_text("Join the two selected endpoints (close or weld the path)")
-        .clicked()
-    {
-        actions.tool.node_join = true;
-    }
-    ui.separator();
-
-    ui.label(
-        egui::RichText::new(
-            "Drag point/handle · click edge = insert · Alt+edge = line/curve · \
-             double-click point = corner/smooth · Shift+click or box = multi-select · \
-             click another path = select · Delete = remove",
-        )
-        .size(11.0)
-        .color(egui::Color32::from_gray(150)),
+    ui.label(top_options_icon(ph::INFO)).on_hover_text(
+        "Cách dùng:\n\
+         • Kéo điểm hoặc tay nắm để sửa hình\n\
+         • Bấm lên đoạn để thêm điểm · Alt + bấm đoạn = đổi thẳng / cong\n\
+         • Bấm đúp vào điểm = đổi góc / mượt\n\
+         • Shift + bấm, hoặc kéo khung = chọn nhiều điểm\n\
+         • Bấm hình khác để sửa hình đó · Delete = xóa điểm",
     );
 }
 
@@ -2156,7 +2266,11 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     // Fill. Solid colour comes from the right-edge palette; only the enable
     // toggle and gradient controls stay here.
     let mut fill = style.fill_enabled;
-    if ui.checkbox(&mut fill, "Fill").changed() {
+    if ui
+        .checkbox(&mut fill, "Fill")
+        .on_hover_text("Tô màu bên trong hình (màu chọn ở dải màu bên phải)")
+        .changed()
+    {
         actions.tool.set_path_fill_enabled = Some(fill);
     }
     let mut fill_overprint = style.fill_overprint;
@@ -2165,7 +2279,7 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             style.fill_enabled,
             egui::Checkbox::new(&mut fill_overprint, "OP Fill"),
         )
-        .on_hover_text("Overprint Fill — preserve underlying inks on output")
+        .on_hover_text("In chồng màu tô: khi in, không đục bỏ màu nằm bên dưới")
         .changed()
     {
         actions.tool.set_path_fill_overprint = Some(fill_overprint);
@@ -2181,11 +2295,15 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             ui.selectable_value(&mut fill_kind, 0, format!("{}  Solid", ph::SQUARE));
             ui.selectable_value(&mut fill_kind, 1, format!("{}  Linear", ph::GRADIENT));
             ui.selectable_value(&mut fill_kind, 2, format!("{}  Radial", ph::CIRCLE));
-        });
+        })
+        .response
+        .on_hover_text("Kiểu tô: một màu, chuyển màu thẳng hoặc chuyển màu tròn");
     if fill_kind != style.fill_kind {
         actions.tool.set_path_fill_kind = Some(fill_kind);
     }
-    if style.fill_kind != 0 && shape_color_chip(ui, style.fill_end_color, "Gradient end colour") {
+    if style.fill_kind != 0
+        && shape_color_chip(ui, style.fill_end_color, "Màu cuối của dải chuyển màu")
+    {
         actions.dialogs.open_paint_color_dialog = Some(7);
     }
     if style.fill_kind != 0 {
@@ -2254,7 +2372,11 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
     // Outline. Colour comes from the right-edge palette; the width and
     // cap/join/dash parameters stay here.
     let mut stroke = style.stroke_enabled;
-    if ui.checkbox(&mut stroke, "Outline").changed() {
+    if ui
+        .checkbox(&mut stroke, "Outline")
+        .on_hover_text("Vẽ nét viền quanh hình")
+        .changed()
+    {
         actions.tool.set_path_stroke_enabled = Some(stroke);
     }
     let mut stroke_overprint = style.stroke_overprint;
@@ -2263,19 +2385,21 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             style.stroke_enabled,
             egui::Checkbox::new(&mut stroke_overprint, "OP Line"),
         )
-        .on_hover_text("Overprint Outline — preserve underlying inks on output")
+        .on_hover_text("In chồng nét viền: khi in, không đục bỏ màu nằm bên dưới")
         .changed()
     {
         actions.tool.set_path_stroke_overprint = Some(stroke_overprint);
     }
     ui.label("Width:");
     let mut w = style.stroke_width;
-    let resp = ui.add(
-        egui::DragValue::new(&mut w)
-            .range(0.0..=500.0)
-            .suffix(" px")
-            .speed(0.2),
-    );
+    let resp = ui
+        .add(
+            egui::DragValue::new(&mut w)
+                .range(0.0..=500.0)
+                .suffix(" px")
+                .speed(0.2),
+        )
+        .on_hover_text("Độ dày nét viền");
     if resp.changed() {
         actions.tool.set_path_stroke_width = Some(w);
     }
@@ -2294,7 +2418,9 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             ui.selectable_value(&mut dash_kind, 0, "Solid");
             ui.selectable_value(&mut dash_kind, 1, "Dashed");
             ui.selectable_value(&mut dash_kind, 2, "Dotted");
-        });
+        })
+        .response
+        .on_hover_text("Kiểu nét: liền, gạch hay chấm");
     if dash_kind != style.dash_kind {
         actions.tool.set_path_dash_kind = Some(dash_kind);
     }
@@ -2309,7 +2435,9 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             ui.selectable_value(&mut cap, 0, format!("{}  Butt cap", ph::LINE_SEGMENT));
             ui.selectable_value(&mut cap, 1, format!("{}  Round cap", ph::CIRCLE));
             ui.selectable_value(&mut cap, 2, format!("{}  Square cap", ph::SQUARE));
-        });
+        })
+        .response
+        .on_hover_text("Hai đầu nét: cắt bằng, bo tròn hay vuông");
     if cap != style.cap {
         actions.tool.set_path_cap = Some(cap);
     }
@@ -2324,13 +2452,16 @@ fn path_style_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions)
             ui.selectable_value(&mut join, 0, format!("{}  Miter join", ph::TRIANGLE));
             ui.selectable_value(&mut join, 1, format!("{}  Round join", ph::CIRCLE));
             ui.selectable_value(&mut join, 2, format!("{}  Bevel join", ph::CORNERS_IN));
-        });
+        })
+        .response
+        .on_hover_text("Chỗ gấp khúc của nét: nhọn, bo tròn hay vát");
     if join != style.join {
         actions.tool.set_path_join = Some(join);
     }
     ui.add_enabled_ui(style.dash_len > 0, |ui| {
         ui.menu_button("Dash\u{2026}", |ui| {
             ui.set_min_width(330.0);
+            ui.label(egui::RichText::new("Độ dài gạch / khoảng hở của nét đứt").strong());
 
             let mut values = style.dash_values;
             let mut len = style.dash_len.clamp(1, 8);

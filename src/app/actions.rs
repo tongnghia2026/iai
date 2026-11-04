@@ -169,6 +169,9 @@ impl App {
             if self.models_window_step(&call) {
                 continue;
             }
+            if self.node_step(&call) || self.vector_brush_step(&call) {
+                continue;
+            }
             #[cfg(feature = "pro")]
             if self.forms_step(&call) {
                 continue;

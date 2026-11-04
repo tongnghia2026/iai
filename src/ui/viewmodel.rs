@@ -303,6 +303,8 @@ pub struct ToolViewModel {
     pub vector_brush_smoothing: f32,
     pub vector_brush_pressure: bool,
     pub vector_brush_velocity: bool,
+    /// Draws a thin outline line instead of a brush ribbon.
+    pub vector_brush_freehand: bool,
     /// Live preview polyline of the in-progress Vector Brush stroke (canvas space).
     pub vector_brush_path: Vec<(f32, f32)>,
     /// True when the active layer is a Vector Brush stroke (enables Expand).
@@ -1417,6 +1419,7 @@ impl Default for UiData {
                 vector_brush_smoothing: 0.4,
                 vector_brush_pressure: true,
                 vector_brush_velocity: true,
+                vector_brush_freehand: false,
                 vector_brush_path: Vec::new(),
                 vector_brush_can_expand: false,
                 arrow_width: 3.0,

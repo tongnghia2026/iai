@@ -242,16 +242,6 @@ pub struct LayerIntent {
 #[derive(Default, PartialEq)]
 pub struct ToolIntent {
     pub select_tool: Option<ToolId>,
-    /// Align the multi-selected Path nodes (Node options bar): the axis to snap on
-    /// and which reference coordinate to snap to.
-    pub node_align: Option<(
-        crate::core::vector::ops::Axis,
-        crate::core::vector::ops::AlignRef,
-    )>,
-    /// Break the active Path at the primary selected node (Node options bar).
-    pub node_break: bool,
-    /// Join the two selected endpoints — close or weld (Node options bar).
-    pub node_join: bool,
     /// New buffer contents from the editing overlay.
     pub text_buffer: Option<String>,
     pub text_cursor: Option<(Option<std::ops::Range<usize>>, Option<usize>)>,

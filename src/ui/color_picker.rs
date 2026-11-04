@@ -75,7 +75,9 @@ fn color_slider_2d(
     y_value: &mut f32,
     color_at: impl Fn(f32, f32) -> Color32,
 ) -> Response {
-    let desired = Vec2::splat(ui.spacing().slider_width);
+    // A wide picker (Gradient Editor) gets a wide field, not a tall square.
+    let width = ui.spacing().slider_width;
+    let desired = Vec2::new(width, width.min(200.0));
     let (rect, response) = ui.allocate_at_least(desired, Sense::click_and_drag());
 
     if let Some(mpos) = response.interact_pointer_pos() {

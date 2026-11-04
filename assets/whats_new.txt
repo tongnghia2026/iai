@@ -3,6 +3,13 @@
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
 04/11/2026
+- Gradient Editor: bảng chọn màu nằm luôn trong cửa sổ, to hơn, không che nút Done nữa. Màu chỉ áp lên hình khi bấm Done (hoặc Enter), nên kéo trong bảng màu không còn lag; đóng bằng dấu × hay Esc là bỏ những gì vừa chỉnh.
+- Chuyển màu trên hình vẽ: điểm gốc là ô vuông tô màu đầu, điểm cuối là chấm tròn tô màu cuối, có mũi tên chỉ chiều màu chạy. Rê chuột vào hai điểm đó thì con trỏ đổi sang hình bốn mũi tên, bấm giữ rồi kéo để dời.
+- Công cụ sửa điểm (Node): thanh trên có thêm nút thêm điểm, làm thẳng, làm cong, điểm góc, điểm mượt, điểm đối xứng, đảo chiều, khép kín đường; các nút chia nhóm có chữ ghi tên, rê chuột vào nút nào cũng có giải thích bằng tiếng Việt.
+- Công cụ Vector Brush có thêm kiểu «Freehand» (mặc định): kéo chuột vẽ một đường nét mảnh, sửa được từng điểm; kết thúc gần chỗ bắt đầu thì hình tự khép lại để đổ màu. Kiểu «Brush» vẫn là nét to nhỏ theo lực bút như trước.
+- Công cụ Move khi chọn hình vẽ: thanh trên xếp lại theo thứ tự quen của Corel (xoay, lật, nét viền, hàn / cắt hình, canh hàng, nhân bản).
+
+04/11/2026
 - Công cụ Move, quét khung để chọn layer: nếu chỉ có layer ảnh thì khung chạm vào layer nào là chọn layer đó, như Photoshop. Khi có hình vẽ hoặc chữ thì vẫn như trước: khung phải trùm hết mới chọn, giữ Alt khi quét thì chạm là chọn.
 - Quét chọn chung ảnh với chữ hoặc hình vẽ: khung bao ôm vừa các layer đã chọn, không còn to bằng cả trang với ảnh vừa tách bằng «Layer via Copy».
 - Công cụ Move: bấm vào bất kỳ chỗ nào trong khung của dòng chữ là chọn và kéo được chữ, không phải bấm trúng nét chữ.
