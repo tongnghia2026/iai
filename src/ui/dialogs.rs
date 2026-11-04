@@ -544,18 +544,31 @@ pub(crate) mod stage {
             self.texts().iter().any(|(text, _)| text.contains(what))
         }
 
-        /// A click on the text ending in `label`: what its frame asked for
-        /// and the links it opened.
-        pub(crate) fn click(&self, label: &str) -> (UiActions, Vec<String>) {
-            let at = self
-                .texts()
+        /// Where the text ending in `label` is drawn, a little inside it.
+        pub(crate) fn at(&self, label: &str) -> egui::Pos2 {
+            self.texts()
                 .iter()
                 .find(|(text, _)| text.trim().ends_with(label))
                 .map(|(_, pos)| *pos + egui::vec2(6.0, 5.0))
-                .unwrap_or_else(|| panic!("no {label}"));
+                .unwrap_or_else(|| panic!("no {label}"))
+        }
+
+        /// A click on the text ending in `label`: what its frame asked for
+        /// and the links it opened.
+        pub(crate) fn click(&self, label: &str) -> (UiActions, Vec<String>) {
+            self.click_at(self.at(label), egui::PointerButton::Primary)
+        }
+
+        /// A click of `button` at `at`: what its frame asked for and the
+        /// links it opened.
+        pub(crate) fn click_at(
+            &self,
+            at: egui::Pos2,
+            button: egui::PointerButton,
+        ) -> (UiActions, Vec<String>) {
             let press = |pressed| egui::Event::PointerButton {
                 pos: at,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed,
                 modifiers: egui::Modifiers::NONE,
             };

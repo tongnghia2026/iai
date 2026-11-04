@@ -1179,7 +1179,6 @@ impl App {
         Self {
             docs: DocumentSession {
                 tabs: iai_engine::Tabs::window(crate::core::DEFAULT_W, crate::core::DEFAULT_H),
-                current_file: None,
                 pending_close_doc_idx: None,
                 pending_exit_docs: std::collections::VecDeque::new(),
                 next_pdf_group_id: 1,

@@ -275,13 +275,10 @@ impl App {
                 }
                 EngineEvent::Saved {
                     doc,
-                    path,
+                    path: _,
                     complete,
                 } => {
                     if let Some(idx) = self.docs.index_of(DocumentId(doc)) {
-                        if idx == self.docs.active_doc_idx {
-                            self.docs.current_file = Some(path.into());
-                        }
                         // Work done while it was written is not in the file:
                         // its recovery copy stays.
                         if complete {

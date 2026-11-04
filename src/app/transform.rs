@@ -18,6 +18,37 @@ use crate::gpu::compositor::TransformPreviewUniform;
 const HANDLE_RADIUS: f32 = 8.0;
 const ROTATE_ZONE: f32 = 24.0;
 
+/// A layer's ink box, in layer pixels. The Move box asks for it every frame,
+/// so it is kept per layer until one of the layer's tiles changes.
+fn ink_box(layer: &crate::core::layer::Layer) -> Option<(i32, i32, i32, i32)> {
+    use std::hash::{Hash, Hasher};
+    type Seen = std::collections::HashMap<u32, (u64, Option<(i32, i32, i32, i32)>)>;
+    thread_local! {
+        static SEEN: std::cell::RefCell<Seen> = std::cell::RefCell::new(Seen::new());
+    }
+    let key = layer.tiles.tiles.iter().fold(0u64, |sum, (pos, tile)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        pos.hash(&mut h);
+        (std::sync::Arc::as_ptr(tile) as usize).hash(&mut h);
+        tile.revision.hash(&mut h);
+        sum.wrapping_add(h.finish())
+    });
+    SEEN.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if let Some(&(k, b)) = seen.get(&layer.id)
+            && k == key
+        {
+            return b;
+        }
+        let b = layer.tiles.content_bounds();
+        if seen.len() > 256 {
+            seen.clear();
+        }
+        seen.insert(layer.id, (key, b));
+        b
+    })
+}
+
 impl App {
     /// Axis-aligned selection box shown by Move for selected vector primitives
     /// before a transform session is started. Path objects have their own
@@ -74,17 +105,20 @@ impl App {
         for &i in &targets {
             let l = &stack.layers[i];
             // A path by its geometry (its raster may be padded); the rest by
-            // their raster, which the transform session's box is built on.
+            // their ink: a picture lifted with Layer via Copy keeps a raster
+            // the size of the page (04/11: the box framed the whole page).
             let b = match &l.layer_type {
                 LayerType::Vector(VectorGeometry::Path(_)) => self
                     .path_canvas_bounds_of(i)
                     .map(|r| (r.x, r.y, r.x + r.w, r.y + r.h)),
-                _ => Some((
-                    l.offset.0 as f32,
-                    l.offset.1 as f32,
-                    (l.offset.0 + l.width as i32) as f32,
-                    (l.offset.1 + l.height as i32) as f32,
-                )),
+                _ => ink_box(l).map(|(bx0, by0, bx1, by1)| {
+                    (
+                        (l.offset.0 + bx0) as f32,
+                        (l.offset.1 + by0) as f32,
+                        (l.offset.0 + bx1) as f32,
+                        (l.offset.1 + by1) as f32,
+                    )
+                }),
             };
             if let Some((bx0, by0, bx1, by1)) = b {
                 x0 = x0.min(bx0.floor());
@@ -198,7 +232,7 @@ impl App {
         if self.edit.text_edit.is_some() {
             self.commit_text_edit();
         }
-        // Move's handles are drawn on the layers' raster rectangles. The press
+        // Move's handles are drawn on the layers' ink boxes. The press
         // that starts this session is hit-tested against the session's own box,
         // so it has to be that same box: a shape's content sits a few pixels
         // inside its padded raster, and a press on the drawn corner would miss

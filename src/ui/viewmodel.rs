@@ -826,6 +826,19 @@ impl ErrandJob {
         }
     }
 
+    /// Its name in the author's news file, where its how-to video is.
+    pub fn key(self) -> &'static str {
+        match self {
+            ErrandJob::IdCards => "id_cards",
+            ErrandJob::IdPhotos => "id_photos",
+            ErrandJob::FillForm => "fill_form",
+            ErrandJob::DressIdPhoto => "dress_id_photo",
+            ErrandJob::EditPhoto => "edit_photo",
+            ErrandJob::ScanCleanup => "scan_cleanup",
+            ErrandJob::Other => "other",
+        }
+    }
+
     /// It works on the photo open in the window, not on a folder.
     pub fn on_open_photo(self) -> bool {
         matches!(self, ErrandJob::EditPhoto | ErrandJob::DressIdPhoto)
@@ -925,8 +938,8 @@ pub struct ErrandRunView {
     pub failed: bool,
     /// The results' folder, once it is there.
     pub results: Option<String>,
-    /// The Word file a form errand filled, once it is done.
-    pub file: Option<String>,
+    /// The Word files a form errand filled, once it is done.
+    pub files: Vec<String>,
 }
 
 /// "Nhờ AI làm" as its window shows it.

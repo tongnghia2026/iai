@@ -1,6 +1,15 @@
 //! Thin process entry point. All application code lives in the `iai` library.
 
+// No black console beside the window (closing it killed the app unasked,
+// H8); a debug build keeps one for its log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
+    // Run as a command from a terminal, print there.
+    #[cfg(windows)]
+    if std::env::args_os().len() > 1 {
+        iai::console::attach_parent_console();
+    }
     // The same exe doubles as its own watcher process (see `iai::diag`).
     if iai::diag::run_watcher_if_requested() {
         return;

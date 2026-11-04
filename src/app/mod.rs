@@ -33,6 +33,7 @@ pub mod forms_errand;
 #[rustfmt::skip]
 pub mod id_photo_ops;
 pub mod input;
+mod jobs;
 pub mod library;
 pub mod models_ops;
 #[cfg(not(feature = "pro"))]

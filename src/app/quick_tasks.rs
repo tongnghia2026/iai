@@ -568,14 +568,14 @@ impl App {
             return;
         };
         let parent = crate::file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             let title = "Chọn thư mục ảnh của khách";
             if let Some(dir) = crate::file_io::dialog_pick_folder(parent, title) {
-                let _ = tx.send(crate::file_io::FileDialogResult::PickedPhotoFolder(dir));
+                return Some(crate::file_io::FileDialogResult::PickedPhotoFolder(dir));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         window.request_redraw();
     }
 

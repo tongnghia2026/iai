@@ -65,8 +65,7 @@ impl App {
             return;
         };
         let parent = file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("merge-data", move || {
             let mut dialog = rfd::FileDialog::new()
                 .add_filter(
                     "Bảng dữ liệu",
@@ -78,12 +77,11 @@ impl App {
             if let Some(parent) = &parent {
                 dialog = dialog.set_parent(parent);
             }
-            let result = dialog
+            dialog
                 .pick_file()
-                .map(|path| mail_merge::read_data_file(&path).map(|table| (path, table)));
-            let _ = tx.send(result);
+                .map(|path| mail_merge::read_data_file(&path).map(|table| (path, table)))
         });
-        self.jobs.pending_mail_merge_data = Some(rx);
+        self.jobs.pending_mail_merge_data = Some(job);
         self.shell.status_msg = "Đang mở nguồn dữ liệu…".to_string();
         if let Some(window) = &self.win.window {
             window.request_redraw();
@@ -92,12 +90,13 @@ impl App {
 
     /// Drain the data-file picker worker; on success open the mail-merge dialog.
     pub(crate) fn poll_mail_merge_data(&mut self) {
+        use crate::app::jobs::Polled;
         let result = match self.jobs.pending_mail_merge_data.as_ref() {
-            Some(rx) => rx.try_recv(),
+            Some(job) => job.poll(),
             None => return,
         };
         match result {
-            Ok(payload) => {
+            Polled::Done(payload) => {
                 self.jobs.pending_mail_merge_data = None;
                 match payload {
                     None => self.shell.status_msg = "Đã hủy chọn dữ liệu".to_string(),
@@ -108,14 +107,14 @@ impl App {
                     window.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Polled::Pending => {
                 if let Some(window) = &self.win.window {
                     window.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Polled::Failed(why) => {
                 self.jobs.pending_mail_merge_data = None;
-                self.shell.status_msg = "Tác vụ đọc dữ liệu dừng ngoài dự kiến".to_string();
+                self.shell.status_msg = format!("Tác vụ đọc dữ liệu dừng ngoài dự kiến: {why}");
             }
         }
     }

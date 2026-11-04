@@ -540,13 +540,13 @@ impl App {
             return;
         };
         let parent = crate::file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(dir) = crate::file_io::dialog_pick_folder(parent, "Choose Folder") {
-                let _ = tx.send(crate::file_io::FileDialogResult::PickedFolder(dir));
+                return Some(crate::file_io::FileDialogResult::PickedFolder(dir));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

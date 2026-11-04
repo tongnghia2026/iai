@@ -1824,6 +1824,27 @@ mod tests {
         assert_eq!(corners[3], (390.0, 390.0), "the picture's corner");
     }
 
+    /// 04/11: a picture lifted with Layer via Copy keeps a raster the size of
+    /// the page; the Move box frames its ink, not that raster.
+    #[test]
+    fn the_move_box_frames_a_pictures_ink_not_its_raster() {
+        let (mut app, _a, _b) = app_with_two_paths();
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let idx = canvas.layer_stack.add_layer(2000, 2000);
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.offset = (0, 0);
+            for y in 380..390 {
+                for x in 380..390 {
+                    layer.tiles.set_pixel(x, y, 200, 200, 200, 255);
+                }
+            }
+            layer.selected = true;
+        }
+        let (corners, _, _) = app.move_selection_transform_box().expect("one box for all");
+        assert_eq!(corners[3], (390.0, 390.0), "the picture's ink corner");
+    }
+
     /// The owner's report (28/10): a map of paths and other layers picked
     /// whole showed no box. Now one box frames the pick, and scaling it
     /// scales every layer in one step, the paths staying paths.

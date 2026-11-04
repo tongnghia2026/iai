@@ -52,6 +52,48 @@ fn background_raw_thread_count(logical_threads: usize) -> usize {
 }
 
 #[cfg(test)]
+mod reload_tests {
+    use crate::app::state::{App, PendingReloadPrompt};
+
+    /// An update from disk lands on its document even when that document's
+    /// tab moved while the file was read (QC-9: tagged by id, not tab).
+    #[test]
+    fn an_update_from_disk_finds_its_document_after_the_tabs_move() {
+        let path = std::env::temp_dir().join(format!("iai_reload_{}.png", std::process::id()));
+        image::save_buffer(&path, &[10u8; 4 * 3 * 4], 4, 3, image::ColorType::Rgba8)
+            .expect("write the file");
+        let mut app = App::new();
+        app.shell.ui.show_welcome = false;
+        app.docs.documents[0].path = Some(path.clone());
+        let id = app.docs.documents[0].id;
+        app.jobs.pending_reload_prompt = Some(PendingReloadPrompt {
+            doc_idx: 0,
+            path: path.clone(),
+        });
+        app.confirm_reload_open_file();
+        // Another tab comes in ahead of it.
+        let other = crate::core::document::DocumentId(app.docs.next_doc_id);
+        app.docs.next_doc_id += 1;
+        app.docs
+            .documents
+            .insert(0, crate::core::document::Document::new(other, 50, 50));
+        app.docs.active_doc_idx = 1;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.jobs.pending_reload_job.is_some() && std::time::Instant::now() < deadline {
+            app.poll_reload_open_file();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_file(&path);
+        let doc = app.docs.by_id(id).expect("still open");
+        assert_eq!((doc.canvas.width, doc.canvas.height), (4, 3));
+        assert_eq!(
+            app.docs.documents[0].canvas.width, 50,
+            "the other tab untouched"
+        );
+    }
+}
+
+#[cfg(test)]
 mod raw_transition_tests {
     use super::{
         background_raw_thread_count, foreground_raw_thread_count, present_embedded_raw_as_canvas,
@@ -363,15 +405,15 @@ impl App {
             return;
         };
         let parent = file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(paths) = file_io::dialog_open_many(parent)
                 && !paths.is_empty()
             {
-                let _ = tx.send(file_io::FileDialogResult::OpenedMany(paths));
+                return Some(file_io::FileDialogResult::OpenedMany(paths));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -866,7 +908,6 @@ impl App {
             // Recovered work has no command/checkpoint proving it matches a file.
             doc.canvas.mark_dirty_unconditionally();
         }
-        self.docs.current_file = project_path;
         self.docs.autosave_files.insert(id, autosave_path);
     }
 
@@ -900,7 +941,6 @@ impl App {
                 .unwrap_or_else(|| "Untitled".to_string());
             doc.canvas.mark_dirty_unconditionally();
         }
-        self.docs.current_file = project_path;
         self.docs.autosave_files.insert(id, autosave_path);
     }
 
@@ -1437,12 +1477,13 @@ impl App {
     /// Take the file-dialog result (if the worker thread is done) and run the
     /// matching action. Called every frame in RedrawRequested.
     pub fn poll_file_dialog(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        use crate::app::jobs::Polled;
         let result = match self.jobs.pending_file_dialog.as_ref() {
-            Some(rx) => rx.try_recv(),
+            Some(job) => job.poll(),
             None => return,
         };
         match result {
-            Ok(result) => {
+            Polled::Done(Some(result)) => {
                 self.jobs.pending_file_dialog = None;
                 match result {
                     file_io::FileDialogResult::OpenedMany(paths) => {
@@ -1536,12 +1577,13 @@ impl App {
                     event_loop.exit();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Polled::Pending => {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            // Cancelled (or the dialog's thread went down).
+            Polled::Done(None) | Polled::Failed(_) => {
                 self.jobs.pending_file_dialog = None;
                 if self.shell.exit_save_pending {
                     self.shell.exit_save_pending = false;
@@ -1566,16 +1608,15 @@ impl App {
         if prompt.doc_idx >= self.docs.documents.len() {
             return;
         }
-        let idx = prompt.doc_idx;
+        // Tagged with the document, not its tab: tabs may move meanwhile.
+        let id = self.docs.documents[prompt.doc_idx].id;
         let path = prompt.path;
         let name = file_name(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        self.jobs.pending_reload_job = Some(crate::app::jobs::Job::spawn("reload", move || {
             let registry = crate::formats::FormatRegistry::new();
             let result = import_guarded(&registry, &path);
-            let _ = tx.send((idx, path, result));
-        });
-        self.jobs.pending_reload_job = Some(rx);
+            (id, path, result)
+        }));
         self.shell.status_msg = format!("Updating from disk: {name}");
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -1591,25 +1632,26 @@ impl App {
     }
 
     pub fn poll_reload_open_file(&mut self) {
+        use crate::app::jobs::Polled;
         let result = match self.jobs.pending_reload_job.as_ref() {
-            Some(rx) => rx.try_recv(),
+            Some(job) => job.poll(),
             None => return,
         };
         match result {
-            Ok((idx, path, Ok(canvas))) => {
+            Polled::Done((id, path, Ok(canvas))) => {
                 self.jobs.pending_reload_job = None;
                 let name = file_name(&path);
-                if idx >= self.docs.documents.len()
-                    || self.docs.documents[idx]
+                let Some(idx) = self.docs.index_of(id).filter(|&idx| {
+                    self.docs.documents[idx]
                         .path
                         .as_deref()
-                        .is_none_or(|open_path| {
-                            normalized_path_key(open_path) != normalized_path_key(&path)
+                        .is_some_and(|open_path| {
+                            normalized_path_key(open_path) == normalized_path_key(&path)
                         })
-                {
+                }) else {
                     self.shell.status_msg = format!("Reload skipped: {name}");
                     return;
-                }
+                };
 
                 let size_changed = {
                     let doc = &self.docs.documents[idx];
@@ -1630,25 +1672,24 @@ impl App {
                 }
 
                 if idx == self.docs.active_doc_idx {
-                    self.docs.current_file = Some(path);
                     self.refresh_active_document();
                 } else if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
                 self.shell.status_msg = format!("Updated from disk: {name}");
             }
-            Ok((_, path, Err(e))) => {
+            Polled::Done((_, path, Err(e))) => {
                 self.jobs.pending_reload_job = None;
                 self.shell.status_msg = format!("Error updating {}: {e}", file_name(&path));
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Polled::Pending => {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Polled::Failed(why) => {
                 self.jobs.pending_reload_job = None;
-                self.shell.status_msg = "Reload worker stopped".to_string();
+                self.shell.status_msg = format!("Reload worker stopped: {why}");
             }
         }
     }

@@ -13,7 +13,7 @@ pub struct BackgroundJobs {
     /// When Some: a file dialog (Open/Save As/Export) is running on a worker thread;
     /// poll_file_dialog() reads the result via this channel, avoiding blocking the main loop.
     pub(in crate::app) pending_file_dialog:
-        Option<std::sync::mpsc::Receiver<crate::file_io::FileDialogResult>>,
+        Option<super::jobs::Job<Option<crate::file_io::FileDialogResult>>>,
     /// A PDF export: its save dialog, then the `export.pdf` job writing it.
     /// Holds the window (modal lock) until it is written.
     pub(in crate::app) pending_pdf_export: Option<PdfExport>,
@@ -21,14 +21,13 @@ pub struct BackgroundJobs {
     /// worker runs the native dialog and decodes the file; `poll_flow_text_image`
     /// hands the result to the document editor. `Some(None)` = cancelled.
     #[allow(clippy::type_complexity)]
-    pub(in crate::app) pending_flow_image:
-        Option<std::sync::mpsc::Receiver<Option<(Vec<u8>, u32, u32)>>>,
+    pub(in crate::app) pending_flow_image: Option<super::jobs::Job<Option<(Vec<u8>, u32, u32)>>>,
     /// Mail merge: the native picker + parse of the CSV/Excel data source runs on
     /// a worker; `poll_mail_merge_data` opens the dialog with the parsed table.
     /// `None` payload = cancelled dialog.
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_mail_merge_data: Option<
-        std::sync::mpsc::Receiver<
+        super::jobs::Job<
             Option<Result<(std::path::PathBuf, crate::core::mail_merge::MergeTable), String>>,
         >,
     >,
@@ -101,7 +100,7 @@ pub struct BackgroundJobs {
     /// A background PDF probe (parse + page sizes, no raster) is in flight.
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_pdf_probe:
-        Option<std::sync::mpsc::Receiver<(PathBuf, Result<crate::formats::pdf::PdfProbe, String>)>>,
+        Option<super::jobs::Job<(PathBuf, Result<crate::formats::pdf::PdfProbe, String>)>>,
     /// The page-selection dialog is showing for this PDF.
     pub(in crate::app) pending_pdf_prompt: Option<PdfImportPrompt>,
     /// Initial background render of the first selected PDF page. Remaining
@@ -140,8 +139,8 @@ pub struct BackgroundJobs {
     >,
     pub(in crate::app) pending_reload_prompt: Option<PendingReloadPrompt>,
     pub(in crate::app) pending_reload_job: Option<
-        std::sync::mpsc::Receiver<(
-            usize,
+        super::jobs::Job<(
+            crate::core::document::DocumentId,
             std::path::PathBuf,
             Result<crate::core::canvas::Canvas, String>,
         )>,
@@ -157,7 +156,7 @@ pub struct BackgroundJobs {
         )>,
     >,
     pub(in crate::app) pending_printer_refresh:
-        Option<std::sync::mpsc::Receiver<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
+        Option<super::jobs::Job<Result<Vec<crate::core::print::PrinterInfo>, String>>>,
     /// A selected-printer re-read requested while another query was in flight;
     /// run once that query lands so the preview never keeps stale paper.
     pub(in crate::app) printer_refresh_queued: bool,
@@ -177,7 +176,7 @@ pub struct BackgroundJobs {
     /// a permanent nested-modal spin (most often after changing Borderless).
     #[allow(clippy::type_complexity)]
     pub(in crate::app) pending_printer_settings: Option<
-        std::sync::mpsc::Receiver<(
+        super::jobs::Job<(
             String,
             Result<Option<crate::core::print_gdi::PrinterSettings>, String>,
         )>,
@@ -356,7 +355,7 @@ impl PrintJob {
 /// A large Smart Repair stroke handed to the AI inpainter (seconds on a CPU).
 /// The painted wash stays on screen until `poll_repair_ai` commits the result.
 pub(in crate::app) struct RepairAiJob {
-    pub(in crate::app) doc_id: u32,
+    pub(in crate::app) doc_id: crate::core::document::DocumentId,
     pub(in crate::app) work: crate::core::canvas::SpotHealWork,
     pub(in crate::app) overlay: Option<std::sync::Arc<crate::ui::CloneSourcePreview>>,
     pub(in crate::app) handle: std::thread::JoinHandle<Option<Vec<u8>>>,

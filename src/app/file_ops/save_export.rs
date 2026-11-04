@@ -101,11 +101,15 @@ impl App {
             return;
         }
 
-        let existing_project = self.docs.current_file.clone().filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("iai"))
-        });
+        let existing_project = self
+            .docs
+            .current_file()
+            .map(Path::to_path_buf)
+            .filter(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("iai"))
+            });
         if let Some(path) = existing_project {
             self.save_to(&path);
         } else {
@@ -132,7 +136,7 @@ impl App {
             if self.request_document_webview_save_snapshot(false) {
                 return;
             }
-            let existing_iai = self.docs.current_file.clone().filter(|p| {
+            let existing_iai = self.docs.current_file().map(Path::to_path_buf).filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
@@ -153,7 +157,7 @@ impl App {
             .get(self.docs.active_doc_idx)
             .is_some_and(|doc| doc.pdf_document.is_some())
         {
-            let existing_iai = self.docs.current_file.clone().filter(|p| {
+            let existing_iai = self.docs.current_file().map(Path::to_path_buf).filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
@@ -172,7 +176,7 @@ impl App {
             .get(self.docs.active_doc_idx)
             .is_some_and(|doc| !doc.pages.is_empty())
         {
-            let existing_iai = self.docs.current_file.clone().filter(|p| {
+            let existing_iai = self.docs.current_file().map(Path::to_path_buf).filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("iai"))
@@ -183,7 +187,7 @@ impl App {
             }
             return;
         }
-        if let Some(path) = self.docs.current_file.clone() {
+        if let Some(path) = self.docs.current_file().map(Path::to_path_buf) {
             self.save_to_with(&path, wait);
         } else {
             self.do_save_as();
@@ -204,7 +208,7 @@ impl App {
             self.do_save_project_as();
             return;
         }
-        self.do_save_as_with_suggestion(self.docs.current_file.clone());
+        self.do_save_as_with_suggestion(self.docs.current_file().map(Path::to_path_buf));
     }
 
     /// Save the canonical flowing-text model. Layout pages, glyph caches and the
@@ -240,7 +244,6 @@ impl App {
                 };
                 #[cfg(all(target_os = "windows", feature = "canvas-editor-webview"))]
                 self.mark_document_webview_saved(_document_id, _revision);
-                self.docs.current_file = Some(path.to_path_buf());
                 self.shell.status_msg = format!(
                     "Đã lưu văn bản: {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -280,7 +283,6 @@ impl App {
                 doc.path = Some(path.to_path_buf());
                 doc.file_modified_at = file_modified_at(path);
                 doc.mark_saved();
-                self.docs.current_file = Some(path.to_path_buf());
                 self.shell.status_msg = format!(
                     "Đã lưu tài liệu {n} trang: {}",
                     path.file_name().unwrap_or_default().to_string_lossy()
@@ -293,7 +295,7 @@ impl App {
     }
 
     pub(in crate::app) fn do_save_project_as(&mut self) {
-        let suggestion = self.docs.current_file.clone().or_else(|| {
+        let suggestion = self.docs.current_file().map(Path::to_path_buf).or_else(|| {
             self.docs
                 .documents
                 .get(self.docs.active_doc_idx)
@@ -324,13 +326,13 @@ impl App {
                 .and_then(|doc| doc.pdf_document.as_ref())
                 .map(|pdf| pdf.source.with_extension("iai"))
         });
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(path) = file_io::dialog_save(current, parent) {
-                let _ = tx.send(file_io::FileDialogResult::SaveAs(path));
+                return Some(file_io::FileDialogResult::SaveAs(path));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -560,8 +562,7 @@ impl App {
         let name = format.name().to_string();
         let stem = self
             .docs
-            .current_file
-            .as_deref()
+            .current_file()
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
             .unwrap_or("untitled")
@@ -571,8 +572,7 @@ impl App {
             return;
         };
         let parent = file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             let mut dialog = rfd::FileDialog::new()
                 .add_filter(&name, &[ext.as_str()])
                 .set_file_name(format!("{stem}.{ext}"));
@@ -580,10 +580,11 @@ impl App {
                 dialog = dialog.set_parent(&p);
             }
             if let Some(path) = dialog.save_file() {
-                let _ = tx.send(file_io::FileDialogResult::Export(format, path));
+                return Some(file_io::FileDialogResult::Export(format, path));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -945,7 +946,7 @@ impl App {
             .as_ref()
             .map(|pdf| pdf.source.as_path())
             .or(doc.path.as_deref())
-            .or(self.docs.current_file.as_deref())
+            .or(self.docs.current_file())
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
             .unwrap_or(if flow_text_active {
@@ -1026,8 +1027,7 @@ impl App {
             return;
         };
         let parent = file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("flow-image", move || {
             let mut dialog = rfd::FileDialog::new()
                 .add_filter(
                     "Ảnh",
@@ -1039,14 +1039,13 @@ impl App {
             if let Some(parent) = &parent {
                 dialog = dialog.set_parent(parent);
             }
-            let result = dialog.pick_file().and_then(|path| {
+            dialog.pick_file().and_then(|path| {
                 let (w, h) = image::image_dimensions(&path).ok()?;
                 let bytes = std::fs::read(&path).ok()?;
                 Some((bytes, w, h))
-            });
-            let _ = tx.send(result);
+            })
         });
-        self.jobs.pending_flow_image = Some(rx);
+        self.jobs.pending_flow_image = Some(job);
         if let Some(window) = &self.win.window {
             window.request_redraw();
         }
@@ -1055,28 +1054,30 @@ impl App {
     /// Drain the image picker worker; hand a decoded picture to the document
     /// editor for insertion at the caret.
     pub(crate) fn poll_flow_text_image(&mut self) {
+        use crate::app::jobs::Polled;
         let result = match self.jobs.pending_flow_image.as_ref() {
-            Some(rx) => rx.try_recv(),
+            Some(job) => job.poll(),
             None => return,
         };
         match result {
-            Ok(Some((data, w, h))) => {
+            Polled::Done(Some((data, w, h))) => {
                 self.jobs.pending_flow_image = None;
                 crate::ui::document_mode::queue_image(data, w, h);
                 if let Some(window) = &self.win.window {
                     window.request_redraw();
                 }
             }
-            Ok(None) => {
+            Polled::Done(None) => {
                 self.jobs.pending_flow_image = None; // dialog cancelled
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Polled::Pending => {
                 if let Some(window) = &self.win.window {
                     window.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Polled::Failed(why) => {
                 self.jobs.pending_flow_image = None;
+                self.shell.status_msg = format!("Chèn ảnh dừng ngoài dự kiến: {why}");
             }
         }
     }
@@ -1152,7 +1153,7 @@ mod tests {
         let doc = &app.docs.documents[0];
         assert!(!doc.is_modified());
         assert_eq!(doc.path.as_deref(), Some(path.as_path()));
-        assert_eq!(app.docs.current_file.as_deref(), Some(path.as_path()));
+        assert_eq!(app.docs.current_file(), Some(path.as_path()));
         assert!(app.shell.ui.save_error.is_none());
     }
 

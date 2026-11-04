@@ -98,7 +98,6 @@ impl App {
                 doc.path = Some(path.to_path_buf());
                 doc.file_modified_at = file_modified_at(path);
                 doc.mark_saved();
-                self.docs.current_file = Some(path.to_path_buf());
                 self.clear_autosave(idx);
                 self.shell.status_msg = format!(
                     "Saved project: {} ({edited_count} edited page(s))",
@@ -216,15 +215,10 @@ impl App {
             return;
         };
         let name = file_name(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::formats::pdf::PdfImporter::probe(&path)
-            }))
-            .unwrap_or_else(|_| Err("PDF decoder panicked".to_string()));
-            let _ = tx.send((path, result));
-        });
-        self.jobs.pending_pdf_probe = Some(rx);
+        self.jobs.pending_pdf_probe = Some(crate::app::jobs::Job::spawn("pdf-probe", move || {
+            let result = crate::formats::pdf::PdfImporter::probe(&path);
+            (path, result)
+        }));
         self.shell.status_msg = format!("Reading PDF: {name}…");
         if let Some(w) = &self.win.window {
             w.request_redraw();
@@ -233,12 +227,13 @@ impl App {
 
     /// Drain a finished PDF probe and raise the page-selection dialog.
     pub fn poll_pdf_probe(&mut self) {
+        use crate::app::jobs::Polled;
         let result = match self.jobs.pending_pdf_probe.as_ref() {
-            Some(rx) => rx.try_recv(),
+            Some(job) => job.poll(),
             None => return,
         };
         match result {
-            Ok((path, Ok(probe))) => {
+            Polled::Done((path, Ok(probe))) => {
                 self.jobs.pending_pdf_probe = None;
                 let name = file_name(&path);
                 self.jobs.pending_pdf_prompt = Some(crate::app::state::PdfImportPrompt {
@@ -251,18 +246,20 @@ impl App {
                     w.request_redraw();
                 }
             }
-            Ok((path, Err(e))) => {
+            Polled::Done((path, Err(e))) => {
                 self.jobs.pending_pdf_probe = None;
                 self.shell.status_msg = format!("Could not open {}: {e}", file_name(&path));
                 self.maybe_start_next_pdf_probe();
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Polled::Pending => {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Polled::Failed(why) => {
+                // The decoder panicked: the path went with it.
                 self.jobs.pending_pdf_probe = None;
+                self.shell.status_msg = format!("Could not open the PDF: {why}");
                 self.maybe_start_next_pdf_probe();
             }
         }
@@ -440,19 +437,19 @@ impl App {
             return;
         };
         let parent = crate::file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(paths) = crate::file_io::dialog_insert_pdf_pages(parent)
                 && !paths.is_empty()
             {
-                let _ = tx.send(crate::file_io::FileDialogResult::InsertPdfPages {
+                return Some(crate::file_io::FileDialogResult::InsertPdfPages {
                     document_id,
                     position,
                     paths,
                 });
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
     }
 
     pub(crate) fn start_pdf_page_insert(
@@ -974,7 +971,6 @@ impl App {
         // there is no checkpoint that proves it matches a file, so latch dirty.
         doc.canvas.mark_dirty_unconditionally();
         doc.reconcile_pdf_page_modified();
-        self.docs.current_file = project_path;
         // Keep updating the recovered file until the user saves for real.
         self.docs.autosave_files.insert(doc_id, autosave_path);
     }

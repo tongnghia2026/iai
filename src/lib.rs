@@ -45,6 +45,8 @@ pub mod tools;
 pub mod ui;
 pub mod update;
 #[cfg(windows)]
+pub use iai_platform::console;
+#[cfg(windows)]
 pub use iai_platform::windows_integration;
 
 // `crate::log_crash` is called from deep subsystems (GPU device-lost recovery);

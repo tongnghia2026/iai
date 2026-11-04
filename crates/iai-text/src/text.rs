@@ -120,7 +120,11 @@ struct SystemFontEntry {
 }
 
 static SYSTEM_FONTS: OnceLock<Vec<SystemFontEntry>> = OnceLock::new();
-static FONT_CACHE: OnceLock<Mutex<HashMap<String, &'static FontVec>>> = OnceLock::new();
+/// Each family looked up, with its font, or `None` when the machine has none:
+/// a family missing from the machine (a document made elsewhere) is asked for
+/// once per glyph, and every miss looked through all the installed fonts (03/11:
+/// a 20-letter text layer took ~450 ms to open for editing).
+static FONT_CACHE: OnceLock<Mutex<HashMap<String, Option<&'static FontVec>>>> = OnceLock::new();
 
 pub fn builtin_families() -> [TextFontFamily; 6] {
     [
@@ -495,16 +499,16 @@ fn family_font(family: &TextFontFamily) -> Option<&'static FontVec> {
     if let Ok(cache) = cache.lock()
         && let Some(font) = cache.get(&key).copied()
     {
-        return Some(font);
+        return font;
     }
 
-    let bytes = font_bytes_for(family)?;
-    let font = FontVec::try_from_vec(bytes).ok()?;
-    let font = Box::leak(Box::new(font));
+    let font = font_bytes_for(family)
+        .and_then(|bytes| FontVec::try_from_vec(bytes).ok())
+        .map(|font| &*Box::leak(Box::new(font)));
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, font);
     }
-    Some(font)
+    font
 }
 
 /// Load a sans-serif TTF from the system once and cache it. Tries a few common
@@ -2062,5 +2066,35 @@ mod tests {
         assert!((h.x - p.x).abs() < 0.5, "{} vs {}", h.x, p.x);
         assert!(((h.x + h.w) - (p.x + p.w) - 1.0).abs() < 0.5);
         assert!((h.y - p.y).abs() < 0.5 && (h.h - p.h).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_family_the_machine_lacks_is_looked_for_once() {
+        let missing = TextFontFamily::System("iAi no such font 0311".to_string());
+        assert!(super::family_font(&missing).is_none());
+        let cache = super::FONT_CACHE
+            .get()
+            .expect("the cache made by the look-up");
+        let cache = cache.lock().expect("cache lock");
+        assert!(matches!(cache.get(&missing.storage_name()), Some(None)));
+    }
+
+    #[test]
+    #[ignore = "measurement: cargo test -p iai-text --lib measure_missing_family -- --ignored --nocapture"]
+    fn measure_missing_family() {
+        let missing = TextFontFamily::System("iAi no such font measured".to_string());
+        super::warm_system_font_index();
+        let t = std::time::Instant::now();
+        let _ = super::font_path_for_family(&missing);
+        eprintln!("one look through the installed fonts: {:?}", t.elapsed());
+        let td = TextData {
+            font_family: missing,
+            ..text("LẨU XÍ QUÁCH MANG VỀ")
+        };
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            let _ = rasterize_placed(&td);
+        }
+        eprintln!("5 x rasterize_placed: {:?}", t.elapsed());
     }
 }

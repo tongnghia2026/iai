@@ -1353,7 +1353,7 @@ impl App {
                 document
                     .path
                     .clone()
-                    .or_else(|| self.docs.current_file.clone())
+                    .or_else(|| self.docs.current_file().map(std::path::Path::to_path_buf))
             })
             .flatten()
             .filter(|path| {

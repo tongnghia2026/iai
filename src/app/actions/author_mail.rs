@@ -93,13 +93,13 @@ impl App {
             return;
         };
         let parent = crate::file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(path) = crate::file_io::dialog_pick_logo(parent) {
-                let _ = tx.send(crate::file_io::FileDialogResult::PickedSponsorLogo(path));
+                return Some(crate::file_io::FileDialogResult::PickedSponsorLogo(path));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }

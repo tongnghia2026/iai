@@ -101,10 +101,7 @@ mod tests {
         // Two edited pages written; the session is now clean and remembers its path.
         assert!(!app.is_modified());
         assert!(!app.docs.documents[0].is_modified());
-        assert_eq!(
-            app.docs.current_file.as_deref(),
-            Some(project_path.as_path())
-        );
+        assert_eq!(app.docs.current_file(), Some(project_path.as_path()));
 
         // Re-read the project off disk: link + both edited pages come back.
         match crate::formats::iai::load(&project_path).unwrap() {
@@ -153,7 +150,7 @@ impl App {
     pub(crate) fn has_only_welcome_placeholder(&self) -> bool {
         self.shell.ui.show_welcome
             && self.docs.documents.len() == 1
-            && self.docs.current_file.is_none()
+            && self.docs.current_file().is_none()
             && !self.is_modified()
             && self.docs.documents[0].path.is_none()
     }
@@ -164,7 +161,6 @@ impl App {
         if let Some(idx) = self.docs.pending_close_doc_idx {
             self.close_doc_confirmed(idx);
         } else {
-            self.docs.current_file = None;
             self.do_new("Untitled".to_string(), 800, 600, 72.0, 0);
             self.shell.ui.show_welcome = true;
             self.mark_active_saved();
@@ -209,7 +205,6 @@ impl App {
         self.docs.active_mut().canvas.metadata = metadata;
         self.docs.active_mut().path = None;
         self.docs.active_mut().title = name.clone();
-        self.docs.current_file = None;
         self.mark_active_saved();
         self.shell.ui.show_new_dialog = false;
         self.shell.ui.show_welcome = false;

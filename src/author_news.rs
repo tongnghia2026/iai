@@ -4,7 +4,7 @@
 //! sponsors' logos beside it. The app reads it as it starts and keeps the last
 //! copy under `%APPDATA%\IAI\author` for a start without a network.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,6 +49,9 @@ pub struct News {
     /// What Pro costs, in đồng, in place of the price built into the app.
     pub pro_price: Option<u64>,
     pub sponsors: Sponsors,
+    /// The author's how-to videos, by what they show (a job of "Nhờ AI
+    /// làm": `fill_form`, `id_cards`…).
+    pub videos: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -136,6 +139,13 @@ impl News {
                 people,
                 anonymous: self.sponsors.anonymous,
             },
+            videos: self
+                .videos
+                .into_iter()
+                .filter_map(|(what, url)| Some((line(&what), link(Some(url))?)))
+                .filter(|(what, _)| !what.is_empty())
+                .take(MAX_LISTED)
+                .collect(),
         }
     }
 
@@ -408,6 +418,7 @@ mod tests {
             "\u{feff}{
                 \"music_url\": \"http://plain.example/x\",
                 \"share_url\": \"  https://www.facebook.com/p/1  \",
+                \"videos\": {\"fill_form\": \" https://youtu.be/abc \", \"id_cards\": \"http://x\"},
                 \"form_url\": \"javascript:alert(1)\",
                 \"something_new\": [1, 2],
                 \"sponsors\": {
@@ -425,6 +436,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(news.music_url, None);
+        assert_eq!(
+            news.videos
+                .iter()
+                .map(|(what, url)| (what.as_str(), url.as_str()))
+                .collect::<Vec<_>>(),
+            [("fill_form", "https://youtu.be/abc")]
+        );
         assert_eq!(
             news.share_url.as_deref(),
             Some("https://www.facebook.com/p/1")

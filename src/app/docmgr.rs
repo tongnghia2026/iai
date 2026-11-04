@@ -85,8 +85,6 @@ impl App {
         let idx = self.docs.active_doc_idx;
         self.touch_doc_mru();
 
-        self.docs.current_file = self.docs.documents[idx].path.clone();
-
         if self.docs.documents[idx].is_flow_text() {
             self.edit.view.zoom = self.docs.documents[idx].saved_zoom.max(0.3);
             self.edit.view.offset_x = 0.0;
@@ -195,7 +193,6 @@ impl App {
             self.clear_autosave_for(id);
             self.clear_embedded_pdf_for(id);
             self.do_new("Untitled".to_string(), 800, 600, 72.0, 0);
-            self.docs.current_file = None;
             self.mark_active_saved();
             self.shell.ui.show_welcome = true;
             self.docs.pending_close_doc_idx = None;

@@ -6,12 +6,13 @@ impl App {
     /// Apply the result of the native printer property sheet without ever
     /// blocking/re-entering winit's UI thread.
     pub(super) fn poll_printer_settings(&mut self) {
-        let Some(rx) = self.jobs.pending_printer_settings.take() else {
+        use crate::app::jobs::Polled;
+        let Some(job) = self.jobs.pending_printer_settings.take() else {
             return;
         };
 
-        match rx.try_recv() {
-            Ok((printer, Ok(Some(settings)))) => {
+        match job.poll() {
+            Polled::Done((printer, Ok(Some(settings)))) => {
                 // The native sheet is modal, but keep this guard so a stale
                 // worker result can never be applied to a newly selected device.
                 if printer == self.shell.print_selected_printer {
@@ -24,23 +25,24 @@ impl App {
                     w.request_redraw();
                 }
             }
-            Ok((_printer, Ok(None))) => {
+            Polled::Done((_printer, Ok(None))) => {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Ok((_printer, Err(e))) => {
+            Polled::Done((_printer, Err(e))) => {
                 self.shell.status_msg = e;
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.jobs.pending_printer_settings = Some(rx);
+            Polled::Pending => {
+                self.jobs.pending_printer_settings = Some(job);
                 return;
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.shell.status_msg = "Printer settings dialog stopped unexpectedly".to_string();
+            Polled::Failed(why) => {
+                self.shell.status_msg =
+                    format!("Printer settings dialog stopped unexpectedly: {why}");
             }
         }
         // The sheet is gone. Run on its own thread, it may have closed
@@ -342,8 +344,6 @@ impl App {
         let printer = self.shell.print_selected_printer.clone();
         let settings = self.shell.print_driver_settings.clone();
         let worker_printer = printer.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.jobs.pending_printer_settings = Some(rx);
         self.shell.status_msg = format!("Opening printer settings: {printer}");
 
         // Reset before the worker creates the native property sheet.  Waiting
@@ -354,14 +354,15 @@ impl App {
             w.set_cursor(winit::window::CursorIcon::Default);
         }
 
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("printer-settings", move || {
             let result = crate::core::printers::open_printer_settings(
                 &worker_printer,
                 settings.as_ref(),
                 owner_hwnd,
             );
-            let _ = tx.send((worker_printer, result));
+            (worker_printer, result)
         });
+        self.jobs.pending_printer_settings = Some(job);
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -402,26 +403,27 @@ impl App {
     }
 
     pub(super) fn poll_printer_refresh(&mut self) {
-        let Some(rx) = self.jobs.pending_printer_refresh.take() else {
+        use crate::app::jobs::Polled;
+        let Some(job) = self.jobs.pending_printer_refresh.take() else {
             return;
         };
 
-        match rx.try_recv() {
-            Ok(Ok(printers)) => {
+        match job.poll() {
+            Polled::Done(Ok(printers)) => {
                 self.apply_printer_list(printers);
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Ok(Err(e)) => {
+            Polled::Done(Err(e)) => {
                 self.shell.print_printers.clear();
                 self.shell.status_msg = e;
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                self.jobs.pending_printer_refresh = Some(rx);
+            Polled::Pending => {
+                self.jobs.pending_printer_refresh = Some(job);
                 if self.shell.ui.show_print_dialog
                     && let Some(w) = &self.win.window
                 {
@@ -429,8 +431,8 @@ impl App {
                 }
                 return;
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.shell.status_msg = "Printer refresh stopped".to_string();
+            Polled::Failed(why) => {
+                self.shell.status_msg = format!("Printer refresh stopped: {why}");
             }
         }
 
@@ -445,11 +447,10 @@ impl App {
         if self.jobs.pending_printer_refresh.is_some() {
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.jobs.pending_printer_refresh = Some(rx);
-        std::thread::spawn(move || {
-            let _ = tx.send(crate::core::printers::available_printers());
-        });
+        self.jobs.pending_printer_refresh = Some(crate::app::jobs::Job::spawn(
+            "printers",
+            crate::core::printers::available_printers,
+        ));
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -476,22 +477,21 @@ impl App {
             let name = self.shell.print_selected_printer.clone();
             let settings = self.shell.print_driver_settings.clone();
             let mut printers = self.shell.print_printers.clone();
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.jobs.pending_printer_refresh = Some(rx);
-            std::thread::spawn(move || {
-                if let Ok(updated) =
-                    crate::core::printers::query_printer_with_settings(&name, settings.as_ref())
-                {
-                    match printers.iter_mut().find(|p| p.name == name) {
-                        Some(slot) => {
-                            slot.paper_points = updated.paper_points;
-                            slot.printable_rect_points = updated.printable_rect_points;
+            self.jobs.pending_printer_refresh =
+                Some(crate::app::jobs::Job::spawn("printer", move || {
+                    if let Ok(updated) =
+                        crate::core::printers::query_printer_with_settings(&name, settings.as_ref())
+                    {
+                        match printers.iter_mut().find(|p| p.name == name) {
+                            Some(slot) => {
+                                slot.paper_points = updated.paper_points;
+                                slot.printable_rect_points = updated.printable_rect_points;
+                            }
+                            None => printers.push(updated),
                         }
-                        None => printers.push(updated),
                     }
-                }
-                let _ = tx.send(Ok(printers));
-            });
+                    Ok(printers)
+                }));
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }

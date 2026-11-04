@@ -94,13 +94,13 @@ impl App {
             return;
         };
         let parent = crate::file_io::dialog_parent(window);
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let job = crate::app::jobs::Job::spawn("file-dialog", move || {
             if let Some(path) = crate::file_io::dialog_pick_model(parent) {
-                let _ = tx.send(crate::file_io::FileDialogResult::PickedModelFile(path));
+                return Some(crate::file_io::FileDialogResult::PickedModelFile(path));
             }
+            None
         });
-        self.jobs.pending_file_dialog = Some(rx);
+        self.jobs.pending_file_dialog = Some(job);
     }
 
     /// A model file picked, or dropped on the window: installed.

@@ -417,9 +417,14 @@ impl Tool for MoveTool {
                     // A vector object is picked anywhere inside its box, as
                     // if filled: a press inside an outline went through to
                     // the photo beneath, and the object showed no frame
-                    // (02/11). A clip child keeps to its frame above.
-                    if matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
-                        && layer.clip_parent_id.is_none()
+                    // (02/11). So is type, whose small letters are hard to
+                    // hit stroke by stroke (04/11). A clip child keeps to its
+                    // frame above.
+                    if matches!(
+                        layer.layer_type,
+                        crate::core::layer::LayerType::Vector(_)
+                            | crate::core::layer::LayerType::Text(_)
+                    ) && layer.clip_parent_id.is_none()
                         && layer
                             .tiles
                             .content_bounds()
@@ -751,10 +756,18 @@ impl Tool for MoveTool {
             let x1 = self.marquee_start_x.max(self.marquee_end_x);
             let y1 = self.marquee_start_y.max(self.marquee_end_y);
 
-            // As in CorelDRAW: a layer is caught only when the marquee holds
-            // all of what shows of it, so small layers can be picked off a
-            // large one beneath (02/11); with Alt, whatever it touches.
-            let touch = event.alt;
+            // Pixel layers only: whatever the marquee touches, as in Photoshop
+            // (04/11). Once a vector or text layer is about, as in CorelDRAW: a
+            // layer is caught only when the marquee holds all of what shows of
+            // it, so small objects can be picked off a large one beneath
+            // (02/11); with Alt, whatever it touches.
+            let has_shapes = canvas.layer_stack.layers.iter().any(|layer| {
+                use crate::core::layer::LayerType;
+                layer.visible
+                    && Self::can_move_layer(layer)
+                    && matches!(layer.layer_type, LayerType::Text(_) | LayerType::Vector(_))
+            });
+            let touch = event.alt || !has_shapes;
             let hit_indices: Vec<usize> = canvas
                 .layer_stack
                 .layers
@@ -1063,8 +1076,45 @@ mod tests {
         assert_eq!(picked(&doc), (true, false), "on the photo outside it");
     }
 
-    /// 02/11, as in CorelDRAW: a marquee catches only the layers it holds
-    /// whole, so small layers are picked off a large one beneath; Alt makes
+    /// 04/11: a press between the letters of a line of type lying on a photo
+    /// picks the type, not the photo beneath.
+    #[test]
+    fn a_press_between_letters_picks_the_type() {
+        let mut doc = Document::new(DocumentId(1), 400, 300);
+        let type_ = add_empty_vector_layer(&mut doc, 100, 100, 80, 30, false);
+        // The photo goes in beneath the type.
+        let stack = &mut doc.canvas.layer_stack;
+        let id = stack.next_id();
+        let photo = crate::core::layer::Layer::from_rgba(
+            id,
+            "photo",
+            [90u8, 120, 160, 255].repeat(400 * 300),
+            400,
+            300,
+        );
+        stack.layers.insert(type_, photo);
+        stack.set_next_id(id + 1);
+        let (photo, type_) = (type_, type_ + 1);
+        {
+            let layer = &mut doc.canvas.layer_stack.layers[type_];
+            layer.layer_type = LayerType::Text(Default::default());
+            // Two letters, a gap between them.
+            for y in 0..30 {
+                for x in (0..10).chain(70..80) {
+                    layer.tiles.set_pixel(x, y, 0, 0, 0, 255);
+                }
+            }
+        }
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(140.0, 115.0), &mut c);
+        t.on_release(PointerEvent::new(140.0, 115.0), &mut c);
+        let l = &doc.canvas.layer_stack.layers;
+        assert!(l[type_].selected && !l[photo].selected);
+    }
+
+    /// 02/11, as in CorelDRAW once a vector layer is about: a marquee catches
+    /// only the layers it holds whole, so small layers are picked off a large one beneath; Alt makes
     /// it catch what it touches; Shift adds to the selection, and a Shift
     /// click adds a layer or takes one out.
     #[test]
@@ -1150,6 +1200,12 @@ mod tests {
 
         // Alt: whatever the marquee touches, the large layer too.
         gesture(&mut t, &mut doc, (5.0, 50.0), (75.0, 75.0), false, true);
+        assert_eq!(picked(&doc), [true, true, false, false]);
+
+        // 04/11: with only pixel layers about, as in Photoshop, the marquee
+        // catches what it touches without Alt.
+        doc.canvas.layer_stack.layers[outline].visible = false;
+        gesture(&mut t, &mut doc, (5.0, 50.0), (75.0, 75.0), false, false);
         assert_eq!(picked(&doc), [true, true, false, false]);
     }
 

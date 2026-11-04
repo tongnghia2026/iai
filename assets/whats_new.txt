@@ -2,6 +2,16 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+04/11/2026
+- Công cụ Move, quét khung để chọn layer: nếu chỉ có layer ảnh thì khung chạm vào layer nào là chọn layer đó, như Photoshop. Khi có hình vẽ hoặc chữ thì vẫn như trước: khung phải trùm hết mới chọn, giữ Alt khi quét thì chạm là chọn.
+- Quét chọn chung ảnh với chữ hoặc hình vẽ: khung bao ôm vừa các layer đã chọn, không còn to bằng cả trang với ảnh vừa tách bằng «Layer via Copy».
+- Công cụ Move: bấm vào bất kỳ chỗ nào trong khung của dòng chữ là chọn và kéo được chữ, không phải bấm trúng nét chữ.
+- Mở iAi không còn kèm cửa sổ đen phía sau; trước đây lỡ đóng cửa sổ đen đó là iAi tắt luôn mà không hỏi lưu.
+- Gói Pro, «Điền giấy tờ theo mẫu»: tick được nhiều mẫu cùng lúc (ví dụ đơn xin việc và sơ yếu lý lịch). Người có trong nhiều mẫu chỉ có một ô, kéo ảnh căn cước một lần; bấm «Gửi cho Gemini» một lần là điền đủ các mẫu, xong bấm «Mở 2 file Word» để soát và in. Bấm vào tên mẫu (không bấm ô tick) là chỉ chọn mẫu đó.
+- Chuột phải lên ô một người, chọn «Mỗi người một giấy (nhiều khách)»: kéo ảnh căn cước của nhiều khách vào ô đó, mỗi khách ra một file Word riêng, những người khác giữ nguyên. Ví dụ chủ trọ làm hợp đồng cho cả dãy phòng: ô yêu cầu ghi riêng từng phòng, từng giá.
+- Chuột phải lên ô đã có ảnh, chọn «Lưu làm khách quen» rồi gõ tên (ví dụ: Chủ trọ Lan): lần sau chuột phải lên ô, chọn «Khách quen» và tên đó là có ngay ảnh căn cước, không phải tìm lại ảnh trong Zalo. Muốn xóa ảnh đã lưu thì chọn «Quên khách quen».
+- Sửa chữ trên layer chữ dùng font mà máy không có (file làm ở máy khác): bấm vào để sửa và gõ chữ không còn bị khựng.
+
 03/11/2026
 - Gói Pro: «Nhờ AI làm» có thêm việc «Điền giấy tờ theo mẫu». Chọn mẫu Word của cửa hàng (hợp đồng, đơn xin việc, sơ yếu lý lịch, tờ khai CT01…), app hiện mỗi người trong mẫu một ô (Bên A, Bên B, người làm đơn…). Kéo ảnh căn cước hai mặt của từng người thả vào ô của người đó (hoặc bấm vào ô để chọn ảnh), gõ yêu cầu (ví dụ: thuê 12 tháng từ 01/12, 5 triệu một tháng, cọc 2 tháng), bấm «Gửi cho Gemini». AI tự đọc căn cước (ảnh được gửi cho Gemini đọc), tự tính ngày hết hạn, số tiền bằng chữ…, rồi điền ra một file Word mới trong thư mục «Đã điền» cạnh mẫu; xong bấm «Mở file Word» để soát rồi in. File mẫu không bị sửa.
 - Thả ảnh căn cước mới lên ô của một người là thay cho ảnh khách trước; chuột phải lên ô để bỏ ảnh.

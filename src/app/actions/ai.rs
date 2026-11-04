@@ -52,7 +52,7 @@ impl App {
             return Some(stroke);
         }
         let doc = self.docs.active_mut();
-        let doc_id = doc.id.0;
+        let doc_id = doc.id;
         let Some(mut work) = doc.canvas.spot_heal_begin(
             stroke.x0,
             stroke.y0,
@@ -99,11 +99,7 @@ impl App {
             return;
         };
         let pixels = job.handle.join().ok().flatten();
-        let idx = self
-            .docs
-            .documents
-            .iter()
-            .position(|d| d.id.0 == job.doc_id);
+        let idx = self.docs.index_of(job.doc_id);
         self.shell.status_msg = match (pixels, idx) {
             (None, _) => "Smart Heal (AI): không có gì thay đổi".to_string(),
             (_, None) => "Smart Heal (AI): tab gốc đã đóng — bỏ kết quả".to_string(),

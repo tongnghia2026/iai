@@ -2,11 +2,14 @@
 //! writing a file in one step (`atomic_file`), the process's memory use
 //! (`mem_report`), the folder its files are kept in (`app_data`), the system
 //! clipboard's images (`clipboard`) and, on Windows, Explorer's file types
-//! and shortcuts (`windows_integration`).
+//! and shortcuts (`windows_integration`) and the terminal a command was run
+//! from (`console`).
 
 pub mod app_data;
 pub mod atomic_file;
 pub mod clipboard;
+#[cfg(windows)]
+pub mod console;
 pub mod hw;
 pub mod mem_report;
 #[cfg(windows)]

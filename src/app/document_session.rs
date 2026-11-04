@@ -13,7 +13,6 @@ use super::state::*;
 /// `doc_mru`/`autosave_files` was minted by `next_doc_id`.
 pub struct DocumentSession {
     pub(in crate::app) tabs: iai_engine::Tabs,
-    pub(in crate::app) current_file: Option<PathBuf>,
     /// When non-None, the user confirmed "close without saving" for this doc index.
     pub(in crate::app) pending_close_doc_idx: Option<usize>,
     /// Dirty documents still requiring a per-tab decision during app shutdown.
@@ -78,23 +77,10 @@ impl DocumentSession {
         &mut tabs.documents[tabs.active_doc_idx]
     }
 
-    /// `current_file` is kept, by hand, equal to the active tab's `path`. Until
-    /// it is replaced by that path, a frame that finds the two apart leaves a
-    /// line in the flight recorder (once per pair), so the cases can be found.
-    pub(in crate::app) fn note_current_file_drift(&self) {
-        static REPORTED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-        let path = self.active().path.as_deref();
-        if self.current_file.as_deref() == path {
-            return;
-        }
-        let text = format!(
-            "current_file is {:?} but the active tab's path is {path:?}",
-            self.current_file
-        );
-        let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
-        if *reported != text {
-            crate::diag::note("drift", &text);
-            *reported = text;
-        }
+    /// The file the active tab was opened from or last saved to. (Once a
+    /// field kept by hand beside `path`; 43 sessions of 20/10–03/11 never
+    /// found the two apart.)
+    pub(in crate::app) fn current_file(&self) -> Option<&std::path::Path> {
+        self.active().path.as_deref()
     }
 }

@@ -525,7 +525,6 @@ impl App {
     }
 
     pub fn collect_ui_data(&mut self) -> UiData {
-        self.docs.note_current_file_drift();
         self.poll_printer_settings();
         self.poll_printer_refresh();
 
@@ -554,7 +553,7 @@ impl App {
         let clone_source_thumbnail = self.build_clone_source_thumbnail();
         let repair_stroke_overlay = self.build_repair_stroke_overlay().or_else(|| {
             let job = self.jobs.repair_ai.as_ref()?;
-            (self.docs.active().id.0 == job.doc_id)
+            (self.docs.active().id == job.doc_id)
                 .then(|| job.overlay.clone())
                 .flatten()
         });
@@ -965,8 +964,7 @@ impl App {
             history_entries: self.shell.ui_data_cache.history_entries.clone(),
             current_file: self
                 .docs
-                .current_file
-                .as_ref()
+                .current_file()
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_string()),
             is_modified: self.is_modified() || {
