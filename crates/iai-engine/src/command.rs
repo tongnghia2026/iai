@@ -236,6 +236,17 @@ pub struct Registry {
     by_id: BTreeMap<&'static str, Box<dyn DynCommand>>,
     /// Ids registered twice (the second is dropped); a test keeps it empty.
     duplicates: Vec<&'static str>,
+    /// Run on a document after every command that edits it (see
+    /// [`AfterEdit`]).
+    after_edit: Option<AfterEdit>,
+}
+
+/// Work a pack does on a document after each command that changes it, in
+/// the same undo step: `applies` says which documents, `settle` does it.
+#[derive(Clone, Copy)]
+pub struct AfterEdit {
+    pub applies: fn(&iai_canvas::canvas::Canvas) -> bool,
+    pub settle: fn(&mut iai_canvas::canvas::Canvas),
 }
 
 impl Registry {
@@ -255,6 +266,14 @@ impl Registry {
             cmd,
         };
         self.by_id.insert(id, Box::new(typed));
+    }
+
+    pub fn set_after_edit(&mut self, hook: AfterEdit) {
+        self.after_edit = Some(hook);
+    }
+
+    pub fn after_edit(&self) -> Option<AfterEdit> {
+        self.after_edit
     }
 
     pub fn get(&self, id: &str) -> Option<&dyn DynCommand> {

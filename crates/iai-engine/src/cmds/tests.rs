@@ -2059,6 +2059,15 @@ fn a_type_spec_carries_every_style_of_a_type_layer() {
                 underline: false,
             })
             .collect(),
+        path: Some(iai_doc::model::text::TextPath {
+            points: vec![[0.0, 0.0], [100.0, 20.0], [200.0, 0.0]],
+            closed: false,
+            start: 0.25,
+            offset: -3.5,
+            flip: true,
+            source: Some(7),
+            source_sig: 42,
+        }),
     };
     let spec = super::text::TypeSpec::of(&data);
     let json = serde_json::to_value(&spec).unwrap();
@@ -2201,4 +2210,82 @@ fn free_transform_keeps_a_path_a_path_and_refuses_to_distort_it() {
         )
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::NotEnabled);
+}
+
+#[test]
+fn text_grows_to_fill_its_frame() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 400, "heightPx": 200, "background": "#FFFFFF"}),
+    );
+    let made = t.run(
+        "text.add",
+        json!({"text": "MAM NON", "x": 10, "y": 10, "sizePx": 20}),
+    );
+    let layer = made["layer"].as_u64().unwrap();
+    let small = made["bounds"]["w"].as_u64().unwrap();
+    let out = t.run("text.fit_frame", json!({"layer": layer, "width": 300}));
+    let w = out["bounds"]["w"].as_u64().unwrap();
+    assert!(small < 200, "{small}");
+    assert!((285..=315).contains(&w), "{w}");
+}
+
+#[test]
+fn text_goes_round_a_circle_turns_over_and_comes_off_again() {
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 300, "heightPx": 300, "background": "#FFFFFF"}),
+    );
+    let made = t.run(
+        "text.add",
+        json!({"text": "TRƯỜNG MẦM NON", "x": 20, "y": 20, "sizePx": 24}),
+    );
+    let layer = made["layer"].as_u64().unwrap();
+    t.run(
+        "text.fit_to_path",
+        json!({"layer": layer, "circle": {"cx": 150, "cy": 150, "r": 100}}),
+    );
+    // Round the top: ink above the circle's middle, none in the bottom band.
+    assert_ne!(
+        t.mean(json!({"x": 60, "y": 25, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 240, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
+    // Turned over in place, then moved to the bottom.
+    t.run(
+        "text.fit_to_path",
+        json!({"layer": layer, "flip": true, "start": 0.25}),
+    );
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 15, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
+    assert_ne!(
+        t.mean(json!({"x": 60, "y": 215, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
+    // Still one editable type layer.
+    let names: Vec<String> = t.inspect()["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    t.run("text.fit_to_path", json!({"layer": layer, "release": true}));
+    assert_eq!(
+        t.mean(json!({"x": 60, "y": 215, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
+    // Each was one step.
+    t.run("edit.undo", json!({}));
+    assert_ne!(
+        t.mean(json!({"x": 60, "y": 215, "w": 180, "h": 40})),
+        "#FFFFFF"
+    );
 }

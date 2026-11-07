@@ -22,6 +22,10 @@ pub enum Align {
 pub enum Distribute {
     HorizontalCenters,
     VerticalCenters,
+    /// Equal gaps between them across (CorelDRAW's "Distribute spacing").
+    HorizontalGaps,
+    /// Equal gaps between them down.
+    VerticalGaps,
 }
 
 /// Layers that move together, and by how much.
@@ -136,6 +140,9 @@ pub fn align(stack: &LayerStack, width: u32, height: u32, align: Align) -> Vec<S
 /// What `distribute` moves: of three or more selected movable layers, the
 /// inner ones, to equal centre-to-centre steps; the outermost two stay.
 pub fn distribute(stack: &LayerStack, mode: Distribute) -> Vec<Shift> {
+    if matches!(mode, Distribute::HorizontalGaps | Distribute::VerticalGaps) {
+        return distribute_gaps(stack, mode == Distribute::HorizontalGaps);
+    }
     let mut objects: Vec<(usize, f32)> = stack
         .layers
         .iter()
@@ -144,8 +151,10 @@ pub fn distribute(stack: &LayerStack, mode: Distribute) -> Vec<Shift> {
         .filter_map(|(idx, l)| {
             let (x0, y0, x1, y1) = bounds(l)?;
             let c = match mode {
-                Distribute::HorizontalCenters => (x0 + x1) as f32 * 0.5,
-                Distribute::VerticalCenters => (y0 + y1) as f32 * 0.5,
+                Distribute::HorizontalCenters | Distribute::HorizontalGaps => {
+                    (x0 + x1) as f32 * 0.5
+                }
+                Distribute::VerticalCenters | Distribute::VerticalGaps => (y0 + y1) as f32 * 0.5,
             };
             Some((idx, c))
         })
@@ -166,12 +175,12 @@ pub fn distribute(stack: &LayerStack, mode: Distribute) -> Vec<Shift> {
         .filter_map(|(order, (idx, current))| {
             let d = (first + step * order as f32 - current).round() as i32;
             (d != 0).then(|| match mode {
-                Distribute::HorizontalCenters => Shift {
+                Distribute::HorizontalCenters | Distribute::HorizontalGaps => Shift {
                     members: vec![idx],
                     dx: d,
                     dy: 0,
                 },
-                Distribute::VerticalCenters => Shift {
+                Distribute::VerticalCenters | Distribute::VerticalGaps => Shift {
                     members: vec![idx],
                     dx: 0,
                     dy: d,
@@ -179,6 +188,46 @@ pub fn distribute(stack: &LayerStack, mode: Distribute) -> Vec<Shift> {
             })
         })
         .collect()
+}
+
+/// The inner of three or more selected layers moved so the gaps between
+/// neighbours are all equal (the outermost two stay).
+fn distribute_gaps(stack: &LayerStack, across: bool) -> Vec<Shift> {
+    let mut objects: Vec<(usize, i32, i32)> = stack
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.selected && movable(l))
+        .filter_map(|(idx, l)| {
+            let (x0, y0, x1, y1) = bounds(l)?;
+            Some(if across { (idx, x0, x1) } else { (idx, y0, y1) })
+        })
+        .collect();
+    if objects.len() < 3 {
+        return Vec::new();
+    }
+    objects.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let start = objects[0].1;
+    let end = objects.iter().map(|o| o.2).max().unwrap_or(start);
+    let sizes: i32 = objects.iter().map(|o| o.2 - o.1).sum();
+    let gap = (end - start - sizes) as f32 / (objects.len() - 1) as f32;
+    let mut at = start as f32;
+    let n = objects.len();
+    let mut out = Vec::new();
+    for (k, (idx, lo, hi)) in objects.into_iter().enumerate() {
+        if k > 0 && k + 1 < n {
+            let d = (at - lo as f32).round() as i32;
+            if d != 0 {
+                out.push(Shift {
+                    members: vec![idx],
+                    dx: if across { d } else { 0 },
+                    dy: if across { 0 } else { d },
+                });
+            }
+        }
+        at += (hi - lo) as f32 + gap;
+    }
+    out
 }
 
 /// Step and repeat: copy each selected movable layer and carry the copy by
@@ -248,5 +297,38 @@ pub fn apply(stack: &mut LayerStack, shifts: &[Shift]) {
                 fold_offset_into_model(layer);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    #[test]
+    fn different_sizes_get_equal_gaps() {
+        let mut stack = LayerStack::new(400, 100);
+        for (k, (x, w)) in [(0, 10u32), (30, 60), (300, 40)].into_iter().enumerate() {
+            let mut l = Layer::from_rgba(
+                100 + k as u32,
+                "x",
+                [9u8, 9, 9, 255].repeat((w * 10) as usize),
+                w,
+                10,
+            );
+            l.offset = (x, 0);
+            l.selected = true;
+            stack.layers.push(l);
+        }
+        let shifts = distribute(&stack, Distribute::HorizontalGaps);
+        apply(&mut stack, &shifts);
+        let b: Vec<_> = stack
+            .layers
+            .iter()
+            .filter(|l| l.id >= 100)
+            .filter_map(bounds)
+            .collect();
+        let g1 = b[1].0 - b[0].2;
+        let g2 = b[2].0 - b[1].2;
+        assert!((g1 - g2).abs() <= 1, "{b:?}");
     }
 }

@@ -72,6 +72,7 @@ impl Canvas {
             _cmd.capture_after(&self.layer_stack, self.width, self.height);
             self.record_as(Box::new(_cmd), ChangeKind::LayerStructure);
             self.flatten_full();
+            self.layer_revision += 1;
         }
         ok
     }

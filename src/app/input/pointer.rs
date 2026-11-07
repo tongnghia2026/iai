@@ -469,6 +469,17 @@ impl App {
             // normal Move (select / drag / marquee).
             if self.edit.tools.active_id() == ToolId::Move && self.edit.transform_state.is_none() {
                 let (msx, msy) = (self.edit.input.mouse_x, self.edit.input.mouse_y);
+                // Text on a path: its handle slides it along the path.
+                if self.text_path_handle_hit(msx, msy) {
+                    self.text_path_drag_begin();
+                    if self.text_path_dragging() {
+                        self.edit.input.painting = true;
+                        if let Some(w) = &self.win.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
                 if let Some(hit) = self.path_box_hit_at_screen(msx, msy) {
                     use crate::app::vector_transform::PathBoxHit;
                     let ev = self.tool_event();
@@ -634,6 +645,33 @@ impl App {
                 return;
             }
 
+            // No layer chosen (an empty spot was pressed with Move): a tool
+            // that paints on a layer waits for one to be picked rather than
+            // painting on whichever layer was last active.
+            if self.edit.transform_state.is_none()
+                && self.docs.active().canvas.layer_stack.is_none_picked()
+                && matches!(
+                    self.edit.tools.active_id(),
+                    ToolId::Brush
+                        | ToolId::Eraser
+                        | ToolId::Pencil
+                        | ToolId::Fill
+                        | ToolId::Gradient
+                        | ToolId::Clone
+                        | ToolId::Repair
+                        | ToolId::Smudge
+                        | ToolId::Dodge
+                        | ToolId::Burn
+                        | ToolId::Patch
+                )
+            {
+                self.shell.status_msg = "Hãy chọn một layer trước".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+
             self.edit.input.painting = true;
             if self.edit.transform_state.is_some() {
                 let ev = self.tool_event();
@@ -700,6 +738,10 @@ impl App {
     }
     /// Left button released (not panning with Space).
     fn on_main_left_release(&mut self, event_loop: &ActiveEventLoop) {
+        self.on_main_left_release_with(Some(event_loop));
+    }
+
+    fn on_main_left_release_with(&mut self, event_loop: Option<&ActiveEventLoop>) {
         self.edit.input.eyedropping = false;
         if self.edit.input.zoom_dragging {
             let clicked = !self.edit.input.zoom_drag_moved;
@@ -709,7 +751,9 @@ impl App {
             if clicked {
                 self.zoom_at_cursor(!self.edit.input.alt_held);
             } else {
-                self.sync_cursor(event_loop);
+                if let Some(event_loop) = event_loop {
+                    self.sync_cursor(event_loop);
+                }
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -755,6 +799,15 @@ impl App {
             self.edit.input.painting = false;
             self.path_gradient_finish();
             self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.text_path_dragging() {
+            self.text_path_drag_finish();
+            self.edit.input.last_left_release_time = Some(std::time::Instant::now());
+            self.edit.input.painting = false;
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
@@ -1284,6 +1337,15 @@ impl App {
             }
         } else if self.edit.input.painting
             && !self.edit.input.was_over_ui
+            && self.text_path_dragging()
+        {
+            let ev = self.tool_event();
+            self.text_path_drag_update(ev.canvas_x, ev.canvas_y);
+            if let Some(w) = &self.win.window {
+                w.request_redraw();
+            }
+        } else if self.edit.input.painting
+            && !self.edit.input.was_over_ui
             && self.edit.path_pivot_dragging
         {
             // Live drag of the rotation-pivot marker.
@@ -1514,6 +1576,129 @@ mod tests {
     use crate::core::tile::TileMap;
     use crate::core::vector::object::VectorGeometry;
     use crate::extension::tool::PointerEvent;
+
+    /// 08/11: a selected rectangle, then a press on the empty page with
+    /// Move through the window's own press: no layer stays chosen.
+    #[test]
+    fn an_empty_press_in_the_window_lets_a_rectangle_go() {
+        let mut app = App::new();
+        app.docs.documents[0].canvas = Canvas::new(400, 300);
+        let index = app.docs.documents[0].canvas.layer_stack.add_layer(400, 300);
+        let (shape, offset) = ShapeData::from_canvas_span(
+            ShapeKind::Rectangle,
+            50.0,
+            50.0,
+            150.0,
+            120.0,
+            0.0,
+            true,
+            [160, 20, 40, 255],
+            0.0,
+            [0, 0, 0, 255],
+        );
+        let raster = shape.render().expect("render");
+        {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let layer = &mut canvas.layer_stack.layers[index];
+            layer.offset = offset;
+            layer.width = raster.width;
+            layer.height = raster.height;
+            layer.tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+            layer.layer_type = LayerType::Vector(VectorGeometry::Primitive(shape));
+            canvas.layer_stack.select_only(index);
+            canvas.flatten_full();
+        }
+        app.edit.tools.select(ToolId::Move);
+        app.edit.view.zoom = 1.0;
+        app.edit.view.offset_x = 0.0;
+        app.edit.view.offset_y = 0.0;
+        app.edit.input.was_over_ui = false;
+        for (x, y) in [
+            (300.0, 250.0),
+            (390.0, 20.0),
+            (700.0, 500.0),
+            (-80.0, 100.0),
+        ] {
+            app.edit.input.mouse_x = x;
+            app.edit.input.mouse_y = y;
+            app.on_main_left_press();
+            app.edit.input.painting = false;
+            let stack = &app.docs.documents[0].canvas.layer_stack;
+            assert!(
+                !stack.layers[index].selected,
+                "still picked after a press at {x},{y}"
+            );
+            assert!(stack.is_none_picked(), "{x},{y}");
+            assert!(app.active_path_transform_box().is_none());
+            assert!(app.move_selection_transform_box().is_none());
+        }
+    }
+
+    fn click(app: &mut App, x: f32, y: f32) {
+        app.edit.input.was_over_ui = false;
+        app.edit.input.mouse_x = x;
+        app.edit.input.mouse_y = y;
+        app.edit.input.last_left_release_time = None;
+        app.on_main_left_press();
+        app.on_main_left_release_with(None);
+        // A frame between clicks.
+        let _ = app.collect_ui_data();
+    }
+
+    /// 08/11, the owner's steps: an A4 page, a rectangle drawn with the
+    /// Shape tool, copied, picked with Move, then presses on the empty page
+    /// and the desk round it.
+    #[test]
+    fn the_owners_steps_leave_nothing_chosen_after_an_empty_press() {
+        let mut app = App::new();
+        let _ = app.run_with(
+            "file.new",
+            serde_json::json!({"widthPx": 2480, "heightPx": 3508, "background": "white"}),
+        );
+        let added = app.run_with(
+            "vector.add_shape",
+            serde_json::json!({"shape": "rectangle", "span": [375.0, 1395.0, 1007.0, 2031.0], "fill": "#A01530"}),
+        );
+        assert!(added.is_ok(), "{:?}", added.err());
+        let _ = app.run_with(
+            "layer.step_copy",
+            serde_json::json!({"matrix": [1.0, 0.0, 0.0, 1.0, 900.0, 0.0]}),
+        );
+        app.edit.tools.select(ToolId::Move);
+        app.edit.view.zoom = 0.23;
+        app.edit.view.offset_x = 100.0;
+        app.edit.view.offset_y = 20.0;
+        let screen = |cx: f32, cy: f32| (cx * 0.23 + 100.0, cy * 0.23 + 20.0);
+        // Pick the first rectangle.
+        let (x, y) = screen(700.0, 1700.0);
+        click(&mut app, x, y);
+        assert!(
+            app.docs
+                .active()
+                .canvas
+                .layer_stack
+                .layers
+                .iter()
+                .any(|l| l.selected),
+            "the rectangle is picked"
+        );
+        for (cx, cy) in [(1300.0, 3000.0), (3400.0, 2500.0), (-500.0, 1000.0)] {
+            let (x, y) = screen(cx, cy);
+            click(&mut app, x, y);
+            let data = app.collect_ui_data();
+            let stack = &app.docs.active().canvas.layer_stack;
+            assert!(
+                !stack.layers.iter().any(|l| l.selected),
+                "still picked after a press at {cx},{cy}"
+            );
+            assert!(data.layers.none_picked, "{cx},{cy}");
+            assert!(data.tool.transform_overlay.is_none(), "frame at {cx},{cy}");
+            // And a pick again after.
+            let (x, y) = screen(700.0, 1700.0);
+            click(&mut app, x, y);
+            assert!(!app.docs.active().canvas.layer_stack.is_none_picked());
+        }
+    }
 
     #[test]
     fn vector_gradient_release_updates_flat_canvas_without_followup_input() {

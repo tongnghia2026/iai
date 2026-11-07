@@ -14,7 +14,9 @@
 
 use base64::Engine;
 use iai_canvas::canvas::Canvas;
-use iai_canvas::print::{PdfPaintColor, PdfVectorObject, layer_vector_objects_srgb};
+use iai_canvas::print::{
+    PdfPaintColor, PdfVectorObject, clipped_layer_vectors, layer_vector_objects_srgb,
+};
 use iai_color::cms::naive_cmyk_to_rgb;
 use iai_doc::vector::path::PathData;
 use iai_doc::vector::style::{Gradient, GradientKind, LineCap, LineJoin};
@@ -23,7 +25,8 @@ use iai_doc::vector::style::{Gradient, GradientKind, LineCap, LineJoin};
 /// flattened into a transparent image, or a run of layers kept as native paths.
 enum SvgRun {
     Raster(Vec<u8>),
-    Vectors(Vec<PdfVectorObject>),
+    /// Paths, each with the PowerClip frame that cuts it, if any.
+    Vectors(Vec<(PdfVectorObject, Option<std::rc::Rc<PathData>>)>),
 }
 
 /// Partition the layer stack into z-ordered raster / vector runs (bottom-to-top).
@@ -42,7 +45,18 @@ fn collect_svg_runs(canvas: &Canvas) -> Vec<SvgRun> {
         if layer.is_group() || !canvas.layer_stack.is_effectively_visible(i) {
             continue;
         }
-        match layer_vector_objects_srgb(canvas, i) {
+        let objects = match layer_vector_objects_srgb(canvas, i) {
+            Some(objects) => Some(objects.into_iter().map(|o| (o, None)).collect::<Vec<_>>()),
+            // PowerClip content: written whole, cut by its frame's outline.
+            None => clipped_layer_vectors(canvas, i).map(|(objects, frame)| {
+                let frame = std::rc::Rc::new(frame);
+                objects
+                    .into_iter()
+                    .map(|o| (o, Some(frame.clone())))
+                    .collect()
+            }),
+        };
+        match objects {
             Some(objects) => {
                 flush_raster_run(&mut runs, &mut raster_ids, canvas);
                 match runs.last_mut() {
@@ -114,8 +128,23 @@ pub fn build_svg(canvas: &Canvas) -> Result<String, String> {
                 ));
             }
             SvgRun::Vectors(objects) => {
-                for object in objects {
-                    append_svg_object(&mut defs, &mut body, grad_index, object);
+                for (object, frame) in objects {
+                    match frame {
+                        Some(frame) => {
+                            // Cut by the frame: a clip path round it.
+                            defs.push_str(&format!(
+                                "    <clipPath id=\"IaiClip{grad_index}\">\
+                                 <path d=\"{}\"/></clipPath>\n",
+                                svg_path_d(frame)
+                            ));
+                            body.push_str(&format!(
+                                "  <g clip-path=\"url(#IaiClip{grad_index})\">\n"
+                            ));
+                            append_svg_object(&mut defs, &mut body, grad_index, object);
+                            body.push_str("  </g>\n");
+                        }
+                        None => append_svg_object(&mut defs, &mut body, grad_index, object),
+                    }
                     grad_index += 1;
                 }
             }
@@ -190,8 +219,19 @@ fn append_svg_object(defs: &mut String, body: &mut String, index: usize, o: &Pdf
         }
     }
 
+    // See-through objects (a glow's rings, a shadow) stay vectors.
+    let mut alpha = String::new();
+    if o.fill_alpha < 1.0 - 1e-3 {
+        alpha.push_str(&format!(" fill-opacity=\"{:.4}\"", o.fill_alpha.max(0.0)));
+    }
+    if o.stroke_alpha < 1.0 - 1e-3 {
+        alpha.push_str(&format!(
+            " stroke-opacity=\"{:.4}\"",
+            o.stroke_alpha.max(0.0)
+        ));
+    }
     body.push_str(&format!(
-        "  <path d=\"{d}\" {fill_attr}{fill_rule}{stroke}/>\n"
+        "  <path d=\"{d}\" {fill_attr}{fill_rule}{stroke}{alpha}/>\n"
     ));
 }
 

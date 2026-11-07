@@ -18,6 +18,7 @@ use iai_doc::model::text::normalized_family_key;
 
 pub use iai_doc::model::text::{
     GlyphStyle, MAX_EDITABLE_FONT_PX, MIN_EDITABLE_FONT_PX, TextAlign, TextData, TextFontFamily,
+    TextPath,
 };
 
 /// The font families installed on this machine, and the faces of one.
@@ -786,6 +787,11 @@ fn layout_text(td: &TextData) -> Option<TextLayout> {
 /// drift from the drawn raster, so clicks must be resolved with the exact
 /// layout math used to draw.
 pub fn char_index_at_pos(td: &TextData, x: f32, y: f32) -> Option<usize> {
+    if td.path.is_some()
+        && let Some(i) = index_on_path(td, x, y)
+    {
+        return Some(i);
+    }
     let layout = layout_text(td)?;
     if layout.lines.is_empty() {
         return Some(0);
@@ -1008,6 +1014,11 @@ pub fn line_char_span(content: &str, char_idx: usize) -> (usize, usize) {
 }
 
 pub fn caret_rect(td: &TextData, char_index: usize) -> Option<TextLayoutRect> {
+    if td.path.is_some()
+        && let Some(r) = caret_on_path(td, char_index)
+    {
+        return Some(r);
+    }
     let layout = layout_text(td)?;
     let (li, col) = layout.locate(char_index);
     let line = layout.lines.get(li)?;
@@ -1022,6 +1033,11 @@ pub fn caret_rect(td: &TextData, char_index: usize) -> Option<TextLayoutRect> {
 pub fn selection_rects(td: &TextData, char_range: Range<usize>) -> Option<Vec<TextLayoutRect>> {
     if char_range.start >= char_range.end {
         return Some(Vec::new());
+    }
+    if td.path.is_some()
+        && let Some(r) = selection_on_path(td, char_range.clone())
+    {
+        return Some(r);
     }
     let layout = layout_text(td)?;
     let total_chars = td.content.chars().count();
@@ -1083,6 +1099,9 @@ fn paint_pixel_max(
 pub fn rasterize(td: &TextData) -> Option<Rasterized> {
     if td.content.trim().is_empty() {
         return None;
+    }
+    if td.path.is_some() {
+        return rasterize_on_path(td);
     }
     let base_font = font_for(&td.font_family)?;
     let layout = layout_text(td)?;
@@ -1239,6 +1258,9 @@ fn sample_rgba_bilinear(src: &[u8], width: u32, height: u32, x: f32, y: f32) -> 
 /// Rasterize text and apply its placement rotation. The returned delta is the
 /// rotated bounding-box top-left relative to the upright raster origin.
 pub fn rasterize_stretched(td: &TextData) -> Option<Rasterized> {
+    if td.path.is_some() {
+        return rasterize(td);
+    }
     let upright = rasterize(td)?;
     let stretch_x = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
         td.stretch_x
@@ -1276,6 +1298,10 @@ pub fn rasterize_stretched(td: &TextData) -> Option<Rasterized> {
 }
 
 pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
+    if td.path.is_some() {
+        let (x0, y0, ..) = path_frame(td)?;
+        return Some((rasterize_on_path(td)?, (x0, y0)));
+    }
     let upright = rasterize_stretched(td)?;
     let angle = td.rotation_deg.rem_euclid(360.0);
     if (!angle.is_finite() || angle <= 0.001 || (360.0 - angle) <= 0.001)
@@ -1332,6 +1358,356 @@ pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
         },
         (dx, dy),
     ))
+}
+
+// ---- Text on a path ------------------------------------------------------
+//
+// Type on a Path (Illustrator) / Fit Text To Path (CorelDRAW): the text is
+// laid out as one straight line as usual, then each glyph is moved so the
+// middle of its baseline stands on the path, turned to the path's direction
+// there. Every consumer (raster, curves, caret, hit-test) maps through
+// `path_frames`, so what is drawn, exported and edited agree.
+//
+// Spaces: the path is in the text's own space (anchor at 0,0, see
+// `TextPath::points`); caret / selection / hit-test answer in that space;
+// the raster's top-left sits at `path_frame`'s (x0, y0) from the anchor, the
+// placement delta `rasterize_placed` returns.
+
+/// A path measured along its length.
+struct Walk {
+    pts: Vec<(f32, f32)>,
+    at: Vec<f32>,
+    len: f32,
+    closed: bool,
+}
+
+impl Walk {
+    fn new(path: &TextPath) -> Option<Walk> {
+        let mut pts: Vec<(f32, f32)> = Vec::with_capacity(path.points.len() + 1);
+        for p in &path.points {
+            if !(p[0].is_finite() && p[1].is_finite()) {
+                continue;
+            }
+            if pts
+                .last()
+                .is_none_or(|q: &(f32, f32)| (q.0 - p[0]).hypot(q.1 - p[1]) > 1e-4)
+            {
+                pts.push((p[0], p[1]));
+            }
+        }
+        if path.flip {
+            pts.reverse();
+        }
+        if path.closed && pts.len() >= 2 {
+            let (a, b) = (pts[0], pts[pts.len() - 1]);
+            if (a.0 - b.0).hypot(a.1 - b.1) > 1e-4 {
+                pts.push(a);
+            }
+        }
+        if pts.len() < 2 {
+            return None;
+        }
+        let mut at = Vec::with_capacity(pts.len());
+        let mut len = 0.0f32;
+        at.push(0.0);
+        for w in pts.windows(2) {
+            len += (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+            at.push(len);
+        }
+        (len > 1e-3).then_some(Walk {
+            pts,
+            at,
+            len,
+            closed: path.closed,
+        })
+    }
+
+    /// The point `s` along the path; an open path runs on straight past
+    /// its ends.
+    fn point(&self, s: f32) -> (f32, f32) {
+        let n = self.pts.len();
+        let s = if self.closed {
+            s.rem_euclid(self.len)
+        } else {
+            s
+        };
+        let lerp = |i: usize, s: f32| {
+            let (a, b) = (self.pts[i], self.pts[i + 1]);
+            let d = (self.at[i + 1] - self.at[i]).max(1e-6);
+            let t = (s - self.at[i]) / d;
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+        };
+        if s <= 0.0 {
+            return lerp(0, s);
+        }
+        if s >= self.len {
+            return lerp(n - 2, s);
+        }
+        let i = self.at.partition_point(|a| *a <= s).clamp(1, n - 1) - 1;
+        lerp(i, s)
+    }
+
+    /// The direction at `s`, over `h` either side (smooth on a fine
+    /// polyline), as (cos, sin).
+    fn heading(&self, s: f32, h: f32) -> (f32, f32) {
+        let (a, b) = (self.point(s - h), self.point(s + h));
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l = dx.hypot(dy);
+        if l > 1e-6 {
+            (dx / l, dy / l)
+        } else {
+            let (a, b) = (self.pts[0], self.pts[1]);
+            let l = (b.0 - a.0).hypot(b.1 - a.1).max(1e-6);
+            ((b.0 - a.0) / l, (b.1 - a.1) / l)
+        }
+    }
+}
+
+/// Where text on a path stands (its `start`), in the text's own space;
+/// `None` when it is not on a path.
+pub fn path_start_point(td: &TextData) -> Option<(f32, f32)> {
+    let path = td.path.as_ref()?;
+    let walk = Walk::new(path)?;
+    let start = path.start.clamp(0.0, 1.0);
+    let start = if path.flip { 1.0 - start } else { start };
+    Some(walk.point(start * walk.len))
+}
+
+/// The `start` (0 to 1) of the point on `td`'s path nearest (x, y), text
+/// space: dragging the text along its path.
+pub fn path_start_near(td: &TextData, x: f32, y: f32) -> Option<f32> {
+    let path = td.path.as_ref()?;
+    let walk = Walk::new(path)?;
+    let mut best = (f32::MAX, 0.0f32);
+    for (i, w) in walk.pts.windows(2).enumerate() {
+        let (a, b) = (w[0], w[1]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l2 = (dx * dx + dy * dy).max(1e-9);
+        let t = (((x - a.0) * dx + (y - a.1) * dy) / l2).clamp(0.0, 1.0);
+        let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+        let d = (x - px).hypot(y - py);
+        if d < best.0 {
+            best = (d, walk.at[i] + (walk.at[i + 1] - walk.at[i]) * t);
+        }
+    }
+    let f = (best.1 / walk.len).clamp(0.0, 1.0);
+    Some(if path.flip { 1.0 - f } else { f })
+}
+
+/// Where one glyph stands: the point (`mid`, `baseline`) of the straight
+/// layout goes to `at`, turned to (cos, sin).
+#[derive(Clone, Copy, Default)]
+struct OnPath {
+    mid: f32,
+    baseline: f32,
+    at: (f32, f32),
+    cos: f32,
+    sin: f32,
+}
+
+impl OnPath {
+    fn map(&self, lx: f32, ly: f32) -> (f32, f32) {
+        let (u, v) = (lx - self.mid, ly - self.baseline);
+        (
+            self.at.0 + self.cos * u - self.sin * v,
+            self.at.1 + self.sin * u + self.cos * v,
+        )
+    }
+}
+
+/// Each glyph's place on `td`'s path, in `layout.glyphs` order. `None`
+/// when the text is not on a path (or the path has no length).
+fn path_frames(td: &TextData, layout: &TextLayout) -> Option<Vec<OnPath>> {
+    let path = td.path.as_ref()?;
+    let walk = Walk::new(path)?;
+    let start = path.start.clamp(0.0, 1.0);
+    let start = if path.flip { 1.0 - start } else { start };
+    let anchor = start * walk.len;
+    let first = layout.lines.first()?.baseline + path.offset;
+    let mut frames = vec![OnPath::default(); layout.glyphs.len()];
+    for line in &layout.lines {
+        let width: f32 = (0..line.len)
+            .map(|k| layout.glyphs[line.glyph0 + k].advance)
+            .sum();
+        let lead = match td.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Center => -width * 0.5,
+            TextAlign::Right => -width,
+        };
+        for k in 0..line.len {
+            let gi = line.glyph0 + k;
+            let g = &layout.glyphs[gi];
+            let mid = g.x + g.advance * 0.5;
+            let s = anchor + lead + (mid - line.start_x);
+            let (cos, sin) = walk.heading(s, (g.advance * 0.5).clamp(0.5, g.scale.max(1.0)));
+            frames[gi] = OnPath {
+                mid,
+                baseline: first,
+                at: walk.point(s),
+                cos,
+                sin,
+            };
+        }
+    }
+    Some(frames)
+}
+
+/// The box path text draws in, from its anchor: (x0, y0, width, height),
+/// and its curves there. `None` when not on a path or nothing is drawn.
+fn path_frame(td: &TextData) -> Option<(i32, i32, u32, u32, Vec<TextCurveGroup>)> {
+    td.path.as_ref()?;
+    let groups = curves_core(td, (0, 0), Some((0.0, 0.0)));
+    let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for g in &groups {
+        for poly in iai_doc::vector::flatten::flatten_path(&g.path, 0.25) {
+            for p in poly {
+                b = (b.0.min(p.x), b.1.min(p.y), b.2.max(p.x), b.3.max(p.y));
+            }
+        }
+    }
+    if !(b.0 <= b.2 && b.1 <= b.3) || !b.0.is_finite() || !b.3.is_finite() {
+        return None;
+    }
+    let (x0, y0) = (b.0.floor() - 1.0, b.1.floor() - 1.0);
+    let (w, h) = (
+        (b.2.ceil() + 1.0 - x0).max(1.0),
+        (b.3.ceil() + 1.0 - y0).max(1.0),
+    );
+    if x0.abs() > 1e8 || y0.abs() > 1e8 || w * h > 400_000_000.0 {
+        return None;
+    }
+    Some((x0 as i32, y0 as i32, w as u32, h as u32, groups))
+}
+
+/// Where path text's raster starts from its anchor (the placement delta);
+/// `None` when the text is not on a path.
+pub fn path_text_offset(td: &TextData) -> Option<(i32, i32)> {
+    path_frame(td).map(|(x0, y0, ..)| (x0, y0))
+}
+
+/// Path text drawn into a raster whose top-left is `path_frame`'s (x0, y0).
+fn rasterize_on_path(td: &TextData) -> Option<Rasterized> {
+    if td.content.trim().is_empty() {
+        return None;
+    }
+    let (x0, y0, width, height, groups) = path_frame(td)?;
+    let len = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| usize::try_from(n).ok())?;
+    let mut buf = vec![0u8; len];
+    let opacity = td.opacity.clamp(0.0, 1.0);
+    for g in &groups {
+        let polys: Vec<Vec<iai_geom::geometry::Point>> =
+            iai_doc::vector::flatten::flatten_path(&g.path, 0.2)
+                .into_iter()
+                .map(|poly| {
+                    poly.into_iter()
+                        .map(|p| iai_geom::geometry::Point::new(p.x - x0 as f32, p.y - y0 as f32))
+                        .collect()
+                })
+                .collect();
+        let cover = iai_vector::vector::raster::coverage_mask(&polys, width, height, false);
+        let ca = g.color[3] as f32 * opacity;
+        let rgb = [g.color[0], g.color[1], g.color[2]];
+        for (i, c) in cover.iter().enumerate() {
+            if *c > 0.0 {
+                let a = (c * ca).round().clamp(0.0, 255.0) as u8;
+                let (px, py) = ((i as u32 % width) as i32, (i as u32 / width) as i32);
+                paint_pixel_max(&mut buf, width, height, px, py, rgb, a);
+            }
+        }
+    }
+    Some(Rasterized {
+        rgba: buf,
+        width,
+        height,
+    })
+}
+
+/// The caret of path text at `char_index`, in the text's own space.
+fn caret_on_path(td: &TextData, char_index: usize) -> Option<TextLayoutRect> {
+    let layout = layout_text(td)?;
+    let frames = path_frames(td, &layout)?;
+    let (li, col) = layout.locate(char_index);
+    let line = layout.lines.get(li)?;
+    let (frame, lx) = if col > 0 {
+        let gi = line.glyph0 + col.min(line.len) - 1;
+        let g = &layout.glyphs[gi];
+        (frames[gi], g.x + g.advance)
+    } else if line.len > 0 {
+        (frames[line.glyph0], layout.glyphs[line.glyph0].x)
+    } else {
+        // An empty line: where the next glyph would go.
+        let gi = layout.glyphs.len().checked_sub(1)?;
+        let g = &layout.glyphs[gi];
+        (frames[gi], g.x + g.advance)
+    };
+    let (x, y) = frame.map(lx, line.baseline);
+    let up = line.baseline - line.top;
+    Some(TextLayoutRect {
+        x,
+        y: y - up,
+        w: 0.0,
+        h: line.height,
+    })
+}
+
+/// The boxes of the selected glyphs of path text, in its own space.
+fn selection_on_path(td: &TextData, range: Range<usize>) -> Option<Vec<TextLayoutRect>> {
+    let layout = layout_text(td)?;
+    let frames = path_frames(td, &layout)?;
+    let mut out = Vec::new();
+    for line in &layout.lines {
+        for k in 0..line.len {
+            let ci = line.start_char + k;
+            if ci < range.start || ci >= range.end {
+                continue;
+            }
+            let gi = line.glyph0 + k;
+            let g = &layout.glyphs[gi];
+            let corners = [
+                (g.x, line.top),
+                (g.x + g.advance, line.top),
+                (g.x, line.top + line.height),
+                (g.x + g.advance, line.top + line.height),
+            ];
+            let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (lx, ly) in corners {
+                let (x, y) = frames[gi].map(lx, ly);
+                b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+            out.push(TextLayoutRect {
+                x: b.0,
+                y: b.1,
+                w: b.2 - b.0,
+                h: b.3 - b.1,
+            });
+        }
+    }
+    Some(out)
+}
+
+/// The character boundary nearest (x, y) on path text (its own space).
+fn index_on_path(td: &TextData, x: f32, y: f32) -> Option<usize> {
+    let layout = layout_text(td)?;
+    let frames = path_frames(td, &layout)?;
+    let mut best: Option<(f32, usize)> = None;
+    for line in &layout.lines {
+        for k in 0..line.len {
+            let gi = line.glyph0 + k;
+            let g = &layout.glyphs[gi];
+            let (cx, cy) = frames[gi].map(g.x + g.advance * 0.5, line.top + line.height * 0.5);
+            let d = (cx - x).hypot(cy - y);
+            // After the glyph when the point is past its middle along the path.
+            let along = (x - cx) * frames[gi].cos + (y - cy) * frames[gi].sin;
+            let ci = line.start_char + k + usize::from(along >= 0.0);
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, ci));
+            }
+        }
+    }
+    Some(best.map_or(0, |(_, ci)| ci))
 }
 
 /// One fill colour's worth of curves extracted from a text layer.
@@ -1414,6 +1790,31 @@ fn add_curve_group(
 /// only alternative (booleaning the overlaps away) would flatten the smooth glyph
 /// curves to polygons — strictly worse — so this fringe is accepted.
 pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveGroup> {
+    use iai_geom::vector::affine::AffineTransform;
+    if td.path.is_some() {
+        // Laid out about the anchor, then moved to where the layer is.
+        let Some((x0, y0, _, _, groups)) = path_frame(td) else {
+            return Vec::new();
+        };
+        let (dx, dy) = ((layer_offset.0 - x0) as f32, (layer_offset.1 - y0) as f32);
+        return groups
+            .into_iter()
+            .map(|mut g| {
+                g.path.transform(&AffineTransform::translate(dx, dy));
+                g
+            })
+            .collect();
+    }
+    curves_core(td, layer_offset, None)
+}
+
+/// [`text_to_curves`]' work. `path_origin`: the text is on its path, laid
+/// out with its anchor there (canvas space).
+fn curves_core(
+    td: &TextData,
+    layer_offset: (i32, i32),
+    path_origin: Option<(f32, f32)>,
+) -> Vec<TextCurveGroup> {
     use ab_glyph::OutlineCurve;
     use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
     use iai_geom::geometry::Point;
@@ -1429,11 +1830,17 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
     // Recover the upright raster origin, then map upright-layout points through
     // stretch → flip → rotation exactly as `rasterize_stretched`/`rasterize_placed`
     // transform the pixels. `delta` is (0,0) unless the layer is rotated/flipped.
-    let delta = rasterize_placed(td).map(|(_, d)| d).unwrap_or((0, 0));
-    let origin = (
-        layer_offset.0 as f32 - delta.0 as f32,
-        layer_offset.1 as f32 - delta.1 as f32,
-    );
+    let origin = match path_origin {
+        Some(o) => o,
+        None => {
+            let delta = rasterize_placed(td).map(|(_, d)| d).unwrap_or((0, 0));
+            (
+                layer_offset.0 as f32 - delta.0 as f32,
+                layer_offset.1 as f32 - delta.1 as f32,
+            )
+        }
+    };
+    let frames = path_origin.and_then(|_| path_frames(td, &layout));
     let stretch = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
         td.stretch_x
     } else {
@@ -1452,13 +1859,24 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
             origin.1 + sin_a * fxv + cos_a * fyv,
         )
     };
+    // Glyph `gi`'s layout point → canvas: on its path, or as above.
+    let place_g = |gi: usize, lx: f32, ly: f32| -> Point {
+        match &frames {
+            Some(f) => {
+                let (x, y) = f[gi].map(lx, ly);
+                Point::new(origin.0 + x, origin.1 + y)
+            }
+            None => place(lx, ly),
+        }
+    };
 
     let mut groups: Vec<([u8; 4], Vec<Contour>)> = Vec::new();
 
     for line in &layout.lines {
         let baseline_y = line.baseline;
         for k in 0..line.len {
-            let g = &layout.glyphs[line.glyph0 + k];
+            let gi = line.glyph0 + k;
+            let g = &layout.glyphs[gi];
             let font = font_for(&g.font_family).unwrap_or(base_font);
             let sf = font.as_scaled(PxScale::from(g.scale.max(1.0)));
             let sh = sf.h_scale_factor();
@@ -1500,7 +1918,7 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
                 }
                 let segs: Vec<GlyphSegment> = segs
                     .into_iter()
-                    .map(|s| s.map(|p| place(p.x, p.y)))
+                    .map(|s| s.map(|p| place_g(gi, p.x, p.y)))
                     .collect();
                 add_curve_group(&mut groups, g.color, glyph_contours(&segs));
             }
@@ -1514,10 +1932,10 @@ pub fn text_to_curves(td: &TextData, layer_offset: (i32, i32)) -> Vec<TextCurveG
                 let x1 = (g.x + g.advance).ceil();
                 let bar = Contour::new(
                     vec![
-                        Node::sharp(place(x0, y0)),
-                        Node::sharp(place(x1, y0)),
-                        Node::sharp(place(x1, y0 + thickness)),
-                        Node::sharp(place(x0, y0 + thickness)),
+                        Node::sharp(place_g(gi, x0, y0)),
+                        Node::sharp(place_g(gi, x1, y0)),
+                        Node::sharp(place_g(gi, x1, y0 + thickness)),
+                        Node::sharp(place_g(gi, x0, y0 + thickness)),
                     ],
                     true,
                 );
@@ -2096,5 +2514,145 @@ mod tests {
             let _ = rasterize_placed(&td);
         }
         eprintln!("5 x rasterize_placed: {:?}", t.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// A circle about (150, 150), radius 100, running clockwise on screen
+    /// from the right.
+    fn circle() -> TextPath {
+        TextPath {
+            points: (0..360)
+                .map(|k| {
+                    let a = (k as f32).to_radians();
+                    [150.0 + 100.0 * a.cos(), 150.0 + 100.0 * a.sin()]
+                })
+                .collect(),
+            closed: true,
+            // The top of the circle.
+            start: 0.75,
+            offset: 0.0,
+            flip: false,
+            source: None,
+            source_sig: 0,
+        }
+    }
+
+    fn on_circle(flip: bool) -> TextData {
+        TextData {
+            content: "ABCDE".to_string(),
+            font_px: 30.0,
+            align: TextAlign::Center,
+            // Flipped, it goes along the bottom.
+            path: Some(TextPath {
+                flip,
+                start: if flip { 0.25 } else { 0.75 },
+                ..circle()
+            }),
+            ..TextData::default()
+        }
+    }
+
+    fn radii(td: &TextData) -> (f32, f32, f32, f32) {
+        let mut r = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for g in text_to_curves(td, rasterize_placed(td).expect("raster").1) {
+            for p in iai_doc::vector::flatten::flatten_path(&g.path, 0.25)
+                .iter()
+                .flatten()
+            {
+                let d = (p.x - 150.0).hypot(p.y - 150.0);
+                r = (r.0.min(d), r.1.max(d), r.2.min(p.y), r.3.max(p.y));
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn letters_stand_on_the_circle_tops_outward_or_inward_when_flipped() {
+        if font().is_none() {
+            return;
+        }
+        let (lo, hi, top, _) = radii(&on_circle(false));
+        assert!(lo > 98.0 && hi < 100.0 + 30.0, "{lo} {hi}");
+        assert!(top < 50.0 - 10.0, "the letters stand above the top: {top}");
+        let (lo, hi, _, bottom) = radii(&on_circle(true));
+        // Flipped: the words read along the bottom, tops towards the middle.
+        assert!(hi < 102.0 && lo > 100.0 - 30.0, "{lo} {hi}");
+        assert!(bottom > 245.0, "along the bottom: {bottom}");
+    }
+
+    #[test]
+    fn the_raster_sits_where_the_curves_are() {
+        if font().is_none() {
+            return;
+        }
+        let td = on_circle(false);
+        let (raster, delta) = rasterize_placed(&td).expect("raster");
+        let mut b = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..raster.height {
+            for x in 0..raster.width {
+                if raster.rgba[((y * raster.width + x) * 4 + 3) as usize] > 127 {
+                    b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+                }
+            }
+        }
+        assert!(b.2 > b.0, "something is drawn");
+        // The anchor is (0, 0): the layer offset is the delta.
+        let mut c = (f32::MAX, f32::MAX);
+        for g in text_to_curves(&td, delta) {
+            for p in iai_doc::vector::flatten::flatten_path(&g.path, 0.25)
+                .iter()
+                .flatten()
+            {
+                c = (c.0.min(p.x), c.1.min(p.y));
+            }
+        }
+        let ink = (delta.0 + b.0 as i32, delta.1 + b.1 as i32);
+        assert!((ink.0 as f32 - c.0).abs() <= 2.0, "{ink:?} {c:?}");
+        assert!((ink.1 as f32 - c.1).abs() <= 2.0, "{ink:?} {c:?}");
+    }
+
+    #[test]
+    fn the_start_can_be_dragged_along_the_path() {
+        for flip in [false, true] {
+            let mut td = on_circle(flip);
+            let (x, y) = path_start_point(&td).expect("start");
+            // The top (or the bottom when flipped) of the circle.
+            assert!((x - 150.0).abs() < 2.5, "{flip}: x {x}");
+            assert!(
+                (y - if flip { 250.0 } else { 50.0 }).abs() < 1.0,
+                "{flip}: y {y}"
+            );
+            // The left of the circle, from a little outside it.
+            let st = path_start_near(&td, 40.0, 151.0).expect("near");
+            td.path.as_mut().expect("path").start = st;
+            let (x, y) = path_start_point(&td).expect("moved");
+            assert!(
+                (x - 50.0).abs() < 2.5 && (y - 150.0).abs() < 2.5,
+                "{flip}: {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_caret_and_clicks_follow_the_path() {
+        if font().is_none() {
+            return;
+        }
+        let td = on_circle(false);
+        let end = caret_rect(&td, 5).expect("caret");
+        let start = caret_rect(&td, 0).expect("caret");
+        // Centred on the top: the start left of the middle, the end right.
+        assert!(start.x < 150.0 && end.x > 150.0, "{start:?} {end:?}");
+        let rects = selection_rects(&td, 2..3).expect("rects");
+        assert_eq!(rects.len(), 1);
+        let r = rects[0];
+        let i = char_index_at_pos(&td, r.x + r.w * 0.25, r.y + r.h * 0.5).expect("index");
+        assert_eq!(i, 2, "{r:?}");
+        let i = char_index_at_pos(&td, r.x + r.w * 0.75, r.y + r.h * 0.5).expect("index");
+        assert_eq!(i, 3, "{r:?}");
     }
 }

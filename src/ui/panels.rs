@@ -2730,7 +2730,7 @@ fn paint_layer_drop_indicator(
 
 fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: usize) {
     let pal = data.chrome.theme_mode.palette();
-    let is_active = idx == data.layers.active_layer_idx;
+    let is_active = idx == data.layers.active_layer_idx && !data.layers.none_picked;
     let is_selected = data
         .layers
         .layer_selected

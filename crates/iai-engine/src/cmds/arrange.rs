@@ -637,6 +637,10 @@ pub struct DistributeParams {
     #[schemars(length(min = 3, max = 1000))]
     pub layers: Option<Vec<u32>>,
     pub axis: Axis,
+    /// Equal GAPS between them instead of equal steps between centres
+    /// (for things of different sizes: a row of buttons, words, logos).
+    #[serde(default)]
+    pub gaps: bool,
 }
 impl Validate for DistributeParams {}
 
@@ -667,9 +671,11 @@ impl Command for DistributeLayers {
         if let Some(ids) = &p.layers {
             pick(canvas, ids)?;
         }
-        let mode = match p.axis {
-            Axis::Horizontal => Distribute::HorizontalCenters,
-            Axis::Vertical => Distribute::VerticalCenters,
+        let mode = match (p.axis, p.gaps) {
+            (Axis::Horizontal, false) => Distribute::HorizontalCenters,
+            (Axis::Vertical, false) => Distribute::VerticalCenters,
+            (Axis::Horizontal, true) => Distribute::HorizontalGaps,
+            (Axis::Vertical, true) => Distribute::VerticalGaps,
         };
         let shifts = arrange::distribute(&canvas.layer_stack, mode);
         if shifts.is_empty() {

@@ -70,14 +70,13 @@ pub(crate) fn command_registry() -> Registry {
 }
 
 /// The commands of a job that runs on an engine of its own, away from the
-/// window ("Việc nhanh", and the Pro pack's AI gateway): the free core's,
+/// window ("Việc nhanh" and the AI gateway, both Pro's): the free core's,
 /// and the Pro pack's, which say Pro is locked when this machine's Pro is
 /// not open.
+#[cfg(feature = "pro")]
 pub(crate) fn registry_for_jobs() -> Registry {
-    #[cfg_attr(not(feature = "pro"), allow(unused_mut))]
     let mut registry = iai_engine::cmds::core_registry();
     // A test reads nothing of this machine's Pro: open, as a test's is.
-    #[cfg(feature = "pro")]
     if cfg!(test) || crate::pro::Pro::load().status().open() {
         crate::pro::cmds::register(&mut registry);
     } else {
@@ -349,8 +348,9 @@ impl App {
         self.ensure_raw_resident(idx);
     }
 
-    /// Documents made elsewhere (by a job on an engine of its own) become
-    /// tabs, the last one shown.
+    /// Documents made elsewhere (by a job on an engine of its own, Pro's)
+    /// become tabs, the last one shown.
+    #[cfg(feature = "pro")]
     pub(in crate::app) fn adopt_documents(&mut self, docs: Vec<Document>) {
         if docs.is_empty() {
             return;

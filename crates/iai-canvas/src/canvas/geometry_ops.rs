@@ -565,6 +565,37 @@ impl Canvas {
         self.layer_stack.active_idx = self.layer_stack.active_idx.saturating_add(1);
     }
 
+    /// Move the vector and text layers by `(dx, dy)` (only those in `only`
+    /// when given) and leave the pixel layers where they are: one undo step
+    /// named `step`. The number moved.
+    pub fn shift_editable_layers(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        only: Option<&[u32]>,
+        step: &str,
+    ) -> usize {
+        let mut cmd = iai_history::command::LayerStructureCommand::capture_before(
+            step,
+            &self.layer_stack,
+            self.width,
+            self.height,
+        );
+        let moved = self
+            .layer_stack
+            .layers
+            .iter_mut()
+            .filter(|l| !l.is_background && only.is_none_or(|ids| ids.contains(&l.id)))
+            .map(|l| translate_editable_layer(l, dx, dy))
+            .filter(|m| *m)
+            .count();
+        cmd.capture_after(&self.layer_stack, self.width, self.height);
+        self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        self.layer_revision = self.layer_revision.saturating_add(1);
+        self.flatten_full();
+        moved
+    }
+
     pub fn crop(&mut self, x: i32, y: i32, w: u32, h: u32, delete_cropped: bool) -> bool {
         self.crop_impl(x, y, w, h, delete_cropped, None)
     }

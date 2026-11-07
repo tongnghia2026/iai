@@ -92,7 +92,9 @@ impl App {
             stack.layers.get(i).is_some_and(|l| {
                 l.visible
                     && crate::core::free_transform::transformable_layer(l)
-                    && !l.tiles.tiles.is_empty()
+                    && (!l.tiles.tiles.is_empty()
+                        // Wholly off the page it has no pixels, yet shows.
+                        || crate::tools::move_tool::MoveTool::shape_box(l).is_some())
             })
         });
         let drawn = |l: &crate::core::layer::Layer| {
@@ -111,6 +113,11 @@ impl App {
                 LayerType::Vector(VectorGeometry::Path(_)) => self
                     .path_canvas_bounds_of(i)
                     .map(|r| (r.x, r.y, r.x + r.w, r.y + r.h)),
+                // Type and shapes by their outlines too: past the page their
+                // pixels are cut off.
+                LayerType::Vector(_) | LayerType::Text(_) => {
+                    crate::tools::move_tool::MoveTool::shape_box(l)
+                }
                 _ => ink_box(l).map(|(bx0, by0, bx1, by1)| {
                     (
                         (l.offset.0 + bx0) as f32,
@@ -1792,6 +1799,84 @@ mod tests {
                 moved.x.round() as i32 + delta.0,
                 moved.y.round() as i32 + delta.1,
             )
+        );
+    }
+
+    /// Text along a path turns with Free Transform as its path does: the
+    /// path's points turn and scale, the letters grow with it, they keep
+    /// standing upright on the path (no extra glyph turn), and a link to an
+    /// outline left behind is let go.
+    #[test]
+    fn text_on_a_path_turns_and_scales_with_its_path() {
+        let td = TextData {
+            content: "Path".to_string(),
+            font_family: TextFontFamily::DejaVuSans,
+            font_px: 20.0,
+            path: Some(crate::core::text::TextPath {
+                points: vec![[0.0, 0.0], [200.0, 0.0]],
+                closed: false,
+                start: 0.0,
+                offset: 0.0,
+                flip: false,
+                source: Some(77),
+                source_sig: 0,
+            }),
+            ..TextData::default()
+        };
+        let Some((raster, delta)) = rasterize_placed(&td) else {
+            return;
+        };
+        let offset = (100 + delta.0, 100 + delta.1);
+        let tiles = TileMap::from_rgba(&raster.rgba, raster.width, raster.height);
+        let ls = LayerOrigState {
+            layer_id: 3,
+            layer_idx: 0,
+            layer_type: LayerType::Text(td.clone()),
+            tiles,
+            mask: None,
+            offset,
+            width: raster.width,
+            height: raster.height,
+            content_offset: offset,
+            content_w: raster.width,
+            content_h: raster.height,
+            source_to_current: MAT3_IDENTITY,
+            before: None,
+        };
+        let mut ts = identity_text_transform_state();
+        ts.layer_states = vec![ls];
+        ts.layer_id = 3;
+        ts.orig_offset = offset;
+        ts.orig_w = raster.width;
+        ts.orig_h = raster.height;
+        (ts.scale_x, ts.scale_y, ts.angle_deg) = (2.0, 2.0, 90.0);
+        (ts.pivot_cx, ts.pivot_cy) = (100.0, 100.0);
+        let result = bake_transform_commit(
+            DocumentId(1),
+            ts,
+            crate::core::geometry::InterpolationMode::Bilinear,
+        )
+        .expect("bake succeeds");
+        let LayerType::Text(after) = &result.layers[0].layer_type else {
+            panic!("text on a path stays editable");
+        };
+        let Some(path) = &after.path else {
+            panic!("still on a path")
+        };
+        assert!((after.font_px - 40.0).abs() < 0.01, "{}", after.font_px);
+        assert!(
+            after.rotation_deg.abs() < 0.01,
+            "the letters are not turned on their own"
+        );
+        assert_eq!(
+            path.source, None,
+            "the outline left behind no longer pulls it"
+        );
+        // The path, 200 along x, is now 400 down y.
+        let end = path.points[path.points.len() - 1];
+        assert!(
+            end[0].abs() < 0.5 && (end[1] - 400.0).abs() < 0.5,
+            "{end:?}"
         );
     }
 

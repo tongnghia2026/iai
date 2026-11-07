@@ -1790,6 +1790,7 @@ mod tests {
         let source = temp_pdf_path("hybrid-vector-source");
         std::fs::write(&source, minimal_pdf(&[(40, 40)])).expect("write source");
         let vector = PdfVectorObject {
+            clips: Vec::new(),
             path: PathData::new(
                 vec![Contour::new(
                     vec![

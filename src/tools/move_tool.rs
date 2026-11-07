@@ -353,6 +353,26 @@ impl MoveTool {
         false
     }
 
+    /// The box of a vector or text layer's shape on the canvas, from its
+    /// geometry (reaching past the page where its raster is cut off).
+    pub(crate) fn shape_box(layer: &crate::core::layer::Layer) -> Option<(f32, f32, f32, f32)> {
+        use crate::core::layer::LayerType;
+        use crate::core::vector::object::VectorGeometry;
+        let objects = match &layer.layer_type {
+            LayerType::Vector(VectorGeometry::Path(o)) => vec![o.clone()],
+            LayerType::Vector(VectorGeometry::Primitive(shape)) => {
+                vec![shape.to_vector_object(layer.offset)]
+            }
+            LayerType::Text(text) => crate::core::text::text_vector_objects(text, layer.offset),
+            _ => return None,
+        };
+        objects
+            .iter()
+            .filter_map(|o| o.layer_bounds(0.5))
+            .map(|b| (b.x, b.y, b.x + b.w, b.y + b.h))
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+    }
+
     /// Canvas-space point `(x,y)` inside a layer's raster bounding box.
     fn point_in_layer_bounds(layer: &crate::core::layer::Layer, x: i32, y: i32) -> bool {
         let lx = x - layer.offset.0;
@@ -384,14 +404,22 @@ impl Tool for MoveTool {
                 && layer.visible
                 && Self::can_move_layer(layer)
                 && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
-                && Self::point_in_layer_bounds(layer, cx as i32, cy as i32)
+                && Self::shape_box(layer).map_or_else(
+                    || Self::point_in_layer_bounds(layer, cx as i32, cy as i32),
+                    |(x0, y0, x1, y1)| cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1,
+                )
         });
         let mut changed_selection = false;
         self.marquee_adds = false;
         self.shift_unpick = None;
 
-        self.is_moving_selection =
-            canvas.selection.active && canvas.selection.is_selected(cx as u32, cy as u32);
+        // Off the page there is no selection to move (a press there clamped
+        // onto the page's edge used to grab it).
+        let on_page =
+            cx >= 0.0 && cy >= 0.0 && cx < canvas.width as f32 && cy < canvas.height as f32;
+        self.is_moving_selection = on_page
+            && canvas.selection.active
+            && canvas.selection.is_selected(cx as u32, cy as u32);
 
         let do_auto_select = if event.ctrl {
             !self.auto_select
@@ -451,7 +479,14 @@ impl Tool for MoveTool {
                         && layer.visible
                         && Self::can_move_layer(layer)
                         && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
-                        && Self::point_in_layer_bounds(layer, x, y)
+                        // By the shape's own box: its raster can be the
+                        // whole page, and a press anywhere on the page then
+                        // grabbed it again (08/11: an empty press never let
+                        // a rectangle go).
+                        && Self::shape_box(layer).map_or_else(
+                            || Self::point_in_layer_bounds(layer, x, y),
+                            |(x0, y0, x1, y1)| cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1,
+                        )
                     {
                         hit_idx = Some(idx);
                         break;
@@ -488,9 +523,12 @@ impl Tool for MoveTool {
                 // Shift keeps what is selected: the marquee adds to it.
                 self.marquee_adds = event.shift;
                 if !event.shift {
-                    changed_selection = canvas.layer_stack.layers.iter().any(|l| l.selected);
-                    for l in &mut canvas.layer_stack.layers {
-                        l.selected = false;
+                    // A press on an empty spot lets every layer go: no frame,
+                    // no row lit in the Layers panel, until one is picked.
+                    changed_selection = !canvas.layer_stack.is_none_picked();
+                    canvas.layer_stack.pick_none();
+                    if changed_selection {
+                        canvas.layer_revision += 1;
                     }
                 }
                 self.marquee_dragging = true;
@@ -966,8 +1004,9 @@ mod tests {
         let path = PathData::new(
             vec![Contour::new(
                 vec![
-                    Node::sharp(Point::new(0.0, 0.0)),
-                    Node::sharp(Point::new(w as f32, h as f32)),
+                    // A real path lies where it shows, in page coordinates.
+                    Node::sharp(Point::new(ox as f32, oy as f32)),
+                    Node::sharp(Point::new((ox + w as i32) as f32, (oy + h as i32) as f32)),
                 ],
                 false,
             )],
@@ -1074,6 +1113,79 @@ mod tests {
 
         click(&mut doc, 300.0, 250.0);
         assert_eq!(picked(&doc), (true, false), "on the photo outside it");
+    }
+
+    /// Stage 8: a shape reaching past the page is picked by a press on its
+    /// part off the page, where its raster is cut away.
+    #[test]
+    fn a_press_off_the_page_picks_the_shape_reaching_there() {
+        let mut doc = Document::new(DocumentId(1), 200, 100);
+        let path = PathData::new(
+            vec![Contour::new(
+                vec![
+                    Node::sharp(Point::new(150.0, 20.0)),
+                    Node::sharp(Point::new(260.0, 20.0)),
+                    Node::sharp(Point::new(260.0, 60.0)),
+                    Node::sharp(Point::new(150.0, 60.0)),
+                ],
+                true,
+            )],
+            FillRule::NonZero,
+        );
+        let style = crate::core::vector::style::VectorStyle::from_shape_fields(
+            true,
+            [200, 0, 0, 255],
+            0.0,
+            [0, 0, 0, 0],
+        );
+        let object = VectorObjectData::new(
+            path,
+            style,
+            crate::core::vector::affine::AffineTransform::IDENTITY,
+        );
+        let idx = doc.canvas.layer_stack.add_layer(200, 100);
+        let mut layer = doc.canvas.layer_stack.layers.remove(idx);
+        iai_vector::command_vector::apply_object_to_layer(&mut layer, object);
+        doc.canvas.layer_stack.layers.insert(idx, layer);
+        for l in &mut doc.canvas.layer_stack.layers {
+            l.selected = false;
+        }
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(240.0, 40.0), &mut c);
+        t.on_release(PointerEvent::new(240.0, 40.0), &mut c);
+        assert!(doc.canvas.layer_stack.layers[idx].selected);
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(240.0, 90.0), &mut c);
+        t.on_release(PointerEvent::new(240.0, 90.0), &mut c);
+        assert!(!doc.canvas.layer_stack.layers[idx].selected);
+        // Picked again, then a press on the empty desk far off lets it go,
+        // even with a pixel selection on the page.
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(240.0, 40.0), &mut c);
+        t.on_release(PointerEvent::new(240.0, 40.0), &mut c);
+        assert!(doc.canvas.layer_stack.layers[idx].selected);
+        doc.canvas.select_all();
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(600.0, 300.0), &mut c);
+        t.on_release(PointerEvent::new(600.0, 300.0), &mut c);
+        assert!(
+            !doc.canvas.layer_stack.layers[idx].selected,
+            "an empty press lets go"
+        );
+        assert!(
+            doc.canvas.layer_stack.is_none_picked(),
+            "an empty press leaves no layer chosen"
+        );
+        // Picking it again ends that.
+        let mut t = MoveTool::new();
+        let mut c = ctx(&mut doc);
+        t.on_press(PointerEvent::new(240.0, 40.0), &mut c);
+        t.on_release(PointerEvent::new(240.0, 40.0), &mut c);
+        assert!(!doc.canvas.layer_stack.is_none_picked());
     }
 
     /// 04/11: a press between the letters of a line of type lying on a photo

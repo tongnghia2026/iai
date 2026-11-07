@@ -53,6 +53,8 @@ pub mod portrait_brush;
 #[rustfmt::skip]
 pub mod portrait_ops;
 pub mod powerclip_ops;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod quick_tasks;
 pub mod render;
 pub mod scan_cleanup_ops;
@@ -60,6 +62,7 @@ mod selection_feedback;
 pub mod shape_ops;
 pub mod state;
 pub mod text_ops;
+pub mod text_path_drag;
 pub mod transform;
 pub mod ui_shell;
 pub mod vector_boolean;

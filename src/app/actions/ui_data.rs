@@ -675,6 +675,9 @@ impl App {
         }
 
         let layer_meta_stale = self.shell.ui_data_cache.layer_revision != layer_rev
+            || self.shell.ui_data_cache.layer_rows_history_rev != history_rev
+            || self.shell.ui_data_cache.layer_names.len()
+                != self.docs.active().canvas.layer_stack.layers.len()
             || self.shell.ui_data_cache.ui_cache_doc_id != doc_id;
         if layer_meta_stale || force_layer_thumb_refresh {
             self.refresh_layer_thumbnails();
@@ -760,6 +763,7 @@ impl App {
                     .collect(),
             );
             self.shell.ui_data_cache.layer_revision = layer_rev;
+            self.shell.ui_data_cache.layer_rows_history_rev = history_rev;
             self.shell.ui_data_cache.ui_cache_doc_id = doc_id;
         }
 
@@ -1115,6 +1119,7 @@ impl App {
         LayerViewModel {
             layer_count: self.docs.active().canvas.layer_stack.layers.len(),
             active_layer_idx: self.docs.active().canvas.layer_stack.active_idx,
+            none_picked: self.docs.active().canvas.layer_stack.is_none_picked(),
             layer_names: self.shell.ui_data_cache.layer_names.clone(),
             layer_visibles: self.shell.ui_data_cache.layer_visibles.clone(),
             layer_ids: self.shell.ui_data_cache.layer_ids.clone(),
@@ -1251,6 +1256,7 @@ impl App {
                 .as_ref()
                 .map(|s| s.flip_y)
                 .unwrap_or(false),
+            text_path: self.edit.text_edit.as_ref().and_then(|s| s.path.clone()),
             text_glyph_styles: std::sync::Arc::new(
                 self.edit
                     .text_edit
@@ -1476,6 +1482,7 @@ impl App {
             // On-canvas node editing overlay for the active Path (Node tool).
             node_overlay: self.active_node_overlay(),
             path_gradient_overlay: self.active_path_gradient_overlay(),
+            text_path_handle: self.text_path_handle(),
             // Fill/Outline of the active Path (options bar under Move / Node).
             // Kept available outside Move/Node as well: the document Palette
             // applies Fill/Outline to the selected editable Path.
@@ -2104,6 +2111,7 @@ impl App {
             agent: self.agent_view(),
             #[cfg(feature = "pro")]
             errand: self.errand_view(),
+            #[cfg(feature = "pro")]
             quick: self.quick_view(),
             #[cfg(feature = "pro")]
             pro: self.pro_view(),

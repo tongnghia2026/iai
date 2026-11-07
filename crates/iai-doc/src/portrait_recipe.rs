@@ -349,7 +349,7 @@ pub struct AutoFix {
 
 pub const AUTO_FIX: AutoFix = AutoFix {
     cast: 100.0,
-    exposure: 20.0,
+    exposure: 40.0,
     haze: 60.0,
     even_light: 60.0,
 };

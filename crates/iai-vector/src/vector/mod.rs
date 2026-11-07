@@ -17,6 +17,7 @@
 
 pub use iai_geom::vector::affine;
 pub mod boolean;
+pub mod contour;
 pub use iai_doc::vector::brush;
 pub use iai_doc::vector::color;
 pub mod display;

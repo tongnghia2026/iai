@@ -1040,7 +1040,16 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             serde_json::Value::Null
         };
         let text_json = if let iai_doc::layer::LayerType::Text(ref text) = layer.layer_type {
-            text_to_json(text)
+            let mut j = text_to_json(text);
+            // Layer ids become positions on load, like `parent_index`.
+            if let Some(src) = text.path.as_ref().and_then(|p| p.source)
+                && let Some(pos) = canvas.layer_stack.layers.iter().position(|l| l.id == src)
+            {
+                j["path"]["source_index"] = serde_json::json!(pos as u64);
+                j["path"]["source_sig"] =
+                    serde_json::json!(text.path.as_ref().map_or(0, |p| p.source_sig));
+            }
+            j
         } else {
             serde_json::Value::Null
         };
@@ -1889,7 +1898,33 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
         }
         obj["glyph_runs"] = serde_json::Value::Array(runs);
     }
+    if let Some(path) = &td.path {
+        obj["path"] = serde_json::json!({
+            "points": path.points,
+            "closed": path.closed,
+            "start": path.start,
+            "offset": path.offset,
+            "flip": path.flip,
+        });
+    }
     obj
+}
+
+fn json_to_text_path(v: &serde_json::Value) -> Option<iai_text::text::TextPath> {
+    let points: Vec<[f32; 2]> = v["points"]
+        .as_array()?
+        .iter()
+        .filter_map(|p| Some([p.get(0)?.as_f64()? as f32, p.get(1)?.as_f64()? as f32]))
+        .collect();
+    (points.len() >= 2).then(|| iai_text::text::TextPath {
+        points,
+        closed: v["closed"].as_bool().unwrap_or(false),
+        start: v["start"].as_f64().unwrap_or(0.0) as f32,
+        offset: v["offset"].as_f64().unwrap_or(0.0) as f32,
+        flip: v["flip"].as_bool().unwrap_or(false),
+        source: v["source_index"].as_u64().map(|i| i as u32),
+        source_sig: v["source_sig"].as_u64().unwrap_or(0),
+    })
 }
 
 fn shape_to_json(sd: &iai_doc::shape::ShapeData) -> serde_json::Value {
@@ -2029,6 +2064,7 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
         flip_x,
         flip_y,
         glyph_styles,
+        path: json_to_text_path(&v["path"]),
     })
 }
 

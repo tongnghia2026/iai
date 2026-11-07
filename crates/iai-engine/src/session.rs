@@ -331,6 +331,23 @@ impl Session<'_> {
         );
 
         let txn = self.begin();
+        // A pack's after-edit work goes in the command's own undo step.
+        let hook = registry
+            .after_edit()
+            .filter(|_| meta.effects.contains(&Effect::Edit) && !meta.id.starts_with("edit."));
+        let hooked: Vec<u32> = match hook {
+            Some(h) => self
+                .ws
+                .documents_mut()
+                .iter_mut()
+                .filter(|d| (h.applies)(&d.canvas))
+                .map(|d| {
+                    d.canvas.begin_undo_group(meta.label_en);
+                    d.id.0
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         let planned = match jobs::guarded(|| cmd.plan_json(self, call.args.clone())) {
             Ok(planned) => planned,
             Err(payload) => Err(jobs::panicked(meta.id, &jobs::panic_text(payload.as_ref()))),
@@ -367,6 +384,17 @@ impl Session<'_> {
             }
             Err(e) => Err(e),
         };
+        if let Some(h) = hook {
+            let done = matches!(outcome, Ok(Outcome::Done(_)));
+            for id in hooked {
+                if let Some(d) = self.ws.documents_mut().iter_mut().find(|d| d.id.0 == id) {
+                    if done && (h.applies)(&d.canvas) {
+                        (h.settle)(&mut d.canvas);
+                    }
+                    d.canvas.end_undo_group();
+                }
+            }
+        }
         // The steps it recorded are its own: its line in the journal says them.
         self.drop_recorded_steps();
 

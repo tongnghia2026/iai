@@ -227,6 +227,10 @@ impl App {
     /// the Node tool reuses it for the layer it edits.
     pub(crate) fn active_path_layer(&self) -> Option<usize> {
         let canvas = &self.docs.active().canvas;
+        // An empty spot pressed: no layer is chosen, so no path is framed.
+        if canvas.layer_stack.is_none_picked() {
+            return None;
+        }
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
         if matches!(layer.layer_type, LayerType::Vector(_))

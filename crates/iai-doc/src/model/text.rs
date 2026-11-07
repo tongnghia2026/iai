@@ -136,6 +136,36 @@ pub struct GlyphStyle {
     pub underline: bool,
 }
 
+/// Text set along a path: Illustrator's Type on a Path, CorelDRAW's Fit
+/// Text To Path. The letters stand on the path one by one, each turned to
+/// the path's direction where it stands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPath {
+    /// The path, flattened, in the text's own space: canvas pixels with the
+    /// text's upright origin (the layer offset less its placement delta) at
+    /// (0, 0). The text reads in the direction the points run, its tops on
+    /// the left of that direction (outward along a clockwise circle).
+    pub points: Vec<[f32; 2]>,
+    /// The path goes round (a circle): the letters wrap past the end.
+    pub closed: bool,
+    /// Where the text stands along the path, 0 to 1 of its length: where it
+    /// starts (left aligned), its middle (centred) or where it ends (right).
+    pub start: f32,
+    /// The baseline's distance from the path, pixels: positive lifts the
+    /// letters off the path on their tops' side.
+    pub offset: f32,
+    /// On the other side of the path, reading the other way (along the
+    /// bottom of a circle, upright).
+    pub flip: bool,
+    /// The vector layer the path was taken from: when that layer's outline
+    /// changes the text follows it (CorelDRAW keeps Fit Text To Path live).
+    /// `None` for a circle or a path the text no longer follows.
+    pub source: Option<u32>,
+    /// The source outline's fingerprint when `points` were last taken from
+    /// it (see `iai_canvas::design::path_signature`).
+    pub source_sig: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextData {
     /// The editable text (may contain '\n' for multiple lines).
@@ -169,6 +199,9 @@ pub struct TextData {
     /// the base style; otherwise its length equals the character count of
     /// `content` (each entry aligns 1:1 with a `char`, including '\n').
     pub glyph_styles: Vec<GlyphStyle>,
+    /// Set along a path instead of in straight lines (stretch, rotation and
+    /// flips do not apply then).
+    pub path: Option<TextPath>,
 }
 
 impl TextData {
@@ -231,6 +264,7 @@ impl Default for TextData {
             flip_x: false,
             flip_y: false,
             glyph_styles: Vec::new(),
+            path: None,
         }
     }
 }

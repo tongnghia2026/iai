@@ -139,9 +139,9 @@ impl App {
             if let Some(intent) = actions.chrome.errand.take() {
                 self.errand_intent(intent);
             }
-        }
-        if let Some(intent) = actions.chrome.quick.take() {
-            self.quick_intent(intent);
+            if let Some(intent) = actions.chrome.quick.take() {
+                self.quick_intent(intent);
+            }
         }
         // The first start of a new build: what is new in it and the ask for
         // support, once the user is free to read them.

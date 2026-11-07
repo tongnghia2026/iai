@@ -210,6 +210,27 @@ pub struct GlyphSpec {
     pub underline: bool,
 }
 
+/// The path a type layer is set along (see `text.fit_to_path`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PathSpec {
+    /// The path, flattened, relative to the type's origin.
+    pub points: Vec<[f32; 2]>,
+    pub closed: bool,
+    /// Where the text stands along it, 0 to 1.
+    pub start: f32,
+    /// Baseline's distance from the path, pixels.
+    pub offset: f32,
+    /// On the other side, reading the other way.
+    pub flip: bool,
+    /// The vector layer the text follows (it moves with that outline).
+    #[serde(default)]
+    pub source: Option<u32>,
+    /// That outline's fingerprint when last followed.
+    #[serde(default)]
+    pub source_sig: u64,
+}
+
 /// Everything a type layer is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -244,6 +265,9 @@ pub struct TypeSpec {
     /// the rest; empty when none does.
     #[serde(default)]
     pub glyphs: Vec<GlyphSpec>,
+    /// Set along a path rather than in lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathSpec>,
 }
 
 impl TypeSpec {
@@ -281,6 +305,15 @@ impl TypeSpec {
                     underline: g.underline,
                 })
                 .collect(),
+            path: data.path.as_ref().map(|p| PathSpec {
+                points: p.points.clone(),
+                closed: p.closed,
+                start: p.start,
+                offset: p.offset,
+                flip: p.flip,
+                source: p.source,
+                source_sig: p.source_sig,
+            }),
         }
     }
 
@@ -318,6 +351,15 @@ impl TypeSpec {
                     underline: g.underline,
                 })
                 .collect(),
+            path: self.path.as_ref().map(|p| iai_doc::model::text::TextPath {
+                points: p.points.clone(),
+                closed: p.closed,
+                start: p.start,
+                offset: p.offset,
+                flip: p.flip,
+                source: p.source,
+                source_sig: p.source_sig,
+            }),
         }
     }
 }
@@ -442,6 +484,384 @@ impl Command for SetText {
             },
         };
         s.emit(EngineEvent::Structure { doc });
+        Ok(Plan::Done(out))
+    }
+}
+
+// ---- text.fit_frame --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FitFrameParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The type layer; the active one when omitted.
+    pub layer: Option<u32>,
+    /// The frame's width, document pixels.
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub width: f32,
+    /// The frame's height, document pixels; only the width counts when omitted.
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub height: Option<f32>,
+}
+
+impl Validate for FitFrameParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        let ok = |v: f32| v.is_finite() && v >= 1.0;
+        if !ok(self.width) {
+            return Err(CmdError::bad_param("width", "at least 1 pixel"));
+        }
+        if self.height.is_some_and(|h| !ok(h)) {
+            return Err(CmdError::bad_param("height", "at least 1 pixel"));
+        }
+        Ok(())
+    }
+}
+
+static FIT_FRAME: CommandMeta = CommandMeta {
+    id: "text.fit_frame",
+    label_vi: "Co chữ vừa khung",
+    label_en: "Fit Text To Frame",
+    doc: "Make a type layer's letters larger or smaller, all in proportion, until the text \
+          just fills a frame of `width` (and `height`) pixels: a name made to fill a banner, a \
+          title its column. Its top-left corner stays. The text stays editable. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct FitTextToFrame;
+
+impl Command for FitTextToFrame {
+    type Params = FitFrameParams;
+    type Output = TextAdded;
+    fn meta(&self) -> &'static CommandMeta {
+        &FIT_FRAME
+    }
+    fn plan(&self, s: &mut Session<'_>, p: FitFrameParams) -> Result<Plan<TextAdded>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (cw, ch) = (canvas.width, canvas.height);
+        let idx = layer_index(canvas, p.layer)?;
+        let (mut td, offset) = match canvas.layer_stack.layers.get(idx) {
+            Some(l) => match &l.layer_type {
+                iai_doc::layer::LayerType::Text(td) => (td.clone(), l.offset),
+                _ => {
+                    return Err(super::common::not_enabled(
+                        "that layer is not a type layer",
+                        "Layer này không phải layer chữ",
+                    ));
+                }
+            },
+            None => return Err(CmdError::internal("layer")),
+        };
+        let delta = iai_text::text::rasterize_placed(&td).map_or((0, 0), |(_, d)| d);
+        let anchor = (
+            offset.0.saturating_sub(delta.0),
+            offset.1.saturating_sub(delta.1),
+        );
+        // Letters do not grow quite in proportion (hinting, rounding), so
+        // measure again after each step.
+        for _ in 0..4 {
+            let Some((r, _)) = iai_text::text::rasterize_placed(&td) else {
+                return Err(super::common::not_enabled(
+                    "the text has nothing to show",
+                    "Layer chữ này trống",
+                ));
+            };
+            let mut k = p.width / r.width.max(1) as f32;
+            if let Some(h) = p.height {
+                k = k.min(h / r.height.max(1) as f32);
+            }
+            if (k - 1.0).abs() < 0.005 {
+                break;
+            }
+            td.font_px = (td.font_px * k).clamp(1.0, 4000.0);
+            td.tracking_px *= k;
+        }
+        let label = "Fit Text To Frame";
+        let mut cmd = LayerStructureCommand::capture_before(label, &canvas.layer_stack, cw, ch);
+        canvas.layer_stack.active_idx = idx;
+        rasterize_into_layer(canvas, idx, anchor, td);
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+        canvas.layer_revision = canvas.layer_revision.saturating_add(1);
+        canvas.flatten_full();
+        let layer = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .ok_or_else(|| CmdError::internal("type layer"))?;
+        let out = TextAdded {
+            doc,
+            layer: layer.id,
+            bounds: Bounds {
+                x: layer.offset.0,
+                y: layer.offset.1,
+                w: layer.width,
+                h: layer.height,
+            },
+        };
+        s.emit(EngineEvent::Structure { doc });
+        s.notice("Co chữ vừa khung".to_string(), label.to_string());
+        Ok(Plan::Done(out))
+    }
+}
+
+// ---- text.fit_to_path ------------------------------------------------------
+
+/// A circle to set text round: centre and radius, document pixels.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CircleSpec {
+    pub cx: f32,
+    pub cy: f32,
+    #[schemars(range(min = 1.0, max = 100000.0))]
+    pub r: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FitToPathParams {
+    /// Document id (see `doc.list`); the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The type layer; the active one when omitted.
+    pub layer: Option<u32>,
+    /// A vector layer whose outline the text follows (its first line or
+    /// shape). The layer stays; hide or delete it if it should not show.
+    pub path: Option<u32>,
+    /// Or a circle to go round, clockwise from the right.
+    pub circle: Option<CircleSpec>,
+    /// Where the text stands along the path, 0 to 1 of its length (on a
+    /// circle 0 is the right, 0.25 the bottom, 0.5 the left, 0.75 the top):
+    /// where it starts (left aligned), its middle (centred) or its end
+    /// (right). Kept when omitted; else the middle of a line, the top of a
+    /// circle (its bottom when `flip`).
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub start: Option<f32>,
+    /// The baseline's distance from the path, pixels: positive lifts the
+    /// letters off it on their tops' side (kept when omitted, else 0).
+    pub offset: Option<f32>,
+    /// On the other side of the path, reading the other way: along the
+    /// bottom of a circle the right way up, tops towards the middle.
+    pub flip: Option<bool>,
+    /// How the text sits at `start`; centred when the text is first put
+    /// on a path.
+    pub align: Option<Align>,
+    /// Take the text off its path, back to a straight line.
+    #[serde(default)]
+    pub release: bool,
+}
+
+impl Validate for FitToPathParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        if self.path.is_some() && self.circle.is_some() {
+            return Err(CmdError::bad_param(
+                "circle",
+                "a path or a circle, not both",
+            ));
+        }
+        Ok(())
+    }
+}
+
+static FIT: CommandMeta = CommandMeta {
+    id: "text.fit_to_path",
+    label_vi: "Đặt chữ theo đường",
+    label_en: "Fit Text To Path",
+    doc: "Set a type layer along a curve, a shape's outline or a circle (Illustrator's Type on \
+          a Path, CorelDRAW's Fit Text To Path): one text layer, still editable, each letter \
+          standing on the path and turned with it. Text round the top of a round logo: \
+          `circle` with the default start; along its bottom the right way up: `flip: true` \
+          (with `start: 0.25` when turning over text already on the circle: it turns over in \
+          place). Call it again on the same layer to move it along (`start`), lift it \
+          (`offset`), turn it over (`flip`) or `release` it. One undo step.",
+    effects: &[Effect::Edit],
+    featured: false,
+};
+
+pub struct FitTextToPath;
+
+impl Command for FitTextToPath {
+    type Params = FitToPathParams;
+    type Output = TextAdded;
+    fn meta(&self) -> &'static CommandMeta {
+        &FIT
+    }
+    fn plan(&self, s: &mut Session<'_>, p: FitToPathParams) -> Result<Plan<TextAdded>, CmdError> {
+        use iai_doc::model::text::TextPath;
+        let doc = s.doc_id(p.doc)?;
+        let canvas = s.canvas_mut(Some(doc))?;
+        let (cw, ch) = (canvas.width, canvas.height);
+        // From the menu: the picked type layer, and the picked vector layer
+        // as its path.
+        let picked = |want: fn(&iai_doc::layer::LayerType) -> bool| {
+            canvas
+                .layer_stack
+                .layers
+                .iter()
+                .filter(|l| l.selected && want(&l.layer_type))
+                .map(|l| l.id)
+                .next()
+        };
+        let picked_text = picked(|t| matches!(t, iai_doc::layer::LayerType::Text(_)));
+        let picked_vector = picked(|t| matches!(t, iai_doc::layer::LayerType::Vector(_)));
+        let idx = layer_index(canvas, p.layer.or(picked_text))?;
+        let (mut td, offset) = match canvas.layer_stack.layers.get(idx) {
+            Some(l) => match &l.layer_type {
+                iai_doc::layer::LayerType::Text(td) => (td.clone(), l.offset),
+                _ => {
+                    return Err(super::common::not_enabled(
+                        "that layer is not a type layer",
+                        "Layer này không phải layer chữ",
+                    ));
+                }
+            },
+            None => return Err(CmdError::internal("layer")),
+        };
+        // The text's anchor: its upright origin on the page.
+        let delta = iai_text::text::rasterize_placed(&td).map_or((0, 0), |(_, d)| d);
+        let anchor = (
+            offset.0.saturating_sub(delta.0),
+            offset.1.saturating_sub(delta.1),
+        );
+        let rel = |x: f32, y: f32| [x - anchor.0 as f32, y - anchor.1 as f32];
+        let new_points: Option<(Vec<[f32; 2]>, bool, Option<(u32, u64)>)> =
+            if let Some(c) = p.circle {
+                let n = ((c.r * std::f32::consts::TAU / 1.5).ceil() as usize).clamp(64, 4096);
+                Some((
+                    (0..n)
+                        .map(|k| {
+                            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                            rel(c.cx + c.r * a.cos(), c.cy + c.r * a.sin())
+                        })
+                        .collect(),
+                    true,
+                    None,
+                ))
+            } else if let Some(id) = p.path.or_else(|| {
+                let on_path = matches!(
+                    canvas.layer_stack.layers.get(idx).map(|l| &l.layer_type),
+                    Some(iai_doc::layer::LayerType::Text(t)) if t.path.is_some()
+                );
+                (!on_path && !p.release).then_some(picked_vector).flatten()
+            }) {
+                let pi = layer_index(canvas, Some(id))?;
+                let layer = canvas
+                    .layer_stack
+                    .layers
+                    .get(pi)
+                    .ok_or_else(|| CmdError::internal("layer"))?;
+                let (pts, closed) =
+                    iai_canvas::text_follow::text_path_points(layer).ok_or_else(|| {
+                        if iai_canvas::shaping::layer_canvas_path(layer).is_none() {
+                            super::common::not_enabled(
+                                "the path must be a vector layer",
+                                "Đường phải là một layer vector",
+                            )
+                        } else {
+                            CmdError::bad_param("path", "a layer with a line or a shape")
+                        }
+                    })?;
+                let sig = iai_canvas::text_follow::path_signature(layer).unwrap_or(0);
+                Some((
+                    pts.iter().map(|q| rel(q[0], q[1])).collect(),
+                    closed,
+                    Some((id, sig)),
+                ))
+            } else {
+                None
+            };
+        if p.release {
+            if td.path.is_none() {
+                return Err(super::common::not_enabled(
+                    "the text is not on a path",
+                    "Chữ này không nằm theo đường nào",
+                ));
+            }
+            td.path = None;
+        } else {
+            let first = td.path.is_none();
+            let mut path = match (new_points, td.path.take()) {
+                (Some((points, closed, link)), old) => TextPath {
+                    points,
+                    closed,
+                    source: link.map(|l| l.0),
+                    source_sig: link.map_or(0, |l| l.1),
+                    start: old.as_ref().map_or(0.5, |o| o.start),
+                    offset: old.as_ref().map_or(0.0, |o| o.offset),
+                    flip: old.as_ref().is_some_and(|o| o.flip),
+                },
+                (None, Some(old)) => old,
+                (None, None) => {
+                    return Err(CmdError::bad_param(
+                        "path",
+                        "a vector layer (`path`) or a `circle` to set the text along",
+                    ));
+                }
+            };
+            if let Some(f) = p.flip {
+                path.flip = f;
+            }
+            if let Some(o) = p.offset {
+                path.offset = o;
+            }
+            match p.start {
+                Some(st) => path.start = st.clamp(0.0, 1.0),
+                None if first || p.circle.is_some() => {
+                    path.start = match (path.closed, path.flip) {
+                        (true, false) => 0.75,
+                        (true, true) => 0.25,
+                        _ => 0.5,
+                    };
+                }
+                None => {}
+            }
+            if first && p.align.is_none() {
+                td.align = TextAlign::Center;
+            }
+            // Turning and stretching do not apply along a path.
+            td.rotation_deg = 0.0;
+            td.stretch_x = 1.0;
+            td.flip_x = false;
+            td.flip_y = false;
+            td.path = Some(path);
+        }
+        if let Some(a) = p.align {
+            td.align = match a {
+                Align::Left => TextAlign::Left,
+                Align::Center => TextAlign::Center,
+                Align::Right => TextAlign::Right,
+            };
+        }
+        let label = if p.release {
+            "Straighten Text"
+        } else {
+            "Fit Text To Path"
+        };
+        let mut cmd = LayerStructureCommand::capture_before(label, &canvas.layer_stack, cw, ch);
+        canvas.layer_stack.active_idx = idx;
+        rasterize_into_layer(canvas, idx, anchor, td);
+        cmd.capture_after(&canvas.layer_stack, cw, ch);
+        canvas.record(Box::new(cmd));
+        canvas.layer_revision = canvas.layer_revision.saturating_add(1);
+        canvas.flatten_full();
+        let layer = canvas
+            .layer_stack
+            .layers
+            .get(idx)
+            .ok_or_else(|| CmdError::internal("type layer"))?;
+        let out = TextAdded {
+            doc,
+            layer: layer.id,
+            bounds: Bounds {
+                x: layer.offset.0,
+                y: layer.offset.1,
+                w: layer.width,
+                h: layer.height,
+            },
+        };
+        s.emit(EngineEvent::Structure { doc });
+        s.notice(label.to_string(), label.to_string());
         Ok(Plan::Done(out))
     }
 }

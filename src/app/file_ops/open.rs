@@ -1529,6 +1529,7 @@ impl App {
                     file_io::FileDialogResult::PickedCardFolder(dir) => {
                         self.card_folder_picked(dir);
                     }
+                    #[cfg(feature = "pro")]
                     file_io::FileDialogResult::PickedPhotoFolder(dir) => {
                         self.shell.photo_folder = Some(dir);
                     }

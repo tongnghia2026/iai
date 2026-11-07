@@ -86,8 +86,9 @@ pub enum FileDialogResult {
     /// The folder of ID card photos for "Xếp căn cước từ thư mục…".
     #[cfg(feature = "pro")]
     PickedCardFolder(PathBuf),
-    /// The folder of the customer's photos a job ("Việc nhanh", the Pro
-    /// pack's "Nhờ AI làm") is about.
+    /// The folder of the customer's photos a job of "Việc nhanh" (Pro) is
+    /// about.
+    #[cfg(feature = "pro")]
     PickedPhotoFolder(PathBuf),
     /// A sponsor's logo chosen to send to the author.
     PickedSponsorLogo(PathBuf),

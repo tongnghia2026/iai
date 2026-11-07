@@ -625,6 +625,53 @@ pub fn text_axes_are_canvas_aligned(rotation_deg: f32) -> bool {
     a <= TRANSFORM_EPS || (180.0 - a) <= TRANSFORM_EPS
 }
 
+/// A type layer set along a path, after the gesture: its path's points
+/// mapped through it (the text's origin with them), its letters scaled by
+/// the gesture's mean scale, and the layer drawn there. The link to the
+/// outline it followed is let go unless that outline moves with it.
+fn path_text_after_gesture(
+    td: &TextData,
+    ls: &LayerOrigState,
+    ts: &TransformState,
+) -> Option<(TextData, Option<(TileMap, u32, u32, (i32, i32))>)> {
+    let tp = td.path.as_ref()?;
+    let forward = transform_forward_homography(ts)?;
+    let map = iai_geom::geometry::Homography {
+        m: mat3_mul(forward, ls.source_to_current),
+    };
+    let delta = rasterize_placed(td).map_or((0, 0), |(_, d)| d);
+    let origin = (
+        (ls.offset.0 - delta.0) as f32,
+        (ls.offset.1 - delta.1) as f32,
+    );
+    let moved = map.apply(origin.0, origin.1);
+    let scale = (ts.scale_x * ts.scale_y).abs().sqrt();
+    let mut next = scaled_text_data(td, scale, scale)?;
+    let both_moved = tp
+        .source
+        .is_some_and(|src| ts.layer_states.iter().any(|o| o.layer_id == src));
+    if let Some(np) = next.path.as_mut() {
+        np.points = tp
+            .points
+            .iter()
+            .map(|q| {
+                let m = map.apply(origin.0 + q[0], origin.1 + q[1]);
+                [m.x - moved.x, m.y - moved.y]
+            })
+            .collect();
+        np.offset = tp.offset * scale;
+        if !both_moved {
+            np.source = None;
+        }
+        // A mirror reverses the path's direction: the letters stay readable.
+        if (ts.scale_x < 0.0) != (ts.scale_y < 0.0) {
+            np.points.reverse();
+        }
+    }
+    let crisp = rasterized_text_layer_at_origin(&next, (moved.x, moved.y));
+    Some((next, crisp))
+}
+
 pub fn transformed_text_data(td: &TextData, ts: &TransformState) -> Option<TextData> {
     if ts.quad.is_some() {
         return None;
@@ -939,7 +986,20 @@ pub fn bake_transform_commit(
         };
         let mut after_layer_type = ls.layer_type.clone();
         let mut crisp_vector_layer = None;
-        if let LayerType::Text(td) = &ls.layer_type {
+        // Text set along a path: the path itself turns, scales and moves,
+        // the letters keep standing on it at their size times the scale.
+        let path_text = match &ls.layer_type {
+            LayerType::Text(td) if td.path.is_some() && ts.quad.is_none() => {
+                path_text_after_gesture(td, ls, &ts)
+            }
+            _ => None,
+        };
+        if let Some((next_td, crisp)) = path_text {
+            after_layer_type = LayerType::Text(next_td);
+            if ls.mask.is_none() {
+                crisp_vector_layer = crisp;
+            }
+        } else if let LayerType::Text(td) = &ls.layer_type {
             match transformed_text_data(td, &ts) {
                 Some(next_td) => {
                     // Masked type keeps the resampled raster (its mask follows

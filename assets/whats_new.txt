@@ -2,6 +2,33 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+07/11/2026
+- Chữ chạy theo đường: chữ bám theo đường đó, sửa hay kéo đường thì chữ tự chạy theo. Chọn lớp chữ bằng công cụ Move sẽ thấy một hình thoi màu cam chỗ chữ đứng; kéo hình thoi để đẩy chữ dọc theo đường.
+- Menu Object có thêm «Hiệu ứng thiết kế» (Gói Pro): phát sáng, đổ bóng, nổi khối, mờ dần, tô chuyển màu, bo góc, dao cắt, lặp thành lưới, chuyển dần giữa hai hình và kẻ bảng, trước đây chỉ AI dùng được.
+- Kẻ bảng: dán thẳng các ô copy từ Excel, hoặc mở file Excel / CSV; gộp được nhiều ô thành một (đường kẻ bên trong ô gộp tự bỏ).
+- «Vẽ lại thành vector»: app mở một tờ A4 mới, dán ảnh gốc bên trái; AI vẽ tới đâu bản vẽ hiện ngay bên phải tới đó, không phải chuyển tab. AI tự soát lại, chỉ ra chỗ chưa giống rồi vẽ sửa, tối đa 4 lượt; số và chữ được máy đọc lại để bắt chỗ gõ sai. Muốn chỉ giữ bản vẽ: menu «Hiệu ứng thiết kế (Pro)» ▸ «Chỉ giữ bản vector».
+- «Hiệu ứng thiết kế» có thêm «Uốn theo khung»: uốn hình hoặc chữ thành vòm, phồng, sóng, cờ bay… Lưu vector được thêm kiểu file EPS cho nhà in (màu CMYK). Sửa lỗi file vector lưu ra bị thiếu chữ.
+- Công cụ Move: bấm vào chỗ trống trên trang hoặc vùng xám thì bỏ chọn hết (không còn khung, bảng Layer không còn dòng nào sáng) cho tới khi bấm vào một hình hay một dòng layer; lúc đó cọ, tẩy, tô màu nhắc «Hãy chọn một layer trước». Chữ phóng to không còn vỡ ô vuông khi nằm giữa các hình vẽ hay dưới vùng phát sáng.
+- Lưu PDF: khung cắt, mờ dần, chuyển màu trong suốt giữ nét vector thay vì thành ảnh. Thêm «Chuyển màu tự do» (bóng mặt cầu, giọt nước) và «Điền lại mẫu» (đổi giá, ngày trên bảng giá đã dựng).
+- Mở PDF của khách lấy được cả ảnh bên trong và tên font của chữ. AI tự tìm các họa tiết lặp lại (cánh hoa, ô lưới) để vẽ một lần rồi nhân. Chữ chạy theo đường xoay / phóng được bằng Ctrl+T.
+
+05/11/2026
+- Nút «AI» trên thanh menu đổi tên thành «Ảnh thẻ Pro». Cửa sổ của nó không kéo lên quá thanh thước được nữa, nên không còn che thanh tab ảnh.
+- Làm ảnh thẻ: ảnh luôn được xoay thẳng theo đường mắt, khung luôn rộng hơn mẫu một chút như app tự chọn; ô tick và thanh kéo của hai việc này đã bỏ cho gọn.
+- Chỉnh chân dung: nhóm «Chi tiết» đổi tên thành «Làm nét» và nằm ngay dưới nhóm «Da». «Cân sáng» của ảnh mới mở bắt đầu ở 40 (nút «Tự động» cũng đặt 40).
+- «Việc nhanh» và «Nhờ AI làm» gộp lại thành một nút «Việc nhanh»: một cửa sổ có hai thẻ ở trên, «Người làm» (iAi tự làm) và «Nhờ AI làm», bấm để chuyển qua lại như cửa sổ «Ảnh thẻ Pro»; thư mục ảnh của khách chọn một lần cho cả hai. «Việc nhanh» nay thuộc Gói Pro.
+- «Thay áo AI» (tên cũ «Thay áo, lấp vai»): AI vẽ lại ảnh với áo mới và đưa về thành một lớp mới tên «AI: Thay áo», nhanh hơn trước; bạn tô mặt nạ trên lớp đó để chỉ giữ phần áo. Để cửa sổ «Ảnh thẻ Pro» mở trong lúc AI làm cũng không sao.
+- «Nhờ AI làm» có thêm việc «Vẽ lại thành vector» (Gói Pro): mở ảnh hoa văn hay logo rồi gửi, AI vẽ lại từng thứ một như người làm: vòng tròn ra vòng tròn liền, ngôi sao ra ngôi sao, mép cong trơn không theo răng cưa của ảnh, mỗi bông lúa, mỗi chi tiết một lớp riêng có tên, chữ thành chữ thật sửa được (chữ chạy theo vòng tròn cũng được). Trong lúc AI vẽ, ô «Nhờ AI làm» hiện danh sách việc và đánh dấu từng phần đã vẽ; bấm Dừng lúc nào cũng được. Xong thì lưu file SVG và PDF vào thư mục iAi_ket_qua cạnh ảnh; ảnh gốc vẫn nguyên ở lớp dưới. Ảnh nhỏ, mờ thì nên phóng to trước rồi mới giao.
+- Vẽ lại thành vector, thêm: hình có viền (búp măng, cánh hoa, vảy, lá viền đậm) được vẽ như dân thiết kế: mỗi mảnh là một hình kín có tô màu và viền riêng, mảnh trước đè mảnh sau, mảnh phía sau được vẽ trọn cả phần bị che, nên đổi màu hay kéo một mảnh không bị lộ lỗ. Hình tròn, vòng, đa giác, ngôi sao, bánh răng được dựng đúng bằng số đo (bánh răng có số răng, lỗ giữa); họa tiết xoay đều quanh tâm thì vẽ một cái rồi nhân ra.
+- Khách đưa file PDF hoặc SVG: AI lấy luôn nét vector có sẵn bên trong (hình, nét, chữ) thay vì vẽ lại. Tờ quảng cáo, bảng giá: AI dựng lại bằng chữ thật sửa được, khung và ảnh cắt từ ảnh gốc. Ngoài SVG và PDF, AI lưu được cả file DXF cho máy cắt decal, khắc laser, CNC.
+- Khi phóng to để sửa hình vẽ: lưới ô điểm ảnh không hiện nữa (chỉ hiện khi làm ảnh thường), và chữ hiện nét căng như hình vẽ thay vì vỡ ô.
+- Đang gõ chữ mà phóng to cũng thấy chữ nét, không vỡ ô.
+- Menu Object có thêm: «Nới / thu viền» (viền trắng quanh hình làm sticker, chữ viền nhiều màu), «Đổi nét thành mảng», «Gộp đường», «Tách rời», «Chia đều khoảng hở». Menu Chữ có «Chỉnh chữ theo đường…» để dời chữ trên vòng, nâng chữ, lật chữ.
+- Lưu SVG giữ nguyên hiệu ứng phát sáng, bóng đổ là vector (trước đây bị đổi thành ảnh).
+- Chữ chạy theo đường cong hoặc vòng tròn như Illustrator, Corel: chọn một lớp chữ và một hình hay đường cong (giữ Ctrl để chọn cả hai), vào menu Chữ ▸ «Đặt chữ theo đường». Chữ vẫn là một lớp chữ, bấm vào sửa chữ, đổi font, cỡ, màu như thường; «Đưa chữ về thẳng» để bỏ ra. Logo AI vẽ lại có chữ vòng tròn cũng thành một lớp chữ như vậy.
+- Hiệu ứng phát sáng mờ dần mịn như thật, ôm theo hình; thêm đổ bóng mềm cho hình vector.
+- Vẽ lại thành vector: đường cong trơn hơn, không còn gợn theo răng cưa của ảnh; hình có ánh sáng thì AI tô chuyển màu theo ảnh và làm hiệu ứng phát sáng (kiểu đèn neon), vẫn là vector nên lưu SVG, PDF giữ nguyên.
+
 04/11/2026
 - Gradient Editor: bảng chọn màu nằm luôn trong cửa sổ, to hơn, không che nút Done nữa. Màu chỉ áp lên hình khi bấm Done (hoặc Enter), nên kéo trong bảng màu không còn lag; đóng bằng dấu × hay Esc là bỏ những gì vừa chỉnh.
 - Chuyển màu trên hình vẽ: điểm gốc là ô vuông tô màu đầu, điểm cuối là chấm tròn tô màu cuối, có mũi tên chỉ chiều màu chạy. Rê chuột vào hai điểm đó thì con trỏ đổi sang hình bốn mũi tên, bấm giữ rồi kéo để dời.

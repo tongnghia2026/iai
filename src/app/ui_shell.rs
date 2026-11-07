@@ -123,12 +123,14 @@ pub struct UiShell {
     /// "Nhờ AI làm": errands for Gemini in Antigravity.
     #[cfg(feature = "pro")]
     pub(in crate::app) errands: crate::app::errands::Errands,
-    /// The folder of the customer's photos chosen, for "Việc nhanh" (and the
-    /// Pro pack's "Nhờ AI làm").
+    /// The folder of the customer's photos chosen, for both sides of
+    /// "Việc nhanh" (Pro).
+    #[cfg(feature = "pro")]
     pub(in crate::app) photo_folder: Option<std::path::PathBuf>,
     /// The "Model AI" window: its rows, and the fetch or install under way.
     pub(in crate::app) models: crate::app::models_ops::ModelsWindow,
     /// "Việc nhanh": jobs iAi does on a folder by itself.
+    #[cfg(feature = "pro")]
     pub(in crate::app) quick: crate::app::quick_tasks::QuickTasks,
     /// «Điền giấy tờ theo mẫu» in "Nhờ AI làm": its templates, the one
     /// picked, each person's ID card photos.

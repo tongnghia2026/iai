@@ -25,6 +25,8 @@ mod print_sheet;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 mod pro;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 mod quick_tasks;
 mod scan_cleanup;
 mod select_ops;
@@ -52,6 +54,7 @@ pub(crate) use print::*;
 pub(crate) use print_sheet::*;
 #[cfg(feature = "pro")]
 pub(crate) use pro::*;
+#[cfg(feature = "pro")]
 pub(crate) use quick_tasks::*;
 pub(crate) use scan_cleanup::*;
 pub(crate) use select_ops::*;
@@ -165,6 +168,9 @@ pub(crate) fn document_side_dialog_pos(
 
 #[allow(deprecated)]
 pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
+    super::design_tools::show(ctx, data, actions);
+    #[cfg(feature = "pro")]
+    super::pro_effects::show(ctx, data, actions);
     if data.dialogs.show_new_dialog {
         new_canvas_dialog(ctx, data, actions);
     }
@@ -267,12 +273,11 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     // The save prompts of a closing app come before the news of a newer one,
     // and before the ask to support its author.
     let closing = data.dialogs.show_exit_dialog || data.dialogs.show_close_dialog || save_failed;
+    // "Việc nhanh" (Pro): one window, by hand on one side and by AI on the
+    // other; open as soon as either side is.
     #[cfg(feature = "pro")]
-    if data.chrome.errand.open && !closing {
-        errand_window(ctx, data, actions);
-    }
-    if data.chrome.quick.open && !closing {
-        quick_window(ctx, data, actions);
+    if (data.chrome.quick.open || data.chrome.errand.open) && !closing {
+        tasks_window(ctx, data, actions);
     }
     if data.chrome.update.show_dialog && !closing {
         update_dialog(ctx, data, actions);

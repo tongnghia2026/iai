@@ -161,7 +161,7 @@ pub fn intersect_overlaps(paths: &[&PathData]) -> Option<PathData> {
 
 /// Flatten a path to closed rings (dropping the duplicated closing point and any
 /// ring with fewer than 3 distinct points). Open contours are closed implicitly.
-fn to_rings(path: &PathData, tol: f32) -> Vec<Ring> {
+pub(crate) fn to_rings(path: &PathData, tol: f32) -> Vec<Ring> {
     let mut rings = Vec::new();
     for poly in flatten_path(path, tol) {
         let mut r = poly;
@@ -194,7 +194,7 @@ fn dedupe_consecutive(r: &mut Ring) {
     *r = out;
 }
 
-fn rings_to_path(rings: Vec<Ring>) -> PathData {
+pub(crate) fn rings_to_path(rings: Vec<Ring>) -> PathData {
     let mut contours = Vec::new();
     for mut r in rings {
         simplify_collinear(&mut r);
@@ -202,6 +202,20 @@ fn rings_to_path(rings: Vec<Ring>) -> PathData {
             continue;
         }
         contours.push(fit_ring_to_contour(r));
+    }
+    PathData::new(contours, FillRule::EvenOdd)
+}
+
+/// Like [`rings_to_path`] but kept as straight segments: no re-fit, so
+/// sharp corners on slanted edges cannot bulge (an extrusion's sides).
+pub(crate) fn rings_to_sharp_path(rings: Vec<Ring>) -> PathData {
+    let mut contours = Vec::new();
+    for mut r in rings {
+        simplify_collinear(&mut r);
+        if r.len() < 3 || signed_area(&r).abs() < 1e-3 {
+            continue;
+        }
+        contours.push(Contour::new(r.into_iter().map(Node::sharp).collect(), true));
     }
     PathData::new(contours, FillRule::EvenOdd)
 }

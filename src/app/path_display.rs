@@ -98,41 +98,67 @@ impl App {
             return None;
         }
         let scale = crate::core::vector::display::zoom_bucket(self.edit.view.zoom)?;
-        let visible = self.visible_canvas_rect()?;
-        let allow_active_gpu_vector = self.active_vector_gpu_idle();
+        // Without a window (the tests) the whole page is in view.
+        let visible = match self.visible_canvas_rect() {
+            Some(v) => v,
+            None if cfg!(test) => {
+                let c = &self.docs.active().canvas;
+                (0, 0, c.width, c.height)
+            }
+            None => return None,
+        };
         let doc = self.docs.active();
         let stack = &doc.canvas.layer_stack;
         let mut objects = Vec::new();
+        let mut text_seen = Vec::new();
         // Only the uninterrupted top run can be overlaid without changing
         // z-order relative to raster/text/adjustment content.
         for (index, layer) in stack.layers.iter().enumerate().rev() {
             if !stack.is_effectively_visible(index) || layer.is_group() {
                 continue;
             }
-            // Ask the compositor's current-frame policy directly. Using the ids
-            // drawn by the previous frame is racy: this overlay suppresses its
-            // raster twins, which can make that next frame's id set temporarily
-            // empty and enqueue the entire Repeat stack for a fresh CPU bake.
-            if self.win.gpu.as_ref().is_some_and(|gpu| {
-                gpu.compositor.will_draw_vector_layer_on_gpu(
-                    layer,
-                    stack,
-                    index,
-                    stack.active_idx,
-                    allow_active_gpu_vector,
-                )
-            }) {
+            // A layer the compositor draws on the GPU is taken in too (and
+            // so left out of the composite like the others): stopping at it
+            // left every text layer beneath it in the document's coarse
+            // pixels when zoomed in (07/11: lettering on a redraw sheet,
+            // between the drawn shapes). A very long run stops early.
+            if objects.len() >= MAX_DISPLAY_OBJECTS {
                 break;
             }
-            let object = match &layer.layer_type {
-                LayerType::Vector(VectorGeometry::Path(object)) => object.clone(),
+            let layer_objects = match &layer.layer_type {
+                LayerType::Vector(VectorGeometry::Path(object)) => vec![object.clone()],
                 LayerType::Vector(VectorGeometry::Primitive(shape)) => {
-                    shape_display_object(shape, layer.offset)
+                    vec![shape_display_object(shape, layer.offset)]
+                }
+                // Text is vector too: drawn from its glyph outlines it stays
+                // sharp at any zoom instead of showing the document raster's
+                // square pixels. Not while it is being typed into — the live
+                // edit is previewed through the raster.
+                LayerType::Text(text) => {
+                    if self
+                        .edit
+                        .text_edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.layer_id == layer.id)
+                    {
+                        break;
+                    }
+                    text_seen.push(layer.id);
+                    text_display_objects(
+                        &mut self.shell.ui_data_cache.text_displays,
+                        layer.id,
+                        layer.offset,
+                        text,
+                    )
                 }
                 _ => break,
             };
             let mut parent_id = layer.parent_id;
             let mut ancestors_are_plain = true;
+            // See-through layers and folders are drawn see-through: their
+            // opacity goes into the shapes' own (it used to stop the run,
+            // and a glow over lettering left the lettering coarse).
+            let mut see_through = layer.opacity.clamp(0.0, 1.0);
             while let Some(id) = parent_id {
                 let Some(parent) = stack.layers.iter().find(|candidate| candidate.id == id) else {
                     ancestors_are_plain = false;
@@ -140,28 +166,38 @@ impl App {
                 };
                 if !parent.visible
                     || parent.mask.is_some()
-                    || (parent.opacity - 1.0).abs() > 1e-3
                     || parent.blend_mode != BlendMode::Normal
                 {
                     ancestors_are_plain = false;
                     break;
                 }
+                see_through *= parent.opacity.clamp(0.0, 1.0);
                 parent_id = parent.parent_id;
             }
-            if layer.mask.is_some()
-                || (layer.opacity - 1.0).abs() > 1e-3
-                || layer.blend_mode != BlendMode::Normal
-                || (object.style.opacity - 1.0).abs() > 1e-3
-                || !ancestors_are_plain
+            if layer.mask.is_some() || layer.blend_mode != BlendMode::Normal || !ancestors_are_plain
             {
                 break;
             }
-            objects.push(PathDisplayObjectKey {
-                layer_id: layer.id,
-                layer_offset: layer.offset,
-                object,
-            });
+            let mut layer_objects = layer_objects;
+            if see_through < 1.0 - 1e-3 {
+                for object in &mut layer_objects {
+                    object.style.opacity *= see_through;
+                }
+            }
+            // Pushed back to front reversed below, so a multi-colour text's
+            // groups go in reverse here to come out in drawing order.
+            for object in layer_objects.into_iter().rev() {
+                objects.push(PathDisplayObjectKey {
+                    layer_id: layer.id,
+                    layer_offset: layer.offset,
+                    object,
+                });
+            }
         }
+        self.shell
+            .ui_data_cache
+            .text_displays
+            .retain(|entry| text_seen.contains(&entry.layer_id));
         objects.reverse();
         if objects.is_empty() {
             return None;
@@ -396,6 +432,9 @@ impl App {
     }
 }
 
+/// The most objects drawn sharp over the page at once.
+const MAX_DISPLAY_OBJECTS: usize = 400;
+
 fn combine_displays(
     entries: &[&PathDisplayCacheEntry],
     scale: u8,
@@ -444,6 +483,31 @@ fn combine_displays(
         raster_w,
         raster_h,
     })
+}
+
+/// The glyph outlines of a text layer for the sharp display overlay. Building
+/// them shapes the whole text, so they are kept per layer and rebuilt only when
+/// the text or its position changes — never on every frame.
+fn text_display_objects(
+    cache: &mut Vec<super::state::TextDisplayEntry>,
+    layer_id: u32,
+    layer_offset: (i32, i32),
+    text: &crate::core::text::TextData,
+) -> Vec<VectorObjectData> {
+    if let Some(entry) = cache.iter().find(|entry| {
+        entry.layer_id == layer_id && entry.layer_offset == layer_offset && entry.text == *text
+    }) {
+        return entry.objects.clone();
+    }
+    let objects = crate::core::text::text_vector_objects(text, layer_offset);
+    cache.retain(|entry| entry.layer_id != layer_id);
+    cache.push(super::state::TextDisplayEntry {
+        layer_id,
+        layer_offset,
+        text: text.clone(),
+        objects: objects.clone(),
+    });
+    objects
 }
 
 fn live_move_uses_composite_preview(tool: ToolId, painting: bool) -> bool {
@@ -573,6 +637,82 @@ mod tests {
             app.shell.ui_data_cache.path_displays[0].key.objects[0].layer_id,
             active_id + 99
         );
+    }
+
+    #[test]
+    fn a_text_layer_is_baked_sharp_when_zoomed_in() {
+        let mut app = App::new();
+        let text = crate::core::text::TextData {
+            content: "Hi".into(),
+            font_px: 40.0,
+            ..Default::default()
+        };
+        let id = {
+            let canvas = &mut app.docs.documents[0].canvas;
+            let (w, h) = (canvas.width, canvas.height);
+            let idx = canvas.layer_stack.add_layer(w, h);
+            let layer = &mut canvas.layer_stack.layers[idx];
+            layer.layer_type = crate::core::layer::LayerType::Text(text);
+            layer.offset = (20, 20);
+            layer.id
+        };
+        for zoom in [3.0f32, 5.0, 12.0] {
+            app.edit.view.zoom = zoom;
+            app.jobs.display_bake = None;
+            let _ = app.active_vector_display_inner();
+            let job = app.jobs.display_bake.as_ref().expect("a bake for the text");
+            assert!(
+                job.keys
+                    .iter()
+                    .any(|k| k.objects.iter().any(|o| o.layer_id == id)),
+                "zoom {zoom}"
+            );
+            let key = job.keys[0].clone();
+            let objects: Vec<_> = key.objects.iter().map(|o| o.object.clone()).collect();
+            let c = key.clip;
+            let out = crate::core::vector::display::rasterize_stack_for_display_clipped(
+                &objects,
+                key.scale,
+                crate::core::geometry::Rect::new(c.0 as f32, c.1 as f32, c.2 as f32, c.3 as f32),
+            );
+            assert!(out.is_some(), "zoom {zoom} scale {} bakes", key.scale);
+        }
+    }
+
+    #[test]
+    fn text_outlines_are_kept_until_the_text_changes() {
+        let mut cache = Vec::new();
+        let mut text = crate::core::text::TextData {
+            content: "Hi".into(),
+            ..Default::default()
+        };
+        let first = text_display_objects(&mut cache, 3, (10, 20), &text);
+        assert!(!first.is_empty(), "text gives outlines");
+        for family in [
+            crate::core::text::TextFontFamily::System("Times New Roman".into()),
+            crate::core::text::TextFontFamily::SystemFace {
+                family: "Arial".into(),
+                style: "Bold".into(),
+            },
+        ] {
+            let t = crate::core::text::TextData {
+                content: "Hi".into(),
+                font_family: family.clone(),
+                ..Default::default()
+            };
+            assert!(
+                !crate::core::text::text_vector_objects(&t, (0, 0)).is_empty(),
+                "{family:?} gives outlines"
+            );
+        }
+        assert_eq!(cache.len(), 1);
+        let again = text_display_objects(&mut cache, 3, (10, 20), &text);
+        assert!(again == first);
+        assert_eq!(cache.len(), 1);
+        text.content = "Hello".into();
+        let changed = text_display_objects(&mut cache, 3, (10, 20), &text);
+        assert!(changed != first);
+        assert_eq!(cache.len(), 1, "the old outlines are replaced, not kept");
     }
 
     #[test]

@@ -6,9 +6,11 @@
 #![forbid(unsafe_code)]
 
 pub mod canvas;
+pub mod design;
 pub mod document;
 pub mod free_transform;
 pub mod powerclip;
 pub mod print;
 pub mod raw_spill;
 pub mod shaping;
+pub mod text_follow;

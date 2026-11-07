@@ -96,6 +96,8 @@ pub struct EditorInteraction {
     /// True while the rotation-pivot marker itself is being dragged (Move tool),
     /// as opposed to a scale/rotate handle.
     pub(in crate::app) path_pivot_dragging: bool,
+    /// Text being slid along its path by its handle (Move tool).
+    pub(in crate::app) text_path_drag: Option<crate::app::text_path_drag::TextPathDrag>,
     /// While dragging the pivot, the label of the box anchor it has snapped to
     /// ("Center" / "Corner" / "Middle"), shown next to the marker; `None` when it
     /// sits free between anchors.

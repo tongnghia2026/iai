@@ -871,6 +871,9 @@ fn scale_alt(alt: [f32; 4], tint: f32) -> [f32; 4] {
 #[derive(Clone)]
 pub struct PdfVectorObject {
     pub path: iai_doc::vector::path::PathData,
+    /// Drawn only inside every one of these outlines (canvas space): a
+    /// PowerClip frame, a band of a fade.
+    pub clips: Vec<iai_doc::vector::path::PathData>,
     pub fill: Option<PdfPaintColor>,
     /// Gradient transform maps unit gradient space directly into canvas pixels.
     /// Keeping it here lets the PDF writer paint axial/radial shadings through
@@ -1230,6 +1233,121 @@ fn arrowheads_as_pdf_path(
     })
 }
 
+/// One band of a see-through gradient for the PDF: its outline (canvas
+/// space), its solid colour and its alpha.
+struct FadeBand {
+    clip: iai_doc::vector::path::PathData,
+    color: iai_doc::vector::color::ColorValue,
+    alpha: f32,
+}
+
+/// How many bands a see-through gradient is cut into.
+const FADE_BANDS: usize = 64;
+
+/// The colour and alpha of `gradient` at `t` (0 to 1), straight.
+fn gradient_at(gradient: &iai_doc::vector::style::Gradient, t: f32) -> ([f32; 3], f32) {
+    let stops = gradient.active_stops();
+    let rgba = |c: iai_doc::vector::color::ColorValue| {
+        let [r, g, b, _] = c.to_rgba8();
+        (
+            [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0],
+            c.alpha(),
+        )
+    };
+    let Some(first) = stops.first() else {
+        return ([0.0; 3], 0.0);
+    };
+    if t <= first.offset {
+        return rgba(first.color);
+    }
+    for pair in stops.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if t <= b.offset {
+            let k = ((t - a.offset) / (b.offset - a.offset).max(1e-6)).clamp(0.0, 1.0);
+            let (ca, aa) = rgba(a.color);
+            let (cb, ab) = rgba(b.color);
+            return (
+                [
+                    ca[0] + (cb[0] - ca[0]) * k,
+                    ca[1] + (cb[1] - ca[1]) * k,
+                    ca[2] + (cb[2] - ca[2]) * k,
+                ],
+                aa + (ab - aa) * k,
+            );
+        }
+    }
+    stops.last().map_or(([0.0; 3], 0.0), |s| rgba(s.color))
+}
+
+/// The bands of a see-through gradient whose unit space `unit` maps onto the
+/// canvas: strips across a linear one, rings of a radial one, the first and
+/// last reaching far out as the gradient's colour does past its ends.
+fn fade_bands(
+    gradient: &iai_doc::vector::style::Gradient,
+    unit: iai_geom::vector::affine::AffineTransform,
+) -> Vec<FadeBand> {
+    use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
+    use iai_doc::vector::style::GradientKind;
+    use iai_geom::geometry::Point;
+    const FAR: f32 = 1.0e4;
+    let to_canvas = |x: f32, y: f32| {
+        let p = unit.apply_point(Point::new(x, y));
+        Node::sharp(p)
+    };
+    let circle = |r: f32, backwards: bool| {
+        let n = 72;
+        let mut nodes: Vec<Node> = (0..n)
+            .map(|i| {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                to_canvas(r * a.cos(), r * a.sin())
+            })
+            .collect();
+        if backwards {
+            nodes.reverse();
+        }
+        Contour::new(nodes, true)
+    };
+    (0..FADE_BANDS)
+        .map(|k| {
+            let t0 = k as f32 / FADE_BANDS as f32;
+            let t1 = (k + 1) as f32 / FADE_BANDS as f32;
+            let (rgb, alpha) = gradient_at(gradient, (t0 + t1) * 0.5);
+            let (lo, hi) = (
+                if k == 0 { -FAR } else { t0 },
+                if k + 1 == FADE_BANDS { FAR } else { t1 },
+            );
+            let contours = match gradient.kind {
+                GradientKind::Linear => vec![Contour::new(
+                    vec![
+                        to_canvas(lo, -FAR),
+                        to_canvas(hi, -FAR),
+                        to_canvas(hi, FAR),
+                        to_canvas(lo, FAR),
+                    ],
+                    true,
+                )],
+                GradientKind::Radial => {
+                    let mut c = vec![circle(hi.max(0.0), false)];
+                    if k > 0 {
+                        c.push(circle(t0, true));
+                    }
+                    c
+                }
+            };
+            FadeBand {
+                clip: PathData::new(contours, FillRule::NonZero),
+                color: iai_doc::vector::color::ColorValue::Rgb {
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                    a: 1.0,
+                },
+                alpha,
+            }
+        })
+        .collect()
+}
+
 pub fn collect_pdf_vectors(canvas: &crate::canvas::Canvas) -> PdfVectorSelection {
     collect_pdf_vectors_impl(canvas, false)
 }
@@ -1351,13 +1469,23 @@ fn collect_pdf_vectors_impl(
             && (cmyk_conv.is_none() || layer.parent_id.is_none())
             && matches!(layer.layer_type, LayerType::Raster)
             && layer.mask.is_none()
+            && layer.clip_parent_id.is_none()
             && layer.blend_mode == BlendMode::Normal
             && ancestors_are_plain(i)
         {
             pending.push(layer.id);
             continue;
         }
-        if layer.mask.is_some()
+        // PowerClip content is cut by its frame: written as a clip path when
+        // the frame is a vector shape (its managed mask is that cut).
+        let clip_path = layer
+            .clip_parent_id
+            .and_then(|id| layers.iter().find(|l| l.id == id))
+            .and_then(crate::shaping::layer_canvas_path)
+            .map(|(path, _)| path);
+        let cut_by_frame = layer.clip_parent_id.is_some() && clip_path.is_some();
+        if (layer.mask.is_some() && !cut_by_frame)
+            || (layer.clip_parent_id.is_some() && !cut_by_frame)
             || (layer.opacity - 1.0).abs() > 1e-3
             || layer.blend_mode != BlendMode::Normal
             || !ancestors_are_plain(i)
@@ -1413,6 +1541,7 @@ fn collect_pdf_vectors_impl(
                     break;
                 }
                 objects.push(PdfVectorObject {
+                    clips: clip_path.iter().cloned().collect(),
                     path: object.path_in_layer_space(),
                     fill,
                     fill_gradient: None,
@@ -1465,8 +1594,77 @@ fn collect_pdf_vectors_impl(
         // raster base.
         let translucent_gradient_fill = matches!(obj.style.fill, Paint::Gradient(g)
             if g.active_stops().iter().any(|s| s.color.alpha() < 1.0 - 1e-3));
+        // A see-through gradient (a fade) goes as thin bands, each a solid
+        // colour at its own constant alpha cut by a clip path: the PDF stays
+        // vectors (a soft mask is not written yet).
         if translucent_gradient_fill {
-            break;
+            let Paint::Gradient(gradient) = obj.style.fill else {
+                break;
+            };
+            if obj.brush.is_some() {
+                break;
+            }
+            close_band(&mut pending, &mut bands, objects.len());
+            let path = obj.path_in_layer_space();
+            let opacity = obj.style.opacity.clamp(0.0, 1.0);
+            let half = obj.style.effective_stroke_width() * 0.5;
+            // Pushed top down: the outline first, so it ends above the fill.
+            if obj.style.stroke.is_visible() && half > 0.0 {
+                let Some(stroke) = paint_color(obj.style.stroke) else {
+                    break;
+                };
+                objects.push(PdfVectorObject {
+                    clips: clip_path.iter().cloned().collect(),
+                    path: path.clone(),
+                    fill: None,
+                    fill_gradient: None,
+                    stroke: Some(stroke),
+                    stroke_width_px: obj.style.effective_stroke_width(),
+                    stroke_cap: obj.style.stroke_style.cap,
+                    stroke_join: obj.style.stroke_style.join,
+                    stroke_miter_limit: obj.style.stroke_style.miter_limit,
+                    stroke_dash: obj.style.stroke_style.dash.as_slice().to_vec(),
+                    stroke_dash_offset: obj.style.stroke_style.dash.offset,
+                    even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+                    fill_overprint: false,
+                    stroke_overprint: obj.style.stroke_overprint,
+                    fill_alpha: 1.0,
+                    stroke_alpha: opacity
+                        * match obj.style.stroke {
+                            Paint::Solid(c) => c.alpha(),
+                            _ => 1.0,
+                        },
+                });
+            }
+            let unit = obj.transform.then(&gradient.transform);
+            for band in fade_bands(&gradient, unit) {
+                if band.alpha * opacity < 1.0 / 512.0 {
+                    continue;
+                }
+                let Some(fill) = paint_color(Paint::Solid(band.color)) else {
+                    continue;
+                };
+                objects.push(PdfVectorObject {
+                    clips: clip_path.iter().cloned().chain([band.clip]).collect(),
+                    path: path.clone(),
+                    fill: Some(fill),
+                    fill_gradient: None,
+                    stroke: None,
+                    stroke_width_px: 0.0,
+                    stroke_cap: obj.style.stroke_style.cap,
+                    stroke_join: obj.style.stroke_style.join,
+                    stroke_miter_limit: obj.style.stroke_style.miter_limit,
+                    stroke_dash: Vec::new(),
+                    stroke_dash_offset: 0.0,
+                    even_odd: obj.path.fill_rule == FillRule::EvenOdd,
+                    fill_overprint: obj.style.fill_overprint,
+                    stroke_overprint: false,
+                    fill_alpha: band.alpha * opacity,
+                    stroke_alpha: 1.0,
+                });
+            }
+            promoted_layer_ids.push(layer.id);
+            continue;
         }
         // Effective constant alphas (object opacity × paint alpha) for the ExtGState.
         let obj_opacity = obj.style.opacity.clamp(0.0, 1.0);
@@ -1541,6 +1739,7 @@ fn collect_pdf_vectors_impl(
         };
         close_band(&mut pending, &mut bands, objects.len());
         objects.push(PdfVectorObject {
+            clips: clip_path.iter().cloned().collect(),
             path: emitted_path,
             fill,
             fill_gradient,
@@ -1559,6 +1758,7 @@ fn collect_pdf_vectors_impl(
         });
         if let (Some(path), Some(fill)) = (arrow_path, stroke) {
             objects.push(PdfVectorObject {
+                clips: clip_path.iter().cloned().collect(),
                 path,
                 fill: Some(fill),
                 fill_gradient: None,
@@ -1647,6 +1847,37 @@ pub fn layer_vector_objects_srgb(
     canvas: &crate::canvas::Canvas,
     index: usize,
 ) -> Option<Vec<PdfVectorObject>> {
+    // PowerClip content is cut by its frame (see `clipped_layer_vectors`).
+    if canvas
+        .layer_stack
+        .layers
+        .get(index)?
+        .clip_parent_id
+        .is_some()
+    {
+        return None;
+    }
+    vector_objects_srgb(canvas, index)
+}
+
+/// A PowerClip content layer's vectors, uncut, and its frame's outline in
+/// canvas space: for writers that cut with a clip path (SVG). `None` when
+/// the layer is not clipped or either is not plain vectors.
+pub fn clipped_layer_vectors(
+    canvas: &crate::canvas::Canvas,
+    index: usize,
+) -> Option<(Vec<PdfVectorObject>, iai_doc::vector::path::PathData)> {
+    let layers = &canvas.layer_stack.layers;
+    let frame_id = layers.get(index)?.clip_parent_id?;
+    let frame = layers.iter().find(|l| l.id == frame_id)?;
+    let (path, _) = crate::shaping::layer_canvas_path(frame)?;
+    Some((vector_objects_srgb(canvas, index)?, path))
+}
+
+fn vector_objects_srgb(
+    canvas: &crate::canvas::Canvas,
+    index: usize,
+) -> Option<Vec<PdfVectorObject>> {
     use iai_doc::layer::{BlendMode, LayerType};
     use iai_doc::vector::path::FillRule;
     use iai_doc::vector::style::Paint;
@@ -1656,7 +1887,9 @@ pub fn layer_vector_objects_srgb(
     if layer.is_group() || !canvas.layer_stack.is_effectively_visible(index) {
         return None;
     }
-    if layer.mask.is_some()
+    // A PowerClip content layer's mask is its managed clip, written as a
+    // clip path instead.
+    if (layer.mask.is_some() && layer.clip_parent_id.is_none())
         || (layer.opacity - 1.0).abs() > 1e-3
         || layer.blend_mode != BlendMode::Normal
         || !ancestors_are_plain_at(layers, index)
@@ -1676,14 +1909,13 @@ pub fn layer_vector_objects_srgb(
         }
         let mut out = Vec::new();
         for object in text_objects {
-            if (object.style.opacity - 1.0).abs() > 1e-3 {
-                return None;
-            }
             let color = match object.style.fill {
-                Paint::Solid(c) if c.alpha() >= 1.0 - 1e-3 => c,
+                Paint::Solid(c) => c,
                 _ => return None,
             };
+            let alpha = object.style.opacity.clamp(0.0, 1.0) * color.alpha();
             out.push(PdfVectorObject {
+                clips: Vec::new(),
                 path: object.path_in_layer_space(),
                 fill: Some(rgb(color)),
                 fill_gradient: None,
@@ -1697,7 +1929,7 @@ pub fn layer_vector_objects_srgb(
                 even_odd: false,
                 fill_overprint: false,
                 stroke_overprint: false,
-                fill_alpha: 1.0,
+                fill_alpha: alpha,
                 stroke_alpha: 1.0,
             });
         }
@@ -1714,25 +1946,23 @@ pub fn layer_vector_objects_srgb(
         }
         _ => return None,
     };
-    if (obj.style.opacity - 1.0).abs() > 1e-3 || matches!(obj.style.stroke, Paint::Gradient(_)) {
+    if matches!(obj.style.stroke, Paint::Gradient(_)) {
         return None;
     }
-    let fill_is_opaque = match obj.style.fill {
-        Paint::None => true,
-        Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
-        Paint::Gradient(g) => g
-            .active_stops()
-            .iter()
-            .all(|stop| stop.color.alpha() >= 1.0 - 1e-3),
-    };
-    let stroke_is_opaque = match obj.style.stroke {
-        Paint::None => true,
-        Paint::Solid(c) => c.alpha() >= 1.0 - 1e-3,
-        Paint::Gradient(_) => false,
-    };
-    if !fill_is_opaque || !stroke_is_opaque {
-        return None;
-    }
+    // See-through objects stay vectors: their alpha goes out as the
+    // writer's fill / stroke opacity (a gradient's own stop alphas ride in
+    // its stops).
+    let opacity = obj.style.opacity.clamp(0.0, 1.0);
+    let fill_alpha = opacity
+        * match obj.style.fill {
+            Paint::Solid(c) => c.alpha(),
+            _ => 1.0,
+        };
+    let stroke_alpha = opacity
+        * match obj.style.stroke {
+            Paint::Solid(c) => c.alpha(),
+            _ => 1.0,
+        };
     let fill = match obj.style.fill {
         Paint::Solid(c) => Some(rgb(c)),
         Paint::None | Paint::Gradient(_) => None,
@@ -1773,6 +2003,7 @@ pub fn layer_vector_objects_srgb(
         None
     };
     let mut out = vec![PdfVectorObject {
+        clips: Vec::new(),
         path: emitted_path,
         fill,
         fill_gradient,
@@ -1786,11 +2017,12 @@ pub fn layer_vector_objects_srgb(
         even_odd: obj.path.fill_rule == FillRule::EvenOdd,
         fill_overprint: false,
         stroke_overprint: false,
-        fill_alpha: 1.0,
-        stroke_alpha: 1.0,
+        fill_alpha,
+        stroke_alpha,
     }];
     if let (Some(path), Some(fill)) = (arrow_path, stroke) {
         out.push(PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(fill),
             fill_gradient: None,
@@ -1804,7 +2036,7 @@ pub fn layer_vector_objects_srgb(
             even_odd: false,
             fill_overprint: false,
             stroke_overprint: false,
-            fill_alpha: 1.0,
+            fill_alpha: stroke_alpha,
             stroke_alpha: 1.0,
         });
     }
@@ -2558,6 +2790,12 @@ fn append_vector_content_among(
             continue;
         }
         let gs_name = object_gs_name(o, &gs);
+        // Cut by its frame: everything of the object inside a clip path.
+        for clip in &o.clips {
+            out.push_str("q\n");
+            append_pdf_path(out, clip, mx, my);
+            out.push_str("W n\n");
+        }
         if let Some(gradient) = o.fill_gradient {
             out.push_str("q\n");
             // A partial object opacity applies to the shading fill too.
@@ -2661,6 +2899,9 @@ fn append_vector_content_among(
             };
             out.push_str(op);
             out.push_str("\nQ\n");
+        }
+        for _ in &o.clips {
+            out.push_str("Q\n");
         }
     }
     pictures_up_to(out, usize::MAX);
@@ -3343,6 +3584,7 @@ mod tests {
             FillRule::NonZero,
         );
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(PdfPaintColor::Rgb([0.0, 0.0, 1.0])),
             fill_gradient: None,
@@ -3411,6 +3653,7 @@ mod tests {
             FillRule::NonZero,
         );
         PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(PdfPaintColor::Spot {
                 name: SpotName::new(name),
@@ -3505,6 +3748,7 @@ mod tests {
             FillRule::NonZero,
         );
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0])),
             fill_gradient: None,
@@ -3543,6 +3787,7 @@ mod tests {
             FillRule::NonZero,
         );
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: None,
             fill_gradient: None,
@@ -4282,6 +4527,7 @@ mod tests {
             FillRule::NonZero,
         );
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(PdfPaintColor::Rgb([1.0, 0.0, 0.0])),
             fill_gradient: None,
@@ -4341,6 +4587,7 @@ mod tests {
             FillRule::NonZero,
         );
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path,
             fill: Some(PdfPaintColor::Cmyk([0.0, 1.0, 1.0, 0.0])),
             fill_gradient: None,
@@ -4912,6 +5159,7 @@ mod tests {
             )
         };
         let base = PdfVectorObject {
+            clips: Vec::new(),
             path: tri(),
             fill: Some(PdfPaintColor::Cmyk([0.0, 0.0, 0.0, 1.0])),
             fill_gradient: None,
@@ -5247,6 +5495,7 @@ mod tests {
     #[test]
     fn half_tint_spot_paints_at_reduced_coverage() {
         let obj = PdfVectorObject {
+            clips: Vec::new(),
             path: iai_doc::vector::path::PathData::new(
                 vec![iai_doc::vector::path::Contour::new(
                     vec![

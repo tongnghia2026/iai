@@ -191,8 +191,106 @@ fn rasterize_for_display_inner(
     if scale <= 1 {
         return None;
     }
+    rasterize_scaled(object, scale as f32, clip)
+}
+
+/// The vector objects (back to front) drawn at `factor` screen pixels per
+/// canvas pixel, any factor (below 1 when zoomed out), only within `clip`
+/// (canvas coordinates, which may lie off the page). Offsets and sizes are
+/// scaled, as for the display rasters.
+pub fn rasterize_stack_scaled_clipped_cancellable(
+    objects: &[VectorObjectData],
+    factor: f32,
+    clip: iai_geom::geometry::Rect,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Option<PathRaster> {
+    use std::sync::atomic::Ordering;
+    if !(factor.is_finite() && factor > 0.0) {
+        return None;
+    }
+    let mut rasters = Vec::new();
+    for object in objects {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(r) = rasterize_scaled(object, factor, Some(clip)) {
+            rasters.push(r);
+        }
+    }
+    compose_rasters(rasters, cancelled)
+}
+
+/// Lay rasters over each other, the first at the back.
+fn compose_rasters(
+    rasters: Vec<PathRaster>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Option<PathRaster> {
+    use std::sync::atomic::Ordering;
+    let first = rasters.first()?;
+    let (mut x0, mut y0) = first.offset;
+    let mut x1 = x0.saturating_add(first.width as i32);
+    let mut y1 = y0.saturating_add(first.height as i32);
+    for raster in &rasters[1..] {
+        x0 = x0.min(raster.offset.0);
+        y0 = y0.min(raster.offset.1);
+        x1 = x1.max(raster.offset.0.saturating_add(raster.width as i32));
+        y1 = y1.max(raster.offset.1.saturating_add(raster.height as i32));
+    }
+    let width = x1.saturating_sub(x0) as u32;
+    let height = y1.saturating_sub(y0) as u32;
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    if pixels > 64_000_000 {
+        return None;
+    }
+    let mut rgba = vec![0u8; pixels.checked_mul(4)?];
+    for raster in rasters {
+        let dx = raster.offset.0.saturating_sub(x0) as usize;
+        let dy = raster.offset.1.saturating_sub(y0) as usize;
+        for row in 0..raster.height as usize {
+            if cancelled.load(Ordering::Acquire) {
+                return None;
+            }
+            for col in 0..raster.width as usize {
+                let src_index = (row * raster.width as usize + col) * 4;
+                let dst_index = ((dy + row) * width as usize + dx + col) * 4;
+                let (Some(src), Some(_)) = (
+                    raster.rgba.get(src_index..src_index + 4),
+                    rgba.get(dst_index..dst_index + 4),
+                ) else {
+                    continue;
+                };
+                let sa = src[3] as f32 / 255.0;
+                if sa <= 0.0 {
+                    continue;
+                }
+                let src = [src[0], src[1], src[2]];
+                let dst = &mut rgba[dst_index..dst_index + 4];
+                let da = dst[3] as f32 / 255.0;
+                let out_a = sa + da * (1.0 - sa);
+                for channel in 0..3 {
+                    let premultiplied =
+                        src[channel] as f32 * sa + dst[channel] as f32 * da * (1.0 - sa);
+                    dst[channel] =
+                        (premultiplied / out_a.max(1e-6)).round().clamp(0.0, 255.0) as u8;
+                }
+                dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Some(PathRaster {
+        rgba,
+        width,
+        height,
+        offset: (x0, y0),
+    })
+}
+
+fn rasterize_scaled(
+    object: &VectorObjectData,
+    factor: f32,
+    clip: Option<iai_geom::geometry::Rect>,
+) -> Option<PathRaster> {
     let mut scaled = object.clone();
-    let factor = scale as f32;
     scaled.transform = AffineTransform::scale(factor, factor).then(&object.transform);
     // Stroke width is expressed in layer units, so it must follow the display
     // scale just like the transformed geometry.

@@ -46,6 +46,7 @@ impl App {
                 // frame edit committed as structure) shows the correct clip. Cheap
                 // no-op when nothing is clipped or unchanged (fingerprint-gated).
                 self.docs.active_mut().canvas.refresh_clip_masks();
+                iai_canvas::text_follow::follow_text_paths(&mut self.docs.active_mut().canvas);
                 self.docs.active_mut().canvas.layer_revision += 1;
                 self.docs.active_mut().canvas.flatten_full();
                 // Canvas-size bookkeeping is centralised HERE: crop/resize/

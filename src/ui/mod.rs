@@ -13,6 +13,7 @@ pub mod ai_progress;
 pub(crate) mod ai_window;
 pub mod artboard_bar;
 pub mod color_picker;
+pub mod design_tools;
 pub mod develop;
 pub mod dialogs;
 pub mod document_mode;
@@ -20,6 +21,9 @@ pub mod intent;
 pub mod library;
 pub mod menubar;
 pub mod panels;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
+pub mod pro_effects;
 pub mod refine_select;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
@@ -68,6 +72,21 @@ fn canvas_path_overlay_layer() -> egui::LayerId {
         CANVAS_TOOL_OVERLAY_ORDER,
         egui::Id::new("canvas_path_overlay"),
     )
+}
+
+/// How thick the rulers are: none unless they are shown on a canvas.
+fn ruler_size(data: &UiData) -> f32 {
+    if data.chrome.show_rulers && data.doc.kind == crate::core::document::DocumentKind::Canvas {
+        20.0
+    } else {
+        0.0
+    }
+}
+
+/// Where the canvas begins: below the menu row, the options bar, the tabs
+/// and the ruler along the top.
+pub(crate) fn work_area_top(data: &UiData) -> f32 {
+    28.0 + 26.0 + 32.0 + ruler_size(data)
 }
 
 pub(crate) fn document_side_dialog_pos(
@@ -436,6 +455,16 @@ fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
     td.rotation_deg.to_bits().hash(&mut h);
     td.flip_x.hash(&mut h);
     td.flip_y.hash(&mut h);
+    if let Some(p) = &td.path {
+        for q in &p.points {
+            q[0].to_bits().hash(&mut h);
+            q[1].to_bits().hash(&mut h);
+        }
+        p.closed.hash(&mut h);
+        p.start.to_bits().hash(&mut h);
+        p.offset.to_bits().hash(&mut h);
+        p.flip.hash(&mut h);
+    }
     for gs in &td.glyph_styles {
         gs.color.hash(&mut h);
         gs.font_px.to_bits().hash(&mut h);
@@ -450,10 +479,41 @@ fn text_preview_hash(td: &crate::core::text::TextData) -> u64 {
 fn text_preview_texture(
     ctx: &egui::Context,
     td: &crate::core::text::TextData,
+    zoom: f32,
 ) -> Option<(egui::TextureHandle, u32, u32)> {
+    // Drawn as large as the zoom shows it (the next power of two, up to 16x,
+    // within some 40 megapixels), so the letters stay sharp while typing at
+    // high zoom instead of showing the page's square pixels. The size handed
+    // back is the page's.
+    let mut k = 1u32;
+    while (k as f32) < zoom && k < 16 {
+        k *= 2;
+    }
+    let scaled = |k: u32| {
+        let mut t = td.clone();
+        let f = k as f32;
+        t.font_px *= f;
+        t.tracking_px *= f;
+        for g in &mut t.glyph_styles {
+            g.font_px *= f;
+        }
+        if let Some(p) = &mut t.path {
+            for q in &mut p.points {
+                q[0] *= f;
+                q[1] *= f;
+            }
+            p.offset *= f;
+        }
+        t
+    };
     // Cache check first: rasterizing runs every frame the overlay is open,
     // and only the miss path may pay for a full rasterization.
-    let hash = text_preview_hash(td);
+    let hash = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text_preview_hash(td).hash(&mut h);
+        k.hash(&mut h);
+        h.finish()
+    };
     let cache_id = egui::Id::new("text_overlay_raster_preview_texture");
     if let Some((cached_hash, texture, w, h)) =
         ctx.data(|data| data.get_temp::<(u64, egui::TextureHandle, u32, u32)>(cache_id))
@@ -461,8 +521,20 @@ fn text_preview_texture(
     {
         return Some((texture, w, h));
     }
-    let raster = crate::core::text::rasterize_stretched(td)?;
-
+    let mut raster = crate::core::text::rasterize_stretched(&scaled(k))?;
+    while k > 1 && u64::from(raster.width) * u64::from(raster.height) > 40_000_000 {
+        k /= 2;
+        raster = crate::core::text::rasterize_stretched(&scaled(k))?;
+    }
+    let (w, h) = (
+        ((raster.width as f32 / k as f32).round() as u32).max(1),
+        ((raster.height as f32 / k as f32).round() as u32).max(1),
+    );
+    let options = if k > 1 {
+        egui::TextureOptions::LINEAR
+    } else {
+        egui::TextureOptions::NEAREST
+    };
     let image = egui::ColorImage::from_rgba_unmultiplied(
         [raster.width as usize, raster.height as usize],
         &raster.rgba,
@@ -470,22 +542,15 @@ fn text_preview_texture(
     let texture =
         match ctx.data(|data| data.get_temp::<(u64, egui::TextureHandle, u32, u32)>(cache_id)) {
             Some((_, mut texture, _, _)) => {
-                texture.set(image, egui::TextureOptions::NEAREST);
+                texture.set(image, options);
                 texture
             }
-            _ => ctx.load_texture(
-                "text_overlay_raster_preview",
-                image,
-                egui::TextureOptions::NEAREST,
-            ),
+            _ => ctx.load_texture("text_overlay_raster_preview", image, options),
         };
     ctx.data_mut(|data| {
-        data.insert_temp(
-            cache_id,
-            (hash, texture.clone(), raster.width, raster.height),
-        );
+        data.insert_temp(cache_id, (hash, texture.clone(), w, h));
     });
-    Some((texture, raster.width, raster.height))
+    Some((texture, w, h))
 }
 
 fn text_rotation_sin_cos(rotation_deg: f32) -> (f32, f32) {
@@ -1050,18 +1115,9 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
 
         let canvas_viewport = {
             let screen = ctx.content_rect();
-            let ruler_off = if data.chrome.show_rulers
-                && data.doc.kind == crate::core::document::DocumentKind::Canvas
-            {
-                20.0_f32
-            } else {
-                0.0
-            };
+            let ruler_off = ruler_size(data);
             egui::Rect::from_min_max(
-                egui::pos2(
-                    data.chrome.toolbar_w + ruler_off,
-                    28.0 + 26.0 + 32.0 + ruler_off,
-                ),
+                egui::pos2(data.chrome.toolbar_w + ruler_off, work_area_top(data)),
                 // Above the page bar too: a guide stops where the page tabs begin.
                 egui::pos2(
                     screen.max.x - data.chrome.panel_r_w,
@@ -1152,6 +1208,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         draw_path_display(ctx, data, canvas_viewport);
         draw_node_overlay(ctx, data, canvas_viewport);
         draw_path_gradient_overlay(ctx, data, canvas_viewport);
+        draw_text_path_handle(ctx, data, canvas_viewport);
         draw_gradient_preview(ctx, data, canvas_viewport);
         draw_preset_dialog(ctx, data, &mut actions);
         draw_delete_preset_dialog(ctx, data, &mut actions);
@@ -2268,6 +2325,31 @@ fn draw_node_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::R
 // Editable Path gradient transform: origin and basis handles. Linear
 // gradients expose direction; radial gradients also expose the second
 // radius and an ellipse preview.
+/// The handle that slides text along its path: a diamond where it stands.
+fn draw_text_path_handle(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    let Some((cx, cy)) = data.tool.text_path_handle else {
+        return;
+    };
+    let p = egui::pos2(
+        cx * data.doc.zoom + data.doc.offset_x,
+        cy * data.doc.zoom + data.doc.offset_y,
+    );
+    let painter = ctx
+        .layer_painter(canvas_path_overlay_layer())
+        .with_clip_rect(canvas_viewport);
+    let r = 6.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            p + egui::vec2(0.0, -r),
+            p + egui::vec2(r, 0.0),
+            p + egui::vec2(0.0, r),
+            p + egui::vec2(-r, 0.0),
+        ],
+        egui::Color32::from_rgb(255, 150, 40),
+        egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+    ));
+}
+
 fn draw_path_gradient_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
     let zoom = data.doc.zoom;
     let ox = data.doc.offset_x;
@@ -3801,6 +3883,7 @@ fn draw_text_editing_overlay(
             rotation_deg: data.tool.text_rotation_deg,
             flip_x: data.tool.text_flip_x,
             flip_y: data.tool.text_flip_y,
+            path: data.tool.text_path.clone(),
             // Only valid while the buffer matches; a mid-frame edit falls
             // back to uniform for that frame (re-synced next frame).
             glyph_styles: if data.tool.text_glyph_styles.len() == buf.chars().count() {
@@ -3840,10 +3923,31 @@ fn draw_text_editing_overlay(
         }
         let text_scale = (zoom / ctx.pixels_per_point()).max(0.001);
         let text_origin = egui::pos2(mx, my);
-        let preview_image = match text_preview_texture(ctx, &preview_td) {
+        // Text on a path draws from its box's corner, off the anchor (the
+        // caret and clicks stay in the anchor's space).
+        let path_offset = if preview_td.path.is_some() {
+            let id = egui::Id::new("text_overlay_path_offset");
+            let hash = text_preview_hash(&preview_td);
+            match ctx.data(|d| d.get_temp::<(u64, (i32, i32))>(id)) {
+                Some((h, o)) if h == hash => o,
+                _ => {
+                    let o = crate::core::text::path_text_offset(&preview_td).unwrap_or((0, 0));
+                    ctx.data_mut(|d| d.insert_temp(id, (hash, o)));
+                    o
+                }
+            }
+        } else {
+            (0, 0)
+        };
+        let preview_origin = text_origin
+            + egui::vec2(
+                path_offset.0 as f32 * text_scale,
+                path_offset.1 as f32 * text_scale,
+            );
+        let preview_image = match text_preview_texture(ctx, &preview_td, zoom) {
             Some((texture, w, h)) => {
                 let corners = text_preview_corners(
-                    text_origin,
+                    preview_origin,
                     w,
                     h,
                     text_scale,
@@ -4102,6 +4206,7 @@ fn draw_text_editing_overlay(
                     data.tool.text_flip_y,
                 );
                 let pointer_in_text = preview_image.as_ref().is_some_and(|(_, w, h, _, _)| {
+                    let (tx, ty) = (tx - path_offset.0 as f32, ty - path_offset.1 as f32);
                     tx >= 0.0 && ty >= 0.0 && tx <= *w as f32 && ty <= *h as f32
                 });
                 let primary_pressed = ctx.input(|i| i.pointer.primary_pressed());
@@ -4270,7 +4375,7 @@ fn draw_text_editing_overlay(
             let text_preview_hit = preview_image.as_ref().is_some_and(|(_, w, h, _, _)| {
                 text_preview_contains(
                     pos,
-                    text_origin,
+                    preview_origin,
                     *w,
                     *h,
                     text_scale,
@@ -4308,7 +4413,35 @@ fn draw_text_editing_overlay(
     }
 }
 
+/// Whether the pixel grid belongs on screen: only while working on pixels.
+/// Drawing or editing vectors (a Path / Shape / Text layer selected, or a
+/// vector tool in hand) hides it — the grid has nothing to do with a curve
+/// and its lines bury the nodes being edited.
+fn pixel_grid_wanted(tool: crate::tools::ToolId, active_layer_type: Option<&str>) -> bool {
+    use crate::tools::ToolId;
+    let vector_tool = matches!(
+        tool,
+        ToolId::Pen
+            | ToolId::Node
+            | ToolId::VectorBrush
+            | ToolId::Arrow
+            | ToolId::Shape
+            | ToolId::Text
+    );
+    let vector_layer = matches!(active_layer_type, Some("Path" | "Shape" | "Text"));
+    !vector_tool && !vector_layer
+}
+
 fn draw_pixel_grid(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    if !pixel_grid_wanted(
+        data.tool.active_tool,
+        data.layers
+            .layer_types
+            .get(data.layers.active_layer_idx)
+            .map(String::as_str),
+    ) {
+        return;
+    }
     let zoom = data.doc.zoom;
     let ox = data.doc.offset_x;
     let oy = data.doc.offset_y;
@@ -4871,6 +5004,25 @@ fn draw_paint_color_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiA
 
     if !open {
         actions.dialogs.paint_color_dialog_cancel = true;
+    }
+}
+
+#[cfg(test)]
+mod pixel_grid_tests {
+    use super::pixel_grid_wanted;
+    use crate::tools::ToolId;
+
+    #[test]
+    fn the_pixel_grid_hides_while_working_on_vectors() {
+        assert!(pixel_grid_wanted(ToolId::Brush, Some("Raster")));
+        assert!(pixel_grid_wanted(ToolId::Move, Some("Raster")));
+        assert!(pixel_grid_wanted(ToolId::Move, None));
+        for kind in ["Path", "Shape", "Text"] {
+            assert!(!pixel_grid_wanted(ToolId::Move, Some(kind)), "{kind}");
+        }
+        for tool in [ToolId::Node, ToolId::Pen, ToolId::Shape, ToolId::Text] {
+            assert!(!pixel_grid_wanted(tool, Some("Raster")), "{tool:?}");
+        }
     }
 }
 

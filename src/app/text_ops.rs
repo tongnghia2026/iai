@@ -507,6 +507,7 @@ impl App {
             flip_x: false,
             flip_y: false,
             glyph_styles,
+            path: None,
         };
         // Keep glyph_styles either empty (uniform) or exactly one per char.
         if !td.glyph_styles.is_empty() {
@@ -589,6 +590,7 @@ impl App {
             stretch_x: 1.0,
             flip_x: false,
             flip_y: false,
+            path: None,
             is_new: true,
             orig: None,
             before_cmd: Some(before),
@@ -683,6 +685,7 @@ impl App {
             stretch_x: td.stretch_x,
             flip_x: td.flip_x,
             flip_y: td.flip_y,
+            path: td.path.clone(),
             is_new: false,
             glyph_styles,
             selection: None,
@@ -1039,6 +1042,7 @@ impl App {
         td.stretch_x = session.stretch_x;
         td.flip_x = session.flip_x;
         td.flip_y = session.flip_y;
+        td.path = session.path.clone();
 
         let empty = session.buffer.trim().is_empty();
         let changed = session.is_new || session.orig.as_ref() != Some(&td);

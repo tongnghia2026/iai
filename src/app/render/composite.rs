@@ -44,6 +44,10 @@ impl App {
         if !interactive_move {
             self.docs.active_mut().canvas.refresh_connectors();
         }
+        // Text fitted to a path follows that path's outline, during a drag
+        // too (it waited for the release, 07/11): only linked text whose
+        // outline changed is set again.
+        iai_canvas::text_follow::follow_text_paths(&mut self.docs.active_mut().canvas);
         if self.docs.active().canvas.plane_dirty.active {
             let dirty = self.docs.active().canvas.plane_dirty.to_rect();
             self.upload_viewed_channel_plane(dirty);

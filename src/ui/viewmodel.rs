@@ -102,6 +102,8 @@ pub struct DocumentViewModel {
 pub struct LayerViewModel {
     pub layer_count: usize,
     pub active_layer_idx: usize,
+    /// No layer is chosen (a press on an empty spot): no row is lit.
+    pub none_picked: bool,
     pub layer_names: std::sync::Arc<Vec<String>>,
     pub layer_visibles: std::sync::Arc<Vec<bool>>,
     /// Each layer's id: what a command names it by.
@@ -179,6 +181,8 @@ pub struct ToolViewModel {
     pub text_stretch_x: f32,
     pub text_flip_x: bool,
     pub text_flip_y: bool,
+    /// The path the edited text is set along.
+    pub text_path: Option<crate::core::text::TextPath>,
     /// Per-character colour/size of the active editing session (empty when
     /// uniform). Aligned 1:1 with `text_buffer` chars.
     pub text_glyph_styles: std::sync::Arc<Vec<crate::core::text::GlyphStyle>>,
@@ -288,6 +292,9 @@ pub struct ToolViewModel {
     pub node_overlay: Option<super::NodeOverlay>,
     /// Transform handles for the active Path's vector gradient fill.
     pub path_gradient_overlay: Option<super::PathGradientOverlay>,
+    /// Where text on a path stands (Move tool), canvas pixels: the handle
+    /// that slides it along.
+    pub text_path_handle: Option<(f32, f32)>,
     /// Zoom-bucketed raster for the active Path. Display-only; document tiles
     /// and export continue to use the normal document-resolution cache.
     pub path_display: Option<super::PathDisplayRaster>,
@@ -706,7 +713,8 @@ pub struct ChromeViewModel {
     /// "Nhờ AI làm": an errand for Gemini in Antigravity (Pro).
     #[cfg(feature = "pro")]
     pub errand: ErrandView,
-    /// "Việc nhanh": jobs iAi does on a folder by itself, no AI.
+    /// "Việc nhanh": jobs iAi does on a folder by itself, no AI (Pro).
+    #[cfg(feature = "pro")]
     pub quick: QuickView,
     /// Pro on this machine, as its dialogs and the Help menu show it.
     #[cfg(feature = "pro")]
@@ -800,18 +808,23 @@ pub enum ErrandJob {
     /// The photo open in the window, drawn anew by online AI as asked; the
     /// result comes back as a new layer of it.
     EditPhoto,
+    /// The picture open in the window (ornaments, a logo) redrawn as vector
+    /// layers by the agent with iAi's tracing tools, checked against it,
+    /// saved as SVG and PDF (Pro).
+    Vectorize,
     /// What the person writes.
     Other,
 }
 
 #[cfg(feature = "pro")]
 impl ErrandJob {
-    pub const ALL: [ErrandJob; 7] = [
+    pub const ALL: [ErrandJob; 8] = [
         ErrandJob::IdCards,
         ErrandJob::IdPhotos,
         ErrandJob::FillForm,
         ErrandJob::DressIdPhoto,
         ErrandJob::EditPhoto,
+        ErrandJob::Vectorize,
         ErrandJob::ScanCleanup,
         ErrandJob::Other,
     ];
@@ -821,8 +834,9 @@ impl ErrandJob {
             ErrandJob::IdCards => "In căn cước lên A4",
             ErrandJob::IdPhotos => "Ảnh thẻ cho nhiều người",
             ErrandJob::FillForm => crate::ui::dialogs::FORMS_TITLE,
-            ErrandJob::DressIdPhoto => "Thay áo, lấp vai ảnh thẻ đang mở (AI online)",
+            ErrandJob::DressIdPhoto => "Thay áo AI",
             ErrandJob::EditPhoto => "Sửa ảnh đang mở (AI online)",
+            ErrandJob::Vectorize => "Vẽ lại thành vector",
             ErrandJob::ScanCleanup => "Làm sạch ảnh chụp giấy tờ",
             ErrandJob::Other => "Việc khác (tự viết)",
         }
@@ -836,6 +850,7 @@ impl ErrandJob {
             ErrandJob::FillForm => "fill_form",
             ErrandJob::DressIdPhoto => "dress_id_photo",
             ErrandJob::EditPhoto => "edit_photo",
+            ErrandJob::Vectorize => "vectorize",
             ErrandJob::ScanCleanup => "scan_cleanup",
             ErrandJob::Other => "other",
         }
@@ -846,6 +861,12 @@ impl ErrandJob {
         matches!(self, ErrandJob::EditPhoto | ErrandJob::DressIdPhoto)
     }
 
+    /// It works on the picture open in the window: online AI's photo jobs,
+    /// and redrawing it as vector (iAi's own tools, no online AI).
+    pub fn on_open_doc(self) -> bool {
+        self.on_open_photo() || self == ErrandJob::Vectorize
+    }
+
     /// It needs Pro's commands.
     pub fn pro(self) -> bool {
         matches!(
@@ -854,6 +875,7 @@ impl ErrandJob {
                 | ErrandJob::IdPhotos
                 | ErrandJob::FillForm
                 | ErrandJob::DressIdPhoto
+                | ErrandJob::Vectorize
         )
     }
 
@@ -942,6 +964,9 @@ pub struct ErrandRunView {
     pub results: Option<String>,
     /// The Word files a form errand filled, once it is done.
     pub files: Vec<String>,
+    /// What the agent said it will draw (a vector redraw), each ticked
+    /// once drawn.
+    pub plan: Vec<(String, bool)>,
 }
 
 /// "Nhờ AI làm" as its window shows it.
@@ -1281,6 +1306,7 @@ impl Default for UiData {
                 page_uses_master: std::sync::Arc::new(Vec::new()),
             },
             layers: LayerViewModel {
+                none_picked: false,
                 layer_count: 1,
                 active_layer_idx: 0,
                 layer_names: std::sync::Arc::new(vec!["Background".to_string()]),
@@ -1334,6 +1360,7 @@ impl Default for UiData {
                 text_stretch_x: 1.0,
                 text_flip_x: false,
                 text_flip_y: false,
+                text_path: None,
                 text_glyph_styles: std::sync::Arc::new(Vec::new()),
                 text_selection: None,
                 text_caret: None,
@@ -1410,6 +1437,7 @@ impl Default for UiData {
                 shape_overlay: None,
                 node_overlay: None,
                 path_gradient_overlay: None,
+                text_path_handle: None,
                 path_display: None,
                 path_style: None,
                 pen_mode: 0,
@@ -1686,6 +1714,7 @@ impl Default for UiData {
                 agent: AgentView::default(),
                 #[cfg(feature = "pro")]
                 errand: ErrandView::default(),
+                #[cfg(feature = "pro")]
                 quick: QuickView::default(),
                 #[cfg(feature = "pro")]
                 pro: ProView::default(),

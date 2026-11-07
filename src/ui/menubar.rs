@@ -163,56 +163,39 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         }
                     }
 
-                    // "Việc nhanh": a job iAi does by itself on a folder, no
-                    // AI; while it runs, the button says so.
-                    ui.add_space(6.0);
-                    let quick = &data.chrome.quick;
-                    let working = quick.run.as_ref().is_some_and(|r| r.running);
-                    let label = if working {
-                        format!("{}  Đang làm…", ph::LIGHTNING)
-                    } else {
-                        format!("{}  {}", ph::LIGHTNING, super::dialogs::QUICK_TITLE)
-                    };
-                    if ui
-                        .add(egui::Button::new(label).selected(quick.open))
-                        .on_hover_text("iAi tự làm việc trên cả thư mục ảnh, không cần AI")
-                        .clicked()
-                    {
-                        actions.chrome.quick = Some(if quick.open {
-                            crate::ui::QuickIntent::Close
-                        } else {
-                            crate::ui::QuickIntent::Open
-                        });
-                    }
-                    if working {
-                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                    }
-
-                    // "Nhờ AI làm": a job for Gemini in Antigravity, done on
-                    // this window; while it runs, the button says so. The AI
-                    // gateway is the Pro pack's: the free build has no button.
+                    // "Việc nhanh" (Pro): one window, a job iAi does by
+                    // itself on one side, one for Gemini in Antigravity on
+                    // the other; while either runs, the button says so.
                     #[cfg(feature = "pro")]
                     {
                         ui.add_space(6.0);
-                        let errand = &data.chrome.errand;
-                        let running = errand.run.as_ref().is_some_and(|r| r.running);
-                        let label = if running {
+                        let (quick, errand) = (&data.chrome.quick, &data.chrome.errand);
+                        let open = quick.open || errand.open;
+                        let by_hand = quick.run.as_ref().is_some_and(|r| r.running);
+                        let by_ai = errand.run.as_ref().is_some_and(|r| r.running);
+                        let label = if by_ai {
                             format!("{}  AI đang làm…", ph::SPARKLE)
+                        } else if by_hand {
+                            format!("{}  Đang làm…", ph::LIGHTNING)
                         } else {
-                            format!("{}  {}", ph::SPARKLE, super::dialogs::ERRAND_TITLE)
+                            format!("{}  {}", ph::LIGHTNING, super::dialogs::QUICK_TITLE)
                         };
                         if ui
-                            .add(egui::Button::new(label).selected(errand.open))
-                            .on_hover_text("Giao việc cho Gemini (Antigravity) làm ngay trên iAi")
+                            .add(egui::Button::new(label).selected(open))
+                            .on_hover_text(
+                                "Làm việc trên cả thư mục ảnh: iAi tự làm, hoặc nhờ Gemini                                  (Antigravity) làm ngay trên iAi",
+                            )
                             .clicked()
                         {
-                            actions.chrome.errand = Some(if errand.open {
-                                crate::ui::ErrandIntent::Close
+                            if open {
+                                actions.chrome.quick = Some(crate::ui::QuickIntent::Close);
+                                actions.chrome.errand = Some(crate::ui::ErrandIntent::Close);
                             } else {
-                                crate::ui::ErrandIntent::Open
-                            });
+                                actions.chrome.quick = Some(crate::ui::QuickIntent::Open);
+                                actions.chrome.errand = Some(crate::ui::ErrandIntent::Open);
+                            }
                         }
-                        if running {
+                        if by_hand || by_ai {
                             ctx.request_repaint_after(std::time::Duration::from_secs(1));
                         }
                     }
@@ -1488,6 +1471,84 @@ fn object_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             Some(crate::ui::intent::VectorStyleTarget::Document);
         ui.close();
     }
+    ui.separator();
+    // The designer's path tools (CorelDRAW's words in brackets).
+    let picked = |kinds: &[&str]| {
+        (0..data.layers.layer_count)
+            .filter(|&i| {
+                data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                    && data
+                        .layers
+                        .layer_types
+                        .get(i)
+                        .is_some_and(|t| kinds.contains(&t.as_str()))
+            })
+            .count()
+    };
+    let vectors = picked(&["Shape", "Path"]);
+    if ui
+        .add(menu_item_enabled(
+            "Nới / thu viền (Contour)…",
+            "",
+            picked(&["Shape", "Path", "Text"]) > 0,
+        ))
+        .clicked()
+    {
+        super::design_tools::open_contour(ui.ctx());
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled("Đổi nét thành mảng", "", vectors > 0))
+        .clicked()
+    {
+        actions.run("vector.outline_to_object", serde_json::json!({}));
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled("Gộp đường (Combine)", "", vectors >= 2))
+        .clicked()
+    {
+        actions.run("vector.combine", serde_json::json!({}));
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled("Tách rời (Break Apart)", "", vectors > 0))
+        .clicked()
+    {
+        actions.run("vector.break_apart", serde_json::json!({}));
+        ui.close();
+    }
+    #[cfg(feature = "pro")]
+    ui.menu_button("Hiệu ứng thiết kế (Pro)", |ui| {
+        for e in super::pro_effects::Effect::ALL {
+            if ui.button(e.label()).clicked() {
+                super::pro_effects::open(ui.ctx(), e);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Đặt bản vector cạnh ảnh gốc").clicked() {
+            actions.run("vector.beside", serde_json::json!({}));
+            ui.close();
+        }
+        if ui.button("Chỉ giữ bản vector (cắt về cỡ cũ)").clicked() {
+            actions.run("vector.beside", serde_json::json!({"back": true}));
+            ui.close();
+        }
+    });
+    let movable = picked(&["Shape", "Path", "Text", "Raster"]);
+    for (label, axis) in [
+        ("Chia đều khoảng hở ngang", "horizontal"),
+        ("Chia đều khoảng hở dọc", "vertical"),
+    ] {
+        if ui.add(menu_item_enabled(label, "", movable >= 3)).clicked() {
+            actions.run(
+                "layer.distribute",
+                serde_json::json!({"axis": axis, "gaps": true}),
+            );
+            ui.close();
+        }
+    }
 }
 
 fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
@@ -1515,6 +1576,57 @@ fn text_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         .clicked()
     {
         actions.run("vector.to_curves", serde_json::json!({}));
+        ui.close();
+    }
+    // Fit Text To Path: a picked type layer and a picked shape or path.
+    let picked = |kind: &[&str]| {
+        (0..data.layers.layer_count).any(|i| {
+            data.layers.layer_selected.get(i).copied().unwrap_or(false)
+                && data
+                    .layers
+                    .layer_types
+                    .get(i)
+                    .is_some_and(|t| kind.contains(&t.as_str()))
+        })
+    };
+    if ui
+        .add(menu_item_enabled(
+            "Đặt chữ theo đường",
+            "",
+            picked(&["Text"]) && picked(&["Shape", "Path"]),
+        ))
+        .on_hover_text("Chọn một lớp chữ và một hình / đường cong (giữ Ctrl để chọn cả hai)")
+        .clicked()
+    {
+        actions.run("text.fit_to_path", serde_json::json!({}));
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Đưa chữ về thẳng",
+            "",
+            data.layers
+                .layer_types
+                .get(data.layers.active_layer_idx)
+                .is_some_and(|t| t == "Text"),
+        ))
+        .clicked()
+    {
+        actions.run("text.fit_to_path", serde_json::json!({"release": true}));
+        ui.close();
+    }
+    if ui
+        .add(menu_item_enabled(
+            "Chỉnh chữ theo đường…",
+            "",
+            data.layers
+                .layer_types
+                .get(data.layers.active_layer_idx)
+                .is_some_and(|t| t == "Text"),
+        ))
+        .clicked()
+    {
+        super::design_tools::open_text_path(ui.ctx());
         ui.close();
     }
     ui.separator();
@@ -2237,15 +2349,30 @@ mod tests {
         // (a test keeps no prefs, so the usual one).
         let bar = Bar::new(&data);
         let before = bar.labels();
-        assert_eq!(bar.click("AI").ai.open_ai_window, Some(AiTab::default()));
+        assert_eq!(
+            bar.click(crate::ui::ai_window::TITLE).ai.open_ai_window,
+            Some(AiTab::default())
+        );
         assert_eq!(bar.labels(), before, "no menu drops from it");
         // Already open, it stays as it is whichever tab is in front.
         data.ai.tab = Some(AiTab::Online);
-        assert!(Bar::new(&data).click("AI").ai.open_ai_window.is_none());
+        assert!(
+            Bar::new(&data)
+                .click(crate::ui::ai_window::TITLE)
+                .ai
+                .open_ai_window
+                .is_none()
+        );
         // With no photo open there is nothing for it to work on.
         data.ai.tab = None;
         data.doc.has_doc = false;
-        assert!(Bar::new(&data).click("AI").ai.open_ai_window.is_none());
+        assert!(
+            Bar::new(&data)
+                .click(crate::ui::ai_window::TITLE)
+                .ai
+                .open_ai_window
+                .is_none()
+        );
 
         // The Pro pack is bought from the Help menu, photo or no photo.
         let pro = crate::ui::dialogs::pro_menu_label(data.chrome.pro.status);
@@ -2360,11 +2487,10 @@ mod tests {
         let bar = Bar::new(&data);
         let row = bar.labels();
         assert!(row.iter().any(|label| label == "Help"), "{row:?}");
-        assert!(!row.iter().any(|label| label == "AI"), "{row:?}");
-        // The AI gateway is the Pro pack's: no button for it, beside the
-        // one of "Việc nhanh" (which needs no AI).
+        assert!(!row.iter().any(|label| label == "Ảnh thẻ Pro"), "{row:?}");
+        // "Việc nhanh", by hand and by AI, is the Pro pack's: no button.
         assert!(
-            row.iter().any(|label| label.contains("Việc nhanh")),
+            !row.iter().any(|label| label.contains("Việc nhanh")),
             "{row:?}"
         );
         assert!(!row.iter().any(|label| label.contains("Nhờ AI")), "{row:?}");
@@ -2391,8 +2517,14 @@ mod tests {
         data.doc.has_doc = true;
         let bar = Bar::new(&data);
         let row = bar.labels();
+        // One button, "Việc nhanh", opens both sides of its window.
+        let quick = crate::ui::dialogs::QUICK_TITLE;
         let errand = crate::ui::dialogs::ERRAND_TITLE;
-        assert!(row.iter().any(|label| label.contains(errand)), "{row:?}");
+        assert!(row.iter().any(|label| label.contains(quick)), "{row:?}");
+        assert!(!row.iter().any(|label| label.contains(errand)), "{row:?}");
+        let opened = bar.click(&format!("{}  {quick}", ph::LIGHTNING));
+        assert_eq!(opened.chrome.quick, Some(crate::ui::QuickIntent::Open));
+        assert_eq!(opened.chrome.errand, Some(crate::ui::ErrandIntent::Open));
         bar.click("Help");
         let entry = format!("{}…", crate::ui::dialogs::AGENT_TITLE);
         let help = bar.labels();

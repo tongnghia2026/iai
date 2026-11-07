@@ -44,6 +44,20 @@ fn quarter_turn_parts(turn: &AffineTransform) -> (f32, bool) {
 pub fn turned_text_data(td: &TextData, turn: &AffineTransform) -> TextData {
     let (angle, mirrored) = quarter_turn_parts(turn);
     let mut next = td.clone();
+    if let Some(path) = &mut next.path {
+        // Text on a path: the path turns (about the text's anchor), the
+        // letters follow it; rotation and flips do not apply along a path.
+        for p in &mut path.points {
+            let (x, y) = (p[0], p[1]);
+            *p = [turn.a * x + turn.c * y, turn.b * x + turn.d * y];
+        }
+        if mirrored {
+            // The mirrored path runs the other way: turned over, the text
+            // reads the right way round at the same place.
+            path.flip = !path.flip;
+        }
+        return next;
+    }
     if mirrored {
         next.rotation_deg = (angle - td.rotation_deg).rem_euclid(360.0);
         next.flip_x = !next.flip_x;

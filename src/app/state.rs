@@ -717,6 +717,8 @@ pub struct TextEditState {
     pub stretch_x: f32,
     pub flip_x: bool,
     pub flip_y: bool,
+    /// The path the text is set along, copied from `TextData` while editing.
+    pub path: Option<crate::core::text::TextPath>,
     /// True for a freshly created layer (discarded on cancel / empty commit).
     pub is_new: bool,
     /// Original text data, for restoring on cancel of a re-edit (None if new).
@@ -1043,6 +1045,10 @@ pub struct UiDataCache {
     /// collapsed.
     pub layer_collapsed_hidden: std::sync::Arc<Vec<bool>>,
     pub layer_revision: u64,
+    /// History revision the layer rows were built at: any recorded step
+    /// (delete by key, AI effects…) rebuilds them even if no one bumped
+    /// `layer_revision`.
+    pub layer_rows_history_rev: u64,
     /// Document id the cache holds. layer_revision is per-canvas (starts at 1), so
     /// switching documents can collide with an old value and skip the rebuild —
     /// doc_id forces a rebuild on document change.
@@ -1069,6 +1075,17 @@ pub struct UiDataCache {
     /// Top visible vector run omitted from the coarse document composite while
     /// its supersampled display raster is drawn above it.
     pub path_display_suppressed_layers: Option<(u32, Vec<u32>)>,
+    /// Glyph outlines of the text layers in that run, kept until the text or
+    /// its position changes (see `path_display::text_display_objects`).
+    pub text_displays: Vec<TextDisplayEntry>,
+}
+
+/// One text layer's outlines for the sharp display overlay.
+pub struct TextDisplayEntry {
+    pub layer_id: u32,
+    pub layer_offset: (i32, i32),
+    pub text: crate::core::text::TextData,
+    pub objects: Vec<crate::core::vector::object::VectorObjectData>,
 }
 
 /// In-progress guide gesture (preview is rendered until committed).
@@ -1324,6 +1341,7 @@ impl App {
                 path_transform: None,
                 path_pivot: None,
                 path_pivot_dragging: false,
+                text_path_drag: None,
                 path_pivot_snap: None,
                 path_rotate_mode: None,
                 arrow_multi_layer: None,
@@ -1652,8 +1670,10 @@ impl App {
                 agent_skills: None,
                 #[cfg(feature = "pro")]
                 errands: Default::default(),
+                #[cfg(feature = "pro")]
                 photo_folder: None,
                 models: Default::default(),
+                #[cfg(feature = "pro")]
                 quick: Default::default(),
                 #[cfg(feature = "pro")]
                 forms: Default::default(),
@@ -2464,6 +2484,7 @@ impl App {
     /// The person holds the canvas: a transform, a text being typed, a
     /// preview dialog, the Develop window… An agent's change waits until it
     /// is committed or cancelled (plain dialogs do not count).
+    #[cfg(feature = "pro")]
     pub(crate) fn person_mid_edit(&self) -> bool {
         self.locked_beside_retouch_when(false) || self.portrait_under_way()
     }

@@ -1680,6 +1680,11 @@ pub struct LayerStack {
     pub layers: Vec<Layer>,
     pub active_idx: usize,
     next_id: u32,
+    /// Set by a press on an empty spot of the page with the Move tool: no
+    /// layer is chosen (no frame, no row lit in the Layers panel) until one
+    /// is picked again. Holds the `active_idx` it was set at, so choosing a
+    /// layer any way (which marks it selected) ends it by itself.
+    none_picked: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -1690,11 +1695,31 @@ impl LayerStack {
             layers: vec![bg],
             active_idx: 0,
             next_id: 1,
+            none_picked: None,
         }
     }
 
     pub fn next_id(&self) -> u32 {
         self.next_id
+    }
+
+    /// No layer is chosen: every layer let go, nothing lit in the Layers
+    /// panel, painting tools wait for a layer to be picked.
+    pub fn pick_none(&mut self) {
+        for l in &mut self.layers {
+            l.selected = false;
+        }
+        self.none_picked = Some(self.active_idx);
+    }
+
+    /// Whether no layer is chosen (see [`Self::pick_none`]).
+    pub fn is_none_picked(&self) -> bool {
+        self.none_picked == Some(self.active_idx) && !self.layers.iter().any(|l| l.selected)
+    }
+
+    /// Ends "no layer chosen" (the active layer is the one worked on again).
+    pub fn end_none_picked(&mut self) {
+        self.none_picked = None;
     }
     pub fn set_next_id(&mut self, id: u32) {
         self.next_id = id;
@@ -1767,6 +1792,10 @@ impl LayerStack {
     /// Returns true if any flag changed.
     pub fn normalize_selection(&mut self) -> bool {
         self.normalize_active_idx();
+        // An empty spot pressed: nothing is chosen on purpose.
+        if self.is_none_picked() {
+            return false;
+        }
         let active = self.active_idx;
         if self.layers.get(active).is_none_or(|l| l.selected) {
             return false;
@@ -2127,6 +2156,7 @@ impl LayerStack {
             layer.selected = i == idx;
         }
         self.active_idx = idx;
+        self.none_picked = None;
     }
 
     /// Duplicate Layer on a row that is part of a multi-selection duplicates
@@ -3632,6 +3662,7 @@ impl LayerStack {
             active_idx: backdrop.layers.len() + self.active_idx,
             layers,
             next_id,
+            none_picked: None,
         }
     }
 
@@ -3672,6 +3703,7 @@ impl LayerStack {
             layers,
             active_idx: self.active_idx + usize::from(self.active_idx >= insert_at) * overlay_len,
             next_id,
+            none_picked: None,
         }
     }
 
@@ -3718,6 +3750,7 @@ impl LayerStack {
             layers,
             active_idx: 0,
             next_id: self.next_id,
+            none_picked: None,
         }
     }
 
@@ -3897,6 +3930,7 @@ mod tests {
             layers: vec![Layer::new(0, "Layer 1", 2, 2)],
             active_idx: 0,
             next_id: 1,
+            none_picked: None,
         };
         assert_eq!(stack.flatten(2, 2), vec![0u8; 16]);
     }
@@ -4994,6 +5028,7 @@ mod tests {
             layers,
             active_idx: 0,
             next_id: n,
+            none_picked: None,
         }
     }
 
