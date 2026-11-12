@@ -151,6 +151,9 @@ struct Tool {
     kind: Kind,
 }
 
+/// The most `iai_command_list` answers with.
+const LIST_BYTES: usize = 20_000;
+
 /// `ai.remove_background` → `iai_ai_remove_background`.
 pub fn tool_name(id: &str) -> String {
     format!("iai_{}", id.replace('.', "_"))
@@ -166,17 +169,18 @@ fn generic_tools() -> Vec<Tool> {
         "args": {"type": "object", "description": "The command's params, as its schema says."},
         "expectRevision": {"type": "integer", "minimum": 0, "description": "Refuse with stale_revision unless the target document is still at this revision."},
         "requestId": {"type": "string", "description": "A retried call with the same id gets the first answer; nothing runs twice."},
-        "dryRun": {"type": "boolean", "description": "Run, report, and take the change back (commands that write no file)."},
+        "dryRun": {"type": "boolean", "description": "Run, report, and take the change back: nothing is kept (commands that write no file). Not on a redraw sheet: call for real and edit.undo if wrong."},
         "background": {"type": "boolean", "description": "Answer at once with a job id for a long command, instead of waiting."}
     });
     vec![
         Tool {
             name: "iai_command_list".into(),
             title: "List Commands".into(),
-            description: "Every command iAi has: id, Vietnamese and English labels, what it does, the effects it may have, and the JSON Schema of its params. Filter by an id prefix (e.g. \"layer.\").".into(),
+            description: "Every command iAi has: id, Vietnamese and English labels, what it does, the effects it may have, and the JSON Schema of its params. Filter by an id prefix (e.g. \"layer.\") or a query; schemas come with a short list.".into(),
             input_schema: object(json!({
                 "prefix": {"type": "string", "description": "Only ids starting with this."},
-                "schemas": {"type": "boolean", "default": true, "description": "Include the params schemas."}
+                "query": {"type": "string", "description": "Only commands whose id, labels or description hold every word of this."},
+                "schemas": {"type": "boolean", "description": "Include the params schemas (default: when narrowed by prefix or query and the answer stays short)."}
             }), &[]),
             read_only: true,
             kind: Kind::List,
@@ -270,6 +274,8 @@ pub struct Server<'a> {
     next_run: u64,
     /// The agent's app, as it introduced itself.
     client: String,
+    /// How the window wants the task under way done.
+    mode: crate::host::TaskMode,
 }
 
 /// What an agent did in a task, for the library.
@@ -282,6 +288,36 @@ struct Task {
     /// A call gave a command's private params (a customer's name, ID
     /// number…): the task is never kept, its calls hold them.
     private: bool,
+}
+
+/// The documents a task's calls named (`doc` in their args or answers,
+/// a batch's calls too).
+fn task_docs(task: &Task) -> Vec<u64> {
+    fn walk(v: &Value, out: &mut Vec<u64>) {
+        match v {
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if k == "doc"
+                        && let Some(d) = x.as_u64()
+                        && !out.contains(&d)
+                    {
+                        out.push(d);
+                    }
+                    walk(x, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for c in &task.calls {
+        walk(&c.args, &mut out);
+        if let Some(r) = &c.result {
+            walk(r, &mut out);
+        }
+    }
+    out
 }
 
 /// A tool's answer, before it becomes MCP content.
@@ -327,6 +363,7 @@ impl<'a> Server<'a> {
             runs: BTreeMap::new(),
             next_run: 1,
             client: String::new(),
+            mode: crate::host::TaskMode::default(),
         };
         server.refresh()?;
         Ok(server)
@@ -553,7 +590,7 @@ impl<'a> Server<'a> {
                 .map_err(fail);
         }
         if uri == "iai://commands" {
-            return Ok(self.list(None, true));
+            return Ok(self.list(None, None, Some(true)));
         }
         if let Some(id) = uri
             .strip_prefix("iai://doc/")
@@ -569,27 +606,93 @@ impl<'a> Server<'a> {
         ))
     }
 
-    fn list(&self, prefix: Option<&str>, schemas: bool) -> Value {
-        let items: Vec<Value> = self
+    /// The commands an agent asked for: by id `prefix` and by `query`
+    /// (every word in the id, a label or the description). Schemas come
+    /// with a short list unless `schemas` says otherwise; the answer stays
+    /// under [`LIST_BYTES`] (an answer of 216 kB, six times over, filled a
+    /// conversation on 08/11).
+    fn list(&self, prefix: Option<&str>, query: Option<&str>, schemas: Option<bool>) -> Value {
+        let words: Vec<String> = query
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let found: Vec<&CommandInfo> = self
             .commands
             .iter()
             .filter(|c| prefix.is_none_or(|p| c.id.starts_with(p)))
-            .map(|c| {
-                let mut v = json!({
-                    "id": c.id, "labelVi": c.label_vi, "labelEn": c.label_en, "doc": c.doc,
-                    "effects": c.effects, "featured": c.featured, "canDryRun": c.can_dry_run,
-                    "granted": self.gate.allows(c),
-                });
-                if schemas && let Some(o) = v.as_object_mut() {
-                    o.insert(
-                        "paramsSchema".to_string(),
-                        crate::schema::for_tool(&c.params_schema),
-                    );
-                }
-                v
+            .filter(|c| {
+                let text =
+                    format!("{} {} {} {}", c.id, c.label_vi, c.label_en, c.doc).to_lowercase();
+                words.iter().all(|w| text.contains(w.as_str()))
             })
             .collect();
-        json!({"commands": items})
+        let narrowed = prefix.is_some() || !words.is_empty();
+        let schemas = schemas.unwrap_or(narrowed || found.len() <= 12);
+        let item = |c: &CommandInfo, schemas: bool, doc_chars: usize| {
+            let doc: String = if c.doc.chars().count() > doc_chars {
+                let mut d: String = c.doc.chars().take(doc_chars).collect();
+                d.push('…');
+                d
+            } else {
+                c.doc.clone()
+            };
+            let mut v = json!({
+                "id": c.id, "labelVi": c.label_vi, "labelEn": c.label_en, "doc": doc,
+                "effects": c.effects, "featured": c.featured, "canDryRun": c.can_dry_run,
+                "granted": self.gate.allows(c),
+            });
+            if schemas && let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "paramsSchema".to_string(),
+                    crate::schema::for_tool(&c.params_schema),
+                );
+            }
+            v
+        };
+        let size = |v: &[Value]| serde_json::to_string(v).map_or(0, |t| t.len());
+        // Smaller in steps: schemas, then the descriptions, then the list.
+        for (with_schemas, doc_chars) in [(schemas, usize::MAX), (false, usize::MAX), (false, 140)]
+        {
+            let items: Vec<Value> = found
+                .iter()
+                .map(|c| item(c, with_schemas, doc_chars))
+                .collect();
+            if size(&items) <= LIST_BYTES {
+                let mut out = json!({"commands": items});
+                if schemas
+                    && !with_schemas
+                    && let Some(o) = out.as_object_mut()
+                {
+                    o.insert(
+                        "hint".to_string(),
+                        json!(
+                            "Too many for their schemas: narrow with prefix or query to get them."
+                        ),
+                    );
+                }
+                return out;
+            }
+        }
+        let mut items = Vec::new();
+        let mut used: usize = 2;
+        for c in &found {
+            let v = item(c, false, 140);
+            let len = serde_json::to_string(&v)
+                .map_or(0, |t| t.len())
+                .saturating_add(1);
+            if used.saturating_add(len) > LIST_BYTES {
+                break;
+            }
+            used = used.saturating_add(len);
+            items.push(v);
+        }
+        let left = found.len().saturating_sub(items.len());
+        json!({
+            "commands": items,
+            "more": left,
+            "hint": "The list was cut short: narrow it with prefix (e.g. \"vector.\") or query."
+        })
     }
 
     /// Take in the folders the person granted where the commands run (an
@@ -680,9 +783,15 @@ impl<'a> Server<'a> {
 
     fn run_checked(&mut self, mut call: CommandCall, wait: bool) -> Result<Value, CmdError> {
         let asked_background = call.background;
+        let dry_run = call.dry_run;
         call.background = true;
         let reply = self.host.execute(call)?;
         match reply {
+            Reply::Done { result, revision } if dry_run => Ok(json!({
+                "result": result, "revision": revision, "dryRun": true, "kept": false,
+                "hint": "A dry run: the change was taken back, nothing is kept. Call again \
+                         without dryRun to make it."
+            })),
             Reply::Done { result, revision } => Ok(json!({"result": result, "revision": revision})),
             Reply::Started { job } if !wait || asked_background => Ok(json!({
                 "status": "started", "job": job,
@@ -808,12 +917,28 @@ impl<'a> Server<'a> {
                     .map_err(|e| CmdError::internal(e.to_string()))
             }
             Kind::List => {
-                let prefix = args
-                    .get("prefix")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let schemas = args.get("schemas").and_then(Value::as_bool).unwrap_or(true);
-                Ok(Answer::Value(self.list(prefix.as_deref(), schemas)))
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ListArgs {
+                    #[serde(default)]
+                    prefix: Option<String>,
+                    #[serde(default)]
+                    query: Option<String>,
+                    #[serde(default)]
+                    schemas: Option<bool>,
+                }
+                let args = if args.is_null() { json!({}) } else { args };
+                let a: ListArgs = serde_json::from_value(args).map_err(|e| {
+                    CmdError::bad_params(&e).with_hint(json!({
+                        "params": ["prefix", "query", "schemas"],
+                        "example": {"query": "gradient"}
+                    }))
+                })?;
+                Ok(Answer::Value(self.list(
+                    a.prefix.as_deref(),
+                    a.query.as_deref(),
+                    a.schemas,
+                )))
             }
             Kind::JobStatus => {
                 let job = args
@@ -882,6 +1007,16 @@ impl<'a> Server<'a> {
 
     fn skill_answer(&mut self, kind: &Kind, args: Value) -> Result<Value, CmdError> {
         let store = self.store()?;
+        if !self.mode.offer_skills
+            && matches!(kind, Kind::SkillSearch | Kind::SkillGet | Kind::SkillRun)
+        {
+            return Err(CmdError::new(
+                ErrorCode::NotEnabled,
+                "no saved skill is used for this task: follow the steps the request gives",
+            )
+            .vi("Việc này không dùng kỹ năng đã lưu")
+            .with_hint(json!({"gate": "no_skills"})));
+        }
         let text = |k: &str| {
             args.get(k)
                 .and_then(Value::as_str)
@@ -892,16 +1027,42 @@ impl<'a> Server<'a> {
         match kind {
             Kind::TaskBegin => {
                 let request = text("request");
+                // A task under way, its work begun, is not dropped by another
+                // begin (a reviewer, a second errand): it is ended first
+                // (plan section 8, point 14). The same request again goes on.
+                if let Some(earlier) = &self.task
+                    && !earlier.calls.is_empty()
+                    && earlier.request.trim() != request.trim()
+                {
+                    return Err(CmdError::new(
+                        ErrorCode::NotEnabled,
+                        format!(
+                            "busy_task: a task is under way («{}»): end it with iai_task_end                              (\"done\" or \"failed\") before beginning another",
+                            earlier.request.chars().take(80).collect::<String>()
+                        ),
+                    )
+                    .vi("Đang có việc chưa kết thúc: gọi iai_task_end trước khi bắt đầu việc khác")
+                    .with_hint(json!({"gate": "busy_task"})));
+                }
                 // A task under way that was never ended is kept as it stands.
-                if let Some(earlier) = self.task.take() {
+                if let Some(earlier) = self.task.take()
+                    && self.mode.learn
+                {
                     let _ = self.keep_task(earlier, &Value::Null, true);
                 }
-                self.host.task_begin(&request);
+                self.mode = self.host.task_begin(&request);
                 self.widen();
                 self.task = Some(Task {
                     request: request.clone(),
                     ..Task::default()
                 });
+                if !self.mode.offer_skills {
+                    return Ok(json!({
+                        "skills": [],
+                        "hint": "Follow the steps the request gives, with iAi's commands; no \
+                                 saved skill is used for this task."
+                    }));
+                }
                 let found: Vec<Value> = store
                     .search(&request, 3)
                     .iter()
@@ -919,10 +1080,58 @@ impl<'a> Server<'a> {
             }
             Kind::TaskEnd => {
                 let status = args.get("status").and_then(Value::as_str).unwrap_or("done");
+                // G6: "done" only when the work open says it is (a pack's
+                // `task.ready`: a redraw not drawn, reviewed and saved is
+                // not). "failed" with a report always goes through.
+                // It is worked out on a worker in a window: wait for it.
+                // Only the documents this task worked on are asked about: a
+                // redraw tab left open from another task does not hold up an
+                // ID photo's or a form's «done» (10/11 audit).
+                let docs = self.task.as_ref().map(task_docs).unwrap_or_default();
+                let ready = if docs.is_empty() {
+                    Err(CmdError::new(
+                        ErrorCode::NotEnabled,
+                        "no document worked on",
+                    ))
+                } else {
+                    self.host
+                        .execute(CommandCall::new("task.ready", json!({"docs": docs})))
+                };
+                let ready = match ready {
+                    Ok(Reply::Done { result, .. }) => Some(result),
+                    Ok(Reply::Started { job }) => {
+                        match self.host.job(job, std::time::Duration::from_secs(60)) {
+                            Ok(Some(JobState::Done { result, .. })) => Some(result),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if status == "done"
+                    && let Some(result) = ready
+                    && result.get("ready").and_then(Value::as_bool) == Some(false)
+                {
+                    let reasons = result.get("reasons").cloned().unwrap_or(json!([]));
+                    return Err(CmdError::new(
+                        ErrorCode::NotEnabled,
+                        "not_done: the work is not finished; do what `reasons` says (vector.next \
+                         gives the steps), or end with status \"failed\" and tell the person \
+                         what is left",
+                    )
+                    .vi("Việc chưa xong: làm tiếp theo vector.next, hoặc kết thúc «failed» và nói rõ còn gì")
+                    .with_hint(json!({"gate": "not_done", "reasons": reasons,
+                        "report": result.get("report").cloned().unwrap_or(Value::Null)})));
+                }
                 self.host.task_end(status, &text("title"));
+                let learn = std::mem::take(&mut self.mode).learn;
                 let Some(task) = self.task.take() else {
                     return Ok(json!({"saved": null, "reason": "nothing was done in this task"}));
                 };
+                if !learn {
+                    return Ok(
+                        json!({"saved": null, "reason": "this kind of task is not kept as a skill"}),
+                    );
+                }
                 if status != "done" {
                     return Ok(
                         json!({"saved": null, "reason": format!("the task ended {status}: nothing kept")}),

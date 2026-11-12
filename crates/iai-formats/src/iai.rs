@@ -362,6 +362,13 @@ fn build_canvas_from_meta<R: Read + Seek>(
         .filter(|s| !s.trim().is_empty());
     // Master opt-out (multi-page docs). Absent / older files → defaults to on.
     canvas.metadata.use_master = meta["use_master"].as_bool().unwrap_or(true);
+    // A tool's notes. Absent on older files.
+    if let Some(notes) = meta.get("notes").and_then(serde_json::Value::as_object) {
+        canvas.metadata.notes = notes
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+            .collect();
+    }
     // 16-bit mode (post-B2 key; absent on older files = 8-bit). Keeps a reopened
     // 16-bit document in 16-bit mode so its first edit preserves precision
     // instead of quantizing the masters the 16-bit layer PNGs just restored.
@@ -514,6 +521,33 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.portrait =
             read_portrait(archive, prefix, i, &layer_info["portrait"]).map(std::sync::Arc::new);
         layer.cut = read_cut(&layer_info["cut"]).map(std::sync::Arc::new);
+        // Older builds neither write nor read it: the layer is its pixels.
+        let placed_entry = format!("{prefix}layer_{}_placed.png", i);
+        if layer_info["placed"].is_object()
+            && let Ok(mut f) = archive.by_name(&placed_entry)
+        {
+            let mut buf = Vec::new();
+            if f.read_to_end(&mut buf).is_ok()
+                && let Ok(img) = image::load_from_memory(&buf)
+            {
+                let rgba = img.to_rgba8();
+                let (pw, ph) = rgba.dimensions();
+                let r = &layer_info["placed"]["rect"];
+                let at =
+                    |k: usize| r.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+                let sig = layer_info["placed"]["sig"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                layer.placed = Some(std::sync::Arc::new(iai_doc::placed_image::PlacedImage {
+                    rgba: rgba.into_raw(),
+                    width: pw,
+                    height: ph,
+                    rect: [at(0), at(1), at(2), at(3)],
+                    sig,
+                }));
+            }
+        }
 
         canvas.layer_stack.layers.push(layer);
     }
@@ -1134,6 +1168,15 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
                     "doubtful": c.doubtful,
                 })
             }),
+            // A picture placed finer than the page: its place and the
+            // layer's pixels then; its pixels at {prefix}layer_{i}_placed.png.
+            "placed": layer
+                .placed
+                .as_ref()
+                .filter(|p| p.still_in(layer))
+                .map_or(serde_json::Value::Null, |p| {
+                    serde_json::json!({"rect": p.rect, "sig": p.sig.to_string()})
+                }),
         }));
     }
 
@@ -1229,6 +1272,10 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
     // default is on), so ordinary pages add no key and stay byte-clean.
     if !canvas.metadata.use_master {
         meta["use_master"] = serde_json::json!(false);
+    }
+    // A tool's notes — written only when there are any.
+    if !canvas.metadata.notes.is_empty() {
+        meta["notes"] = serde_json::json!(canvas.metadata.notes);
     }
     meta
 }
@@ -1350,6 +1397,12 @@ fn write_canvas_layers(
             .filter(|r| canvas.layer_stack.layers.iter().any(|l| l.id == r.source))
         {
             write_portrait_masks(zip, prefix, i, recipe)?;
+        }
+        if let Some(p) = layer.placed.as_ref().filter(|p| p.still_in(layer)) {
+            let png = encode_png(&p.rgba, p.width, p.height)?;
+            zip.start_file(format!("{prefix}layer_{}_placed.png", i), stored)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&png).map_err(|e| e.to_string())?;
         }
     }
 
@@ -1855,6 +1908,12 @@ fn color_space_to_str(cs: iai_canvas::canvas::ColorSpace) -> &'static str {
 }
 
 fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
+    let fill = td.fill.as_ref().map(|f| {
+        serde_json::json!({
+            "angle": f.angle_deg,
+            "stops": f.stops.iter().map(|(c, at)| serde_json::json!([c, at])).collect::<Vec<_>>(),
+        })
+    });
     let mut obj = serde_json::json!({
         "content": &td.content,
         "font_px": td.font_px,
@@ -1906,6 +1965,9 @@ fn text_to_json(td: &iai_text::text::TextData) -> serde_json::Value {
             "offset": path.offset,
             "flip": path.flip,
         });
+    }
+    if let (Some(fill), Some(o)) = (fill, obj.as_object_mut()) {
+        o.insert("fill".into(), fill);
     }
     obj
 }
@@ -2065,6 +2127,31 @@ fn json_to_text_data(v: &serde_json::Value) -> Option<iai_text::text::TextData> 
         flip_y,
         glyph_styles,
         path: json_to_text_path(&v["path"]),
+        fill: json_to_text_fill(&v["fill"]),
+    })
+}
+
+/// A text's gradient fill as written (`{angle, stops: [[rgba, at], …]}`).
+fn json_to_text_fill(v: &serde_json::Value) -> Option<iai_text::text::TextFill> {
+    let stops: Vec<([u8; 4], f32)> = v["stops"]
+        .as_array()?
+        .iter()
+        .filter_map(|s| {
+            let c = s.get(0)?.as_array()?;
+            let ch = |i: usize| {
+                c.get(i)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|x| x.min(255) as u8)
+            };
+            Some((
+                [ch(0)?, ch(1)?, ch(2)?, ch(3).unwrap_or(255)],
+                s.get(1)?.as_f64()? as f32,
+            ))
+        })
+        .collect();
+    (stops.len() >= 2).then(|| iai_text::text::TextFill {
+        stops,
+        angle_deg: v["angle"].as_f64().unwrap_or(0.0) as f32,
     })
 }
 
@@ -3015,6 +3102,30 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_notes_round_trip_and_none_add_no_key() {
+        let dir = tmp_dir("notes");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 8, 8);
+        canvas
+            .metadata
+            .notes
+            .insert("redraw".to_string(), r#"{"stage":"ve"}"#.to_string());
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        assert_eq!(
+            loaded.metadata.notes.get("redraw").map(String::as_str),
+            Some(r#"{"stage":"ve"}"#)
+        );
+        let plain = solid([255, 255, 255, 255], 8, 8);
+        assert!(canvas_meta_json(&plain).get("notes").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn page_bleed_and_margin_round_trip() {
         let dir = tmp_dir("page-setup");
         let path = dir.join("doc.iai");
@@ -3248,6 +3359,42 @@ mod tests {
         };
         assert!(loaded.layer_stack.layers[0].portrait.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A picture placed finer than the page comes back with the file.
+    #[test]
+    fn a_placed_picture_round_trips() {
+        let dir = tmp_dir("placed");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([255, 255, 255, 255], 40, 30);
+        let idx = canvas.layer_stack.add_layer(40, 30);
+        let px: Vec<u8> = (0..40 * 30 * 4).map(|i| (i % 251) as u8).collect();
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.tiles = iai_raster::tile::TileMap::from_rgba(&px, 40, 30);
+        let sig = iai_doc::placed_image::pixels_sig(&layer.flatten_tiles(), 40, 30);
+        layer.placed = Some(std::sync::Arc::new(iai_doc::placed_image::PlacedImage {
+            rgba: vec![7u8; 400 * 300 * 4],
+            width: 400,
+            height: 300,
+            rect: [0.0, 0.0, 40.0, 30.0],
+            sig,
+        }));
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let l = loaded
+            .layer_stack
+            .layers
+            .iter()
+            .find(|l| l.placed.is_some())
+            .expect("placed layer");
+        let p = l.placed.as_deref().unwrap();
+        assert_eq!((p.width, p.height), (400, 300));
+        assert!(p.still_in(l), "the layer's pixels match its picture again");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -3862,6 +4009,29 @@ mod tests {
         .expect("write");
         assert!(load(&path).is_err(), "a newer-version file must be refused");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A gradient across the letters (gold lettering) is kept in the file.
+    #[test]
+    fn text_fill_round_trips_json() {
+        let td = iai_text::text::TextData {
+            content: "VIP".to_string(),
+            fill: Some(iai_text::text::TextFill {
+                stops: vec![([255, 240, 160, 255], 0.0), ([190, 120, 10, 255], 1.0)],
+                angle_deg: 90.0,
+            }),
+            ..iai_text::text::TextData::default()
+        };
+        let back = json_to_text_data(&text_to_json(&td)).expect("text");
+        assert_eq!(back.fill, td.fill);
+        let plain = iai_text::text::TextData {
+            content: "x".to_string(),
+            ..iai_text::text::TextData::default()
+        };
+        assert_eq!(
+            json_to_text_data(&text_to_json(&plain)).expect("text").fill,
+            None
+        );
     }
 
     #[test]

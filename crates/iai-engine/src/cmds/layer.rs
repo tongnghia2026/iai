@@ -212,20 +212,34 @@ pub struct DeleteParams {
     /// Document id (see `doc.list`); the document shown when omitted.
     pub doc: Option<u32>,
     /// Layer id (see `doc.inspect`).
-    pub layer: u32,
+    pub layer: Option<u32>,
+    /// Or several layers at once (one undo step).
+    pub layers: Option<Vec<u32>>,
     /// When the layer is one of those picked in the Layers panel, delete
     /// every picked one, as the panel's Delete does.
     #[serde(default)]
     pub picked: bool,
 }
-impl Validate for DeleteParams {}
+impl Validate for DeleteParams {
+    fn validate(&self) -> Result<(), CmdError> {
+        match (&self.layer, &self.layers) {
+            (Some(_), None) => Ok(()),
+            (None, Some(v)) if !v.is_empty() && !self.picked => Ok(()),
+            _ => Err(CmdError::bad_param(
+                "layer",
+                "one layer (layer) or several (layers, without picked)",
+            )),
+        }
+    }
+}
 
 static DELETE: CommandMeta = CommandMeta {
     id: "layer.delete",
     label_vi: "Xóa layer",
     label_en: "Delete Layer",
-    doc: "Delete a layer; a group goes with the layers in it. The last layer cannot be deleted. \
-          With `picked`, the other layers picked in the Layers panel go too.",
+    doc: "Delete a layer (or `layers`, several in one step); a group goes with the layers in \
+          it. The last layer cannot be deleted. With `picked`, the other layers picked in the \
+          Layers panel go too.",
     effects: &[Effect::Edit],
     featured: false,
 };
@@ -241,7 +255,15 @@ impl Command for DeleteLayer {
     fn plan(&self, s: &mut Session<'_>, p: DeleteParams) -> Result<Plan<LayerChanged>, CmdError> {
         let doc = s.doc_id(p.doc)?;
         let canvas = s.canvas_mut(Some(doc))?;
-        let idx = layer_index(canvas, Some(p.layer))?;
+        let ids = p
+            .layers
+            .clone()
+            .unwrap_or_else(|| p.layer.into_iter().collect());
+        let idxs = ids
+            .iter()
+            .map(|id| layer_index(canvas, Some(*id)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let idx = idxs.first().copied().unwrap_or(0);
         if p.picked {
             // The panel's own way: the picked layers with it, when it is one.
             if !canvas.delete_layer_at(idx) {
@@ -251,7 +273,9 @@ impl Command for DeleteLayer {
                 ));
             }
         } else {
-            let mut doomed = canvas.layer_stack.with_group_contents(&[idx]);
+            let mut doomed = canvas.layer_stack.with_group_contents(&idxs);
+            doomed.sort_unstable();
+            doomed.dedup();
             if doomed.len() >= canvas.layer_stack.layers.len() {
                 return Err(not_enabled(
                     "a page keeps at least one layer",

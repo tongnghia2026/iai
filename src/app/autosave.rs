@@ -699,6 +699,15 @@ impl App {
             if let Some(window) = &self.win.window {
                 window.request_redraw();
             }
+        } else if let Some(host) = crate::diag::host_app() {
+            // Started from inside another app (a test build run from a chat
+            // window's Run button): when that app closes or updates itself,
+            // iAi is killed with it, mid-work, with no trace (11/11). Said
+            // once, in the status bar, so the next death is no mystery.
+            self.shell.status_msg = format!(
+                "iAi đang chạy bên trong {host}: app đó đóng hay tự cập nhật là iAi bị tắt \
+                 theo. Nên mở iAi từ thư mục (Explorer)."
+            );
         }
     }
 

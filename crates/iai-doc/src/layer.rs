@@ -1027,6 +1027,10 @@ pub struct Layer {
     /// The photo and corners a piece laid flat into this layer was cut with
     /// (a card on a print sheet), so it can be cut again; `None` otherwise.
     pub cut: Option<std::sync::Arc<crate::cut_source::CutSource>>,
+    /// A picture placed at a finer grain than the page (a generated
+    /// illustration): files written carry it while the layer still shows
+    /// it; `None` otherwise.
+    pub placed: Option<std::sync::Arc<crate::placed_image::PlacedImage>>,
 }
 
 impl Layer {
@@ -1077,6 +1081,7 @@ impl Layer {
             connector: None,
             portrait: None,
             cut: None,
+            placed: None,
         }
     }
 
@@ -1114,6 +1119,7 @@ impl Layer {
             connector: None,
             portrait: None,
             cut: None,
+            placed: None,
         }
     }
 
@@ -1145,6 +1151,7 @@ impl Layer {
             connector: None,
             portrait: None,
             cut: None,
+            placed: None,
         }
     }
 
@@ -1209,6 +1216,8 @@ impl Layer {
             portrait: self.portrait.clone(),
             // A duplicated card is cut from the same photo.
             cut: self.cut.clone(),
+            // A duplicate shows the same placed picture.
+            placed: self.placed.clone(),
         }
     }
 

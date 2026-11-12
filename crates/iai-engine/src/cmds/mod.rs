@@ -114,6 +114,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(design::BreakApart);
     r.register(text::AddText);
     r.register(text::SetText);
+    r.register(text::ListFonts);
     r.register(text::FitTextToPath);
     r.register(text::FitTextToFrame);
     r.register(edit::Undo);

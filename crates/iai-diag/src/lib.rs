@@ -725,7 +725,97 @@ fn open_journal(build: &str, what: &str) -> bool {
     if !what.is_empty() {
         note("start", what);
     }
+    let parents = ancestor_names();
+    let host = parents
+        .iter()
+        .find(|n| {
+            let n = n.to_ascii_lowercase();
+            n == "claude.exe" || n == "antigravity.exe"
+        })
+        .cloned();
+    if !parents.is_empty() {
+        let mut said = format!("parents: {}", parents.join(" < "));
+        if host.is_some() {
+            said.push_str(" — inside that app: closed or updated, it takes iAi with it");
+        }
+        note("start", &said);
+    }
+    let _ = HOST_APP.set(host);
     true
+}
+
+/// The host app this process runs inside, when it was started from within
+/// one (nearest such ancestor): `"claude.exe"` or `"antigravity.exe"`. A
+/// build handed over in a chat and run from there lives inside that app,
+/// and is killed with no trace when the app closes or updates itself
+/// (11/11: the window died mid-redraw the second the Claude app registered
+/// its new version). Known once [`start`] has run.
+pub fn host_app() -> Option<&'static str> {
+    HOST_APP.get().and_then(|h| h.as_deref())
+}
+
+static HOST_APP: OnceLock<Option<String>> = OnceLock::new();
+
+/// This process's ancestors' exe names, nearest first, at most eight.
+#[cfg(windows)]
+fn ancestor_names() -> Vec<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut by_pid = std::collections::HashMap::new();
+    // SAFETY: a snapshot handle is taken, read with Process32FirstW /
+    // Process32NextW on a properly sized PROCESSENTRY32W, and closed; no
+    // memory of another process is touched.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Vec::new();
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snapshot, &mut entry);
+        while more != 0 {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            by_pid.insert(
+                entry.th32ProcessID,
+                (
+                    entry.th32ParentProcessID,
+                    String::from_utf16_lossy(&entry.szExeFile[..len]),
+                ),
+            );
+            more = Process32NextW(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+    }
+    let mut out = Vec::new();
+    let mut pid = std::process::id();
+    // A parent pid may have been reused since the parent ended: the walk
+    // can name a stranger, which the cap and the cycle check keep harmless.
+    while let Some(&(parent, _)) = by_pid.get(&pid) {
+        if parent == pid || out.len() >= 8 {
+            break;
+        }
+        let Some((_, parent_name)) = by_pid.get(&parent) else {
+            break;
+        };
+        if out.contains(parent_name) {
+            break;
+        }
+        out.push(parent_name.clone());
+        pid = parent;
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn ancestor_names() -> Vec<String> {
+    Vec::new()
 }
 
 /// This session's folder, once [`start`] has run.
@@ -880,6 +970,18 @@ pub fn finish() {
 
 #[cfg(test)]
 mod tests {
+    /// 11/11: the window died mid-redraw the second the Claude app updated
+    /// itself — it had been started from inside that app. The parent walk
+    /// names this process's ancestors so the journal says so at once.
+    #[test]
+    fn the_journal_knows_the_processes_this_one_runs_inside() {
+        let parents = super::ancestor_names();
+        if cfg!(windows) {
+            assert!(!parents.is_empty(), "a test runs under cargo at least");
+            assert!(parents.iter().all(|n| !n.is_empty()), "{parents:?}");
+        }
+    }
+
     use super::*;
     use std::sync::Arc;
 

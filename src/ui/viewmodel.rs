@@ -916,6 +916,8 @@ pub struct ErrandForm {
     /// ID photos with online AI: the clothes to put on (see
     /// [`ERRAND_SHIRTS`]); empty keeps them.
     pub shirt: String,
+    /// A vector redraw: the paper it prints on, "A5", "A4", "A3", "A2".
+    pub print: String,
 }
 
 #[cfg(feature = "pro")]
@@ -930,6 +932,7 @@ impl Default for ErrandForm {
             copies: 4,
             online: false,
             shirt: String::new(),
+            print: "A4".to_string(),
         }
     }
 }
@@ -967,6 +970,15 @@ pub struct ErrandRunView {
     /// What the agent said it will draw (a vector redraw), each ticked
     /// once drawn.
     pub plan: Vec<(String, bool)>,
+    /// A guided redraw: where it stands, by the sheet's regions ("Đã vẽ
+    /// 30/75 vùng · đang soát vòng 2").
+    pub progress: Option<String>,
+    /// What the last review round found.
+    pub faults: Vec<String>,
+    /// A redraw on a sheet the person may judge: «Đạt» / «Soát thêm».
+    pub judged: bool,
+    /// What the person said of it: «Đạt» (true) or «Soát thêm».
+    pub verdict: Option<bool>,
 }
 
 /// "Nhờ AI làm" as its window shows it.

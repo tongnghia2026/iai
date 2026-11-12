@@ -20,6 +20,24 @@ pub struct Grants {
     pub write: Vec<PathBuf>,
 }
 
+/// How the window wants a task done: a vector redraw is not offered saved
+/// skills (they replay another picture's coordinates) and not kept as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskMode {
+    pub offer_skills: bool,
+    pub learn: bool,
+}
+
+impl Default for TaskMode {
+    fn default() -> Self {
+        Self {
+            offer_skills: true,
+            learn: true,
+        }
+    }
+}
+
 /// Where commands run: an engine with no window, or the app the person has
 /// open (through the bridge).
 pub trait Host {
@@ -32,8 +50,11 @@ pub trait Host {
     fn job(&mut self, job: JobId, wait: Duration) -> Result<Option<JobState>, CmdError>;
     /// Ask a running job to stop; false when none runs by that id.
     fn cancel(&mut self, job: JobId) -> Result<bool, CmdError>;
-    /// The agent began a task the person asked for, in their words.
-    fn task_begin(&mut self, _request: &str) {}
+    /// The agent began a task the person asked for, in their words; how
+    /// the window wants it done.
+    fn task_begin(&mut self, _request: &str) -> TaskMode {
+        TaskMode::default()
+    }
     /// The agent ended its task: "done", "failed" or "cancelled".
     fn task_end(&mut self, _status: &str, _title: &str) {}
     /// Folders the person granted there, beyond the session's own.

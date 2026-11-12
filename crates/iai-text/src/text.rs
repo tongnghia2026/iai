@@ -17,8 +17,8 @@ use unicode_normalization::char::canonical_combining_class;
 use iai_doc::model::text::normalized_family_key;
 
 pub use iai_doc::model::text::{
-    GlyphStyle, MAX_EDITABLE_FONT_PX, MIN_EDITABLE_FONT_PX, TextAlign, TextData, TextFontFamily,
-    TextPath,
+    GlyphStyle, MAX_EDITABLE_FONT_PX, MIN_EDITABLE_FONT_PX, TextAlign, TextData, TextFill,
+    TextFontFamily, TextPath,
 };
 
 /// The font families installed on this machine, and the faces of one.
@@ -117,6 +117,8 @@ struct SystemFontEntry {
     family: String,
     style: String,
     path: PathBuf,
+    /// The face's number in a collection (.ttc); 0 in a single font.
+    index: u32,
     score: i32,
 }
 
@@ -177,28 +179,41 @@ fn build_system_font_entries() -> Vec<SystemFontEntry> {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        // No FontVec parse here: cloning + parsing every installed font makes
-        // the scan cost minutes/hundreds of MB. The name-table parse below is
-        // validation enough for listing; actual use re-validates per font.
-        let Some(family) = font_family_name_from_bytes(&bytes) else {
-            continue;
+        // A collection (.ttc) holds several faces, each its own table
+        // directory (plan 08/11, M3.1).
+        let faces: Vec<(u32, usize)> = if bytes.get(0..4) == Some(b"ttcf") {
+            let n = read_u32(&bytes, 8).unwrap_or(0).min(64);
+            (0..n)
+                .filter_map(|i| Some((i, read_u32(&bytes, 12 + i as usize * 4)? as usize)))
+                .collect()
+        } else {
+            vec![(0, 0)]
         };
-        let style = font_style_name_from_bytes(&bytes).unwrap_or_else(|| "Regular".to_string());
-        let key = normalized_family_key(&family);
-        if key.is_empty() {
-            continue;
-        }
-        let entry = SystemFontEntry {
-            family,
-            style: style.clone(),
-            score: regular_font_score(&path),
-            path,
-        };
-        let face_key = format!("{key}\u{1f}{}", style.to_ascii_lowercase());
-        match by_family.get(&face_key) {
-            Some(existing) if existing.score >= entry.score => {}
-            _ => {
-                by_family.insert(face_key, entry);
+        for (index, base) in faces {
+            // No FontVec parse here: cloning + parsing every installed font makes
+            // the scan cost minutes/hundreds of MB. The name-table parse below is
+            // validation enough for listing; actual use re-validates per font.
+            let Some(family) = font_family_name_at(&bytes, base) else {
+                continue;
+            };
+            let style = font_style_name_at(&bytes, base).unwrap_or_else(|| "Regular".to_string());
+            let key = normalized_family_key(&family);
+            if key.is_empty() {
+                continue;
+            }
+            let entry = SystemFontEntry {
+                family,
+                style: style.clone(),
+                score: regular_font_score(&path),
+                path: path.clone(),
+                index,
+            };
+            let face_key = format!("{key}\u{1f}{}", style.to_ascii_lowercase());
+            match by_family.get(&face_key) {
+                Some(existing) if existing.score >= entry.score => {}
+                _ => {
+                    by_family.insert(face_key, entry);
+                }
             }
         }
     }
@@ -214,6 +229,16 @@ fn system_font_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(windir).join("Fonts"));
     } else {
         dirs.push(PathBuf::from("C:/Windows/Fonts"));
+    }
+    // Fonts installed for one person only («Install» rather than «Install
+    // for all users»): Windows keeps them apart.
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        dirs.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
     }
     dirs.extend([
         PathBuf::from("/System/Library/Fonts"),
@@ -249,17 +274,24 @@ fn collect_font_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 fn is_supported_font_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf"))
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
         .unwrap_or(false)
 }
 
 // Builtin candidates first: they are exact known paths, so resolving the
 // default families never has to wait for the full system font scan.
 fn font_path_for_family(family: &TextFontFamily) -> Option<PathBuf> {
+    font_face_for_family(family).map(|(p, _)| p)
+}
+
+/// The file of `family` and the face's number in it (a collection holds
+/// several).
+fn font_face_for_family(family: &TextFontFamily) -> Option<(PathBuf, u32)> {
     builtin_candidates(family)
         .iter()
         .map(PathBuf::from)
         .find(|path| path.exists())
+        .map(|p| (p, 0))
         .or_else(|| {
             let key = normalized_family_key(family.name());
             system_font_entries()
@@ -271,12 +303,26 @@ fn font_path_for_family(family: &TextFontFamily) -> Option<PathBuf> {
                     }
                     _ => true,
                 })
-                .map(|entry| entry.path.clone())
+                .map(|entry| (entry.path.clone(), entry.index))
         })
 }
 
 pub fn font_bytes_for(family: &TextFontFamily) -> Option<Vec<u8>> {
-    std::fs::read(font_path_for_family(family)?).ok()
+    // A face of a collection past its first: the file's bytes would give
+    // another face (the UI's font list registers whole files).
+    let (path, index) = font_face_for_family(family)?;
+    (index == 0).then_some(())?;
+    std::fs::read(path).ok()
+}
+
+/// The file of `family` and the number of its face in it (a collection
+/// holds several), the face verified to parse — for registering into egui,
+/// which takes the face's number with the file.
+pub fn validated_font_face_for(family: &TextFontFamily) -> Option<(Vec<u8>, u32)> {
+    let (path, index) = font_face_for_family(family)?;
+    let bytes = std::fs::read(path).ok()?;
+    FontVec::try_from_vec_and_index(bytes.clone(), index).ok()?;
+    Some((bytes, index))
 }
 
 /// Font bytes verified to parse as a font — for registering into egui, which
@@ -333,14 +379,12 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-fn font_family_name_from_bytes(data: &[u8]) -> Option<String> {
-    if data.get(0..4) == Some(b"ttcf") {
-        return None;
-    }
-    let table_count = read_u16(data, 4)? as usize;
+/// The family of the face whose table directory starts at `base`.
+fn font_family_name_at(data: &[u8], base: usize) -> Option<String> {
+    let table_count = read_u16(data, base + 4)? as usize;
     let mut name_table = None;
     for i in 0..table_count {
-        let rec = 12 + i * 16;
+        let rec = base + 12 + i * 16;
         if data.get(rec..rec + 4) == Some(b"name") {
             let offset = read_u32(data, rec + 8)? as usize;
             let length = read_u32(data, rec + 12)? as usize;
@@ -404,14 +448,12 @@ fn font_family_name_from_bytes(data: &[u8]) -> Option<String> {
     best.map(|(_, value)| value)
 }
 
-fn font_style_name_from_bytes(data: &[u8]) -> Option<String> {
-    if data.get(0..4) == Some(b"ttcf") {
-        return None;
-    }
-    let table_count = read_u16(data, 4)? as usize;
+/// The style of the face whose table directory starts at `base`.
+fn font_style_name_at(data: &[u8], base: usize) -> Option<String> {
+    let table_count = read_u16(data, base + 4)? as usize;
     let mut name_table = None;
     for i in 0..table_count {
-        let rec = 12 + i * 16;
+        let rec = base + 12 + i * 16;
         if data.get(rec..rec + 4) == Some(b"name") {
             let offset = read_u32(data, rec + 8)? as usize;
             let length = read_u32(data, rec + 12)? as usize;
@@ -503,8 +545,11 @@ fn family_font(family: &TextFontFamily) -> Option<&'static FontVec> {
         return font;
     }
 
-    let font = font_bytes_for(family)
-        .and_then(|bytes| FontVec::try_from_vec(bytes).ok())
+    let font = font_face_for_family(family)
+        .and_then(|(path, index)| {
+            let bytes = std::fs::read(path).ok()?;
+            FontVec::try_from_vec_and_index(bytes, index).ok()
+        })
         .map(|font| &*Box::leak(Box::new(font)));
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, font);
@@ -527,6 +572,52 @@ pub fn font_for(family: &TextFontFamily) -> Option<&'static FontVec> {
                 .find_map(|fallback| family_font(fallback))
         })
         .or_else(|| TextFontFamily::all().iter().find_map(family_font))
+}
+
+/// Whether `family` itself is installed and draws every letter of `text`
+/// (not a fallback's: a font without Vietnamese marks is no match for
+/// words that have them).
+pub fn covers(family: &TextFontFamily, text: &str) -> bool {
+    let Some(font) = family_font(family) else {
+        return false;
+    };
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| font.glyph_id(c).0 != 0)
+}
+
+/// How far the first line's baseline lies under the top of its line box,
+/// at `px` (the font's ascent): where an SVG `<text>` puts its `y`.
+pub fn ascent_px(family: &TextFontFamily, px: f32) -> f32 {
+    font_for(family).map_or(px * 0.9, |f| f.as_scaled(PxScale::from(px)).ascent())
+}
+
+/// Letters a font must draw to set Vietnamese: the vowels with every mark
+/// and đ.
+pub const VIETNAMESE_PROBE: &str = "ăâđêôơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹĐƠƯ";
+
+/// Whether `family` is installed and draws every letter of `text`, read
+/// from its file without keeping it (for a list of many fonts: the cache
+/// of [`covers`] keeps each font it loads).
+pub fn covers_once(family: &TextFontFamily, text: &str) -> bool {
+    let Some((path, index)) = font_face_for_family(family) else {
+        return false;
+    };
+    let Some(font) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| FontVec::try_from_vec_and_index(bytes, index).ok())
+    else {
+        return false;
+    };
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .all(|c| font.glyph_id(c).0 != 0)
+}
+
+/// Whether `family` is installed on this machine (a built-in family's
+/// file, or a scanned one of that name).
+pub fn installed(family: &TextFontFamily) -> bool {
+    font_face_for_family(family).is_some()
 }
 
 /// True when a font is available (used by the UI to warn the user).
@@ -1157,12 +1248,51 @@ pub fn rasterize(td: &TextData) -> Option<Rasterized> {
             }
         }
     }
+    if let Some(fill) = &td.fill {
+        paint_fill(&mut buf, width, height, fill, opacity);
+    }
 
     Some(Rasterized {
         rgba: buf,
         width,
         height,
     })
+}
+
+/// The letters' pixels of `buf` (`w × h`) coloured by `fill` across their
+/// own box, their coverage kept.
+fn paint_fill(buf: &mut [u8], w: u32, h: u32, fill: &crate::text::TextFill, opacity: f32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for y in 0..h {
+        for x in 0..w {
+            if buf[((y * w + x) * 4 + 3) as usize] > 0 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    if x0 >= x1 {
+        return;
+    }
+    let b = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * w + x) * 4) as usize;
+            if buf[i + 3] == 0 {
+                continue;
+            }
+            let c = fill.at(fill.share(x as f32 + 0.5, y as f32 + 0.5, b));
+            // The letter's coverage, with the gradient colour's own alpha.
+            let a = (f32::from(buf[i + 3]) * f32::from(c[3]) / 255.0).round() as u8;
+            buf[i] = c[0];
+            buf[i + 1] = c[1];
+            buf[i + 2] = c[2];
+            buf[i + 3] = a;
+            let _ = opacity;
+        }
+    }
 }
 
 fn placed_raster_bounds(
@@ -1295,6 +1425,36 @@ pub fn rasterize_stretched(td: &TextData) -> Option<Rasterized> {
         width,
         height: upright.height,
     })
+}
+
+/// The placement delta [`rasterize_placed`] returns for straight text laid
+/// out as `layout`, from the raster's size alone: rasterizing a large text
+/// only to learn it took ~450 ms, and the Move tool asks for a text layer's
+/// box every frame and every mouse move (11/11: a heading stretched across
+/// an A4 page froze the window). `None` where `rasterize_placed` gives none.
+fn placed_delta(td: &TextData, layout: &TextLayout) -> Option<(i32, i32)> {
+    if td.content.trim().is_empty() {
+        return None;
+    }
+    let angle = td.rotation_deg.rem_euclid(360.0);
+    if (!angle.is_finite() || angle <= 0.001 || (360.0 - angle) <= 0.001)
+        && !td.flip_x
+        && !td.flip_y
+    {
+        return Some((0, 0));
+    }
+    let stretch_x = if td.stretch_x.is_finite() && td.stretch_x > 0.001 {
+        td.stretch_x
+    } else {
+        1.0
+    };
+    let width = if (stretch_x - 1.0).abs() <= 0.001 {
+        layout.width
+    } else {
+        ((layout.width as f32 * stretch_x).round() as u32).max(1)
+    };
+    placed_raster_bounds(width, layout.height, 1.0, angle, td.flip_x, td.flip_y)
+        .map(|(dx, dy, _, _)| (dx, dy))
 }
 
 pub fn rasterize_placed(td: &TextData) -> Option<(Rasterized, (i32, i32))> {
@@ -1720,6 +1880,52 @@ pub struct TextCurveGroup {
     pub path: iai_doc::vector::path::PathData,
 }
 
+/// `fill` as a vector gradient over the box `b` (canvas space): unit x from
+/// one side of the box to the other along its angle.
+pub fn text_gradient(
+    fill: &crate::text::TextFill,
+    b: (f32, f32, f32, f32),
+) -> iai_doc::vector::style::Gradient {
+    use iai_doc::vector::color::ColorValue;
+    use iai_doc::vector::style::{Gradient, GradientKind, GradientStop, MAX_GRADIENT_STOPS};
+    use iai_geom::vector::affine::AffineTransform;
+    let (c, s) = (
+        fill.angle_deg.to_radians().cos(),
+        fill.angle_deg.to_radians().sin(),
+    );
+    let (cx, cy) = ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0);
+    let half = ((b.2 - b.0) * c.abs() + (b.3 - b.1) * s.abs()) / 2.0;
+    let (ax, ay) = (cx - c * half, cy - s * half);
+    let (dx, dy) = (2.0 * c * half, 2.0 * s * half);
+    let t = AffineTransform {
+        a: dx,
+        b: dy,
+        c: -dy,
+        d: dx,
+        e: ax,
+        f: ay,
+    };
+    let first = fill.stops.first().map_or([0, 0, 0, 255], |s| s.0);
+    let last = fill.stops.last().map_or(first, |s| s.0);
+    let mut g = Gradient::two_color(
+        GradientKind::Linear,
+        ColorValue::from_rgba8(first),
+        ColorValue::from_rgba8(last),
+        t,
+    );
+    let n = fill.stops.len().min(MAX_GRADIENT_STOPS);
+    if n >= 2 {
+        for (k, (col, at)) in fill.stops.iter().take(n).enumerate() {
+            g.stops[k] = GradientStop {
+                offset: *at,
+                color: ColorValue::from_rgba8(*col),
+            };
+        }
+        g.stop_count = n as u8;
+    }
+    g
+}
+
 /// Build transient vector objects for display/export while keeping the source
 /// [`TextData`] editable. Unlike "Convert Text to Curves", this does not mutate
 /// the layer stack.
@@ -1733,12 +1939,28 @@ pub fn text_vector_objects(
     use iai_geom::vector::affine::AffineTransform;
 
     let opacity = td.opacity.clamp(0.0, 1.0);
-    text_to_curves(td, layer_offset)
+    let groups = text_to_curves(td, layer_offset);
+    // A gradient across the letters: from one side of all of them to the
+    // other, along the fill's angle.
+    let fill = td.fill.as_ref().and_then(|f| {
+        let b = groups
+            .iter()
+            .filter_map(|g| iai_vector::vector::flatten::tight_bounds(&g.path, 0.5))
+            .reduce(|a, b| a.union(b))?;
+        Some(text_gradient(f, (b.x, b.y, b.x + b.w, b.y + b.h)))
+    });
+    groups
         .into_iter()
         .filter_map(|group| {
             let style = VectorStyle {
                 opacity,
-                ..VectorStyle::filled(ColorValue::from_rgba8(group.color))
+                ..match &fill {
+                    Some(g) => VectorStyle {
+                        fill: iai_doc::vector::style::Paint::Gradient(*g),
+                        ..VectorStyle::filled(ColorValue::from_rgba8(group.color))
+                    },
+                    None => VectorStyle::filled(ColorValue::from_rgba8(group.color)),
+                }
             };
             let object = VectorObjectData::new(group.path, style, AffineTransform::IDENTITY);
             object.validate().is_ok().then_some(object)
@@ -1833,7 +2055,7 @@ fn curves_core(
     let origin = match path_origin {
         Some(o) => o,
         None => {
-            let delta = rasterize_placed(td).map(|(_, d)| d).unwrap_or((0, 0));
+            let delta = placed_delta(td, &layout).unwrap_or((0, 0));
             (
                 layer_offset.0 as f32 - delta.0 as f32,
                 layer_offset.1 as f32 - delta.1 as f32,
@@ -1959,6 +2181,20 @@ mod tests {
         TextCase, TextData, TextFontFamily, next_text_case, rasterize, rasterize_placed,
         text_case_of, transform_text_case,
     };
+
+    /// A collection's later face (Cambria Math is the second in
+    /// cambria.ttc) comes with its number, for the UI's font list.
+    #[test]
+    fn a_collections_later_face_has_its_number() {
+        let math = TextFontFamily::System("Cambria Math".to_string());
+        if !std::path::Path::new("C:/Windows/Fonts/cambria.ttc").exists()
+            || !super::installed(&math)
+        {
+            return;
+        }
+        let (_, index) = super::validated_font_face_for(&math).expect("the face");
+        assert_eq!(index, 1);
+    }
 
     fn recase(s: &str, target: TextCase) -> String {
         let chars: Vec<char> = s.chars().collect();
@@ -2240,6 +2476,41 @@ mod tests {
 
         assert!((rotated.width as i32 - upright.height as i32).abs() <= 1);
         assert!((rotated.height as i32 - upright.width as i32).abs() <= 1);
+    }
+
+    /// 11/11: the placement delta worked out from the layout alone (no
+    /// raster) is the one `rasterize_placed` gives, however the text is
+    /// turned, flipped or stretched.
+    #[test]
+    fn the_placement_delta_needs_no_raster() {
+        use super::{layout_text, placed_delta};
+        if rasterize(&text("x")).is_none() {
+            return;
+        }
+        for (rotation_deg, flip_x, flip_y, stretch_x) in [
+            (0.0, false, false, 1.0),
+            (6.0, false, false, 1.0),
+            (90.0, false, false, 1.0),
+            (213.5, true, false, 1.0),
+            (0.0, false, true, 1.0),
+            (37.0, false, false, 1.7),
+            (359.9995, false, false, 0.6),
+        ] {
+            let td = TextData {
+                rotation_deg,
+                flip_x,
+                flip_y,
+                stretch_x,
+                ..text("Bảng tuần hoàn\nhai dòng")
+            };
+            let (_, want) = rasterize_placed(&td).expect("raster");
+            let layout = layout_text(&td).expect("layout");
+            assert_eq!(
+                placed_delta(&td, &layout),
+                Some(want),
+                "{rotation_deg} {flip_x} {flip_y} {stretch_x}"
+            );
+        }
     }
 
     #[test]
@@ -2654,5 +2925,26 @@ mod path_tests {
         assert_eq!(i, 2, "{r:?}");
         let i = char_index_at_pos(&td, r.x + r.w * 0.75, r.y + r.h * 0.5).expect("index");
         assert_eq!(i, 3, "{r:?}");
+    }
+
+    /// A face of a collection (.ttc) is listed and drawn as itself (plan
+    /// M3.1): Cambria Math lives second in cambria.ttc.
+    #[test]
+    fn a_face_of_a_collection_is_found_and_drawn() {
+        if !std::path::Path::new("C:/Windows/Fonts/cambria.ttc").exists() {
+            return;
+        }
+        let math = TextFontFamily::all()
+            .iter()
+            .find(|f| f.name().eq_ignore_ascii_case("Cambria Math"))
+            .cloned()
+            .expect("Cambria Math listed");
+        assert!(covers(&math, "abc"));
+        let td = TextData {
+            content: "abc".to_string(),
+            font_family: math,
+            ..TextData::default()
+        };
+        assert!(rasterize(&td).is_some());
     }
 }

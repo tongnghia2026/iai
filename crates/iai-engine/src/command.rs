@@ -239,6 +239,33 @@ pub struct Registry {
     /// Run on a document after every command that edits it (see
     /// [`AfterEdit`]).
     after_edit: Option<AfterEdit>,
+    /// Asked before every agent's call (see [`AgentGuard`]).
+    agent_guard: Option<AgentGuard>,
+    /// Where a layer is said to be on a page laid out beside its picture
+    /// (see [`SheetFrame`]).
+    sheet_frame: Option<SheetFrame>,
+}
+
+/// A pack's way of telling where a layer of the drawing lies over the
+/// picture it redraws (`doc.inspect`'s `onPicture`): `x, y, w, h` in the
+/// page's pixels over the picture, or `None` for a layer not in a drawing.
+#[derive(Clone, Copy)]
+pub struct SheetFrame {
+    pub on_picture: fn(&iai_canvas::canvas::Canvas, u32) -> Option<(i32, i32, u32, u32)>,
+}
+
+/// What a pack checks before an agent's call runs: `before` refuses a call
+/// that would go wrong on the documents as they stand (a dry run on a
+/// redraw sheet, say), with a hint at the call to make instead. Only an
+/// agent's calls are asked, the person's never; a batch asks for each call
+/// and a background job was asked when it began.
+#[derive(Clone, Copy)]
+pub struct AgentGuard {
+    pub before: fn(&mut crate::Session<'_>, &crate::CommandCall) -> Result<(), CmdError>,
+    /// What a pack adds to an agent's answer once the call has run (not a
+    /// dry run): the next step of a guided task, say. Kept short: it goes
+    /// in every answer.
+    pub after: Option<fn(&mut crate::Session<'_>, &crate::CommandCall, &mut serde_json::Value)>,
 }
 
 /// Work a pack does on a document after each command that changes it, in
@@ -274,6 +301,22 @@ impl Registry {
 
     pub fn after_edit(&self) -> Option<AfterEdit> {
         self.after_edit
+    }
+
+    pub fn set_agent_guard(&mut self, guard: AgentGuard) {
+        self.agent_guard = Some(guard);
+    }
+
+    pub fn agent_guard(&self) -> Option<AgentGuard> {
+        self.agent_guard
+    }
+
+    pub fn set_sheet_frame(&mut self, frame: SheetFrame) {
+        self.sheet_frame = Some(frame);
+    }
+
+    pub fn sheet_frame(&self) -> Option<SheetFrame> {
+        self.sheet_frame
     }
 
     pub fn get(&self, id: &str) -> Option<&dyn DynCommand> {

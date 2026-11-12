@@ -894,6 +894,10 @@ pub enum ErrandIntent {
     Stop,
     /// Show the results' folder.
     OpenResults,
+    /// The person finds the redraw good: no more review rounds.
+    Approve,
+    /// The person asks the agent for one more review round.
+    ReviewAgain,
 }
 
 /// What the person does in "Việc nhanh".

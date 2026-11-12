@@ -21,6 +21,11 @@ pub enum ShapeKind {
     /// N-pointed star inscribed in the box (`sides` = points, `star_inner` = inner
     /// radius as a fraction of the outer).
     Star,
+    /// Block arrow pointing right (`star_inner` = shaft thickness as a
+    /// fraction of the box height); stretches freely like a rectangle.
+    Arrow,
+    /// Heart filling the box.
+    Heart,
 }
 
 impl ShapeKind {
@@ -30,6 +35,8 @@ impl ShapeKind {
             2 => ShapeKind::Line,
             3 => ShapeKind::Polygon,
             4 => ShapeKind::Star,
+            5 => ShapeKind::Arrow,
+            6 => ShapeKind::Heart,
             _ => ShapeKind::Rectangle,
         }
     }
@@ -40,6 +47,8 @@ impl ShapeKind {
             ShapeKind::Line => 2,
             ShapeKind::Polygon => 3,
             ShapeKind::Star => 4,
+            ShapeKind::Arrow => 5,
+            ShapeKind::Heart => 6,
         }
     }
     pub fn label(self) -> &'static str {
@@ -49,9 +58,12 @@ impl ShapeKind {
             ShapeKind::Line => "Line",
             ShapeKind::Polygon => "Polygon",
             ShapeKind::Star => "Star",
+            ShapeKind::Arrow => "Arrow",
+            ShapeKind::Heart => "Heart",
         }
     }
-    /// A box-bounded, fillable shape (Rectangle / Ellipse / Polygon / Star) — as
+    /// A box-bounded, fillable shape (Rectangle / Ellipse / Polygon / Star /
+    /// Arrow / Heart) — as
     /// opposed to the open Line. Used to share box handling across kinds.
     pub fn is_box_shape(self) -> bool {
         !matches!(self, ShapeKind::Line)
@@ -286,6 +298,10 @@ impl ShapeData {
                 self.sides,
                 self.star_inner,
             ),
+            ShapeKind::Arrow => {
+                from_shape::arrow_path(self.x0, self.y0, self.x1, self.y1, self.star_inner)
+            }
+            ShapeKind::Heart => from_shape::heart_path(self.x0, self.y0, self.x1, self.y1),
         };
         crate::vector::object::VectorObjectData::new(
             path,
@@ -343,7 +359,8 @@ impl ShapeData {
     }
 
     /// Local-space vertices of a Polygon (N sharp corners) or Star (2N alternating
-    /// corners) inscribed in the bounding box — first vertex points up. Empty for
+    /// corners) inscribed in the bounding box — first vertex points up — or of an
+    /// Arrow, or of a Heart's flattened outline. Empty for
     /// non-polygonal kinds. The box's half-extents are the radii, so the shape
     /// stretches with a non-square box.
     pub fn polygon_vertices(&self) -> Vec<(f32, f32)> {
@@ -369,6 +386,16 @@ impl ShapeData {
                         (cx + rx * f * a.cos(), cy + ry * f * a.sin())
                     })
                     .collect()
+            }
+            ShapeKind::Arrow => crate::vector::from_shape::arrow_points(
+                self.x0,
+                self.y0,
+                self.x1,
+                self.y1,
+                self.star_inner,
+            ),
+            ShapeKind::Heart => {
+                crate::vector::from_shape::heart_points(self.x0, self.y0, self.x1, self.y1, 24)
             }
             _ => Vec::new(),
         }
@@ -400,6 +427,10 @@ impl ShapeData {
             ShapeKind::Line => true,
             _ if !(keeps_axes || swaps_axes) => false,
             ShapeKind::Rectangle | ShapeKind::Ellipse => true,
+            // Built pointing right / standing upright: only a scale (and the
+            // mirror across its own axis of symmetry) keeps that picture.
+            ShapeKind::Arrow => keeps_axes && a > 0.0,
+            ShapeKind::Heart => keeps_axes && d > 0.0,
             ShapeKind::Polygon | ShapeKind::Star => {
                 let cx = (self.x0 + self.x1) * 0.5;
                 let cy = (self.y0 + self.y1) * 0.5;
@@ -700,7 +731,9 @@ impl ShapeData {
                     let b = (self.y1 - self.y0).abs() * 0.5;
                     sdf_ellipse(px, py, cx, cy, a, b)
                 }
-                ShapeKind::Polygon | ShapeKind::Star => sdf_polygon(px, py, &polygon_vertices),
+                ShapeKind::Polygon | ShapeKind::Star | ShapeKind::Arrow | ShapeKind::Heart => {
+                    sdf_polygon(px, py, &polygon_vertices)
+                }
             }
         };
         // |sd| beyond this is provably coverage 0 (outside) or exactly the
@@ -819,7 +852,7 @@ impl ShapeData {
                 let sd = sdf_ellipse(px, py, cx, cy, a, b);
                 self.fill_stroke_parts(sd, half)
             }
-            ShapeKind::Polygon | ShapeKind::Star => {
+            ShapeKind::Polygon | ShapeKind::Star | ShapeKind::Arrow | ShapeKind::Heart => {
                 let sd = sdf_polygon(px, py, &self.polygon_vertices());
                 self.fill_stroke_parts(sd, half)
             }
@@ -1495,6 +1528,62 @@ mod tests {
         let (s, c) = 30f32.to_radians().sin_cos();
         assert!(survives(ShapeKind::Line, 5, (c, s, -s, c)));
         assert!(!survives(ShapeKind::Rectangle, 5, (c, s, -s, c)));
+    }
+
+    #[test]
+    fn arrow_and_heart_fill_their_box_and_stretch_with_it() {
+        let shape = |kind, x1: f32| {
+            let (mut d, _) = ShapeData::from_canvas_span(
+                kind,
+                0.0,
+                0.0,
+                x1,
+                100.0,
+                0.0,
+                true,
+                [200, 0, 0, 255],
+                0.0,
+                [0, 0, 0, 255],
+            );
+            d.star_inner = 0.4;
+            d
+        };
+        let alpha = |d: &ShapeData, x: f32, y: f32| {
+            let r = d.render().expect("render");
+            let (px, py) = ((x + d.x0.min(d.x1)) as u32, (y + d.y0.min(d.y1)) as u32);
+            r.rgba[((py * r.width + px) * 4 + 3) as usize]
+        };
+        // A wide arrow: the shaft runs the length, the head is half the height.
+        let arrow = shape(ShapeKind::Arrow, 300.0);
+        assert_eq!(alpha(&arrow, 20.0, 50.0), 255, "shaft");
+        assert_eq!(alpha(&arrow, 20.0, 10.0), 0, "above the shaft");
+        assert_eq!(alpha(&arrow, 254.0, 8.0), 255, "head reaches the top");
+        assert_eq!(alpha(&arrow, 297.0, 50.0), 255, "tip");
+        // Only a scale or its own mirror keeps an arrow an arrow.
+        assert!(arrow.survives_linear_map(2.0, 0.0, 0.0, 1.0));
+        assert!(arrow.survives_linear_map(1.0, 0.0, 0.0, -1.0));
+        assert!(!arrow.survives_linear_map(-1.0, 0.0, 0.0, 1.0));
+        assert!(!arrow.survives_linear_map(0.0, 1.0, -1.0, 0.0));
+        assert_eq!(
+            arrow.to_vector_object((0, 0)).path.contours[0].nodes.len(),
+            7
+        );
+
+        let heart = shape(ShapeKind::Heart, 200.0);
+        assert_eq!(alpha(&heart, 100.0, 50.0), 255, "middle");
+        assert_eq!(alpha(&heart, 100.0, 4.0), 0, "the dip between the lobes");
+        assert_eq!(alpha(&heart, 50.0, 4.0), 255, "a lobe's top");
+        assert_eq!(alpha(&heart, 10.0, 95.0), 0, "beside the tip");
+        assert!(heart.survives_linear_map(-1.0, 0.0, 0.0, 1.0));
+        assert!(!heart.survives_linear_map(1.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            ShapeKind::from_u8(ShapeKind::Heart.to_u8()),
+            ShapeKind::Heart
+        );
+        assert_eq!(
+            ShapeKind::from_u8(ShapeKind::Arrow.to_u8()),
+            ShapeKind::Arrow
+        );
     }
 
     #[test]

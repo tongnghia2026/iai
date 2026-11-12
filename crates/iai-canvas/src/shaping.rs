@@ -65,6 +65,8 @@ pub fn layer_canvas_path(layer: &Layer) -> Option<(PathData, VectorStyle)> {
                 ShapeKind::Star => {
                     from_shape::star_path(x0, y0, x1, y1, shape.sides, shape.star_inner)
                 }
+                ShapeKind::Arrow => from_shape::arrow_path(x0, y0, x1, y1, shape.star_inner),
+                ShapeKind::Heart => from_shape::heart_path(x0, y0, x1, y1),
             };
             Some((path, shape.style))
         }
@@ -332,6 +334,8 @@ pub fn shape_to_curves(canvas: &mut Canvas, idx: usize) -> Result<String, String
         ShapeKind::Line => from_shape::line_path(x0, y0, x1, y1),
         ShapeKind::Polygon => from_shape::polygon_path(x0, y0, x1, y1, data.sides),
         ShapeKind::Star => from_shape::star_path(x0, y0, x1, y1, data.sides, data.star_inner),
+        ShapeKind::Arrow => from_shape::arrow_path(x0, y0, x1, y1, data.star_inner),
+        ShapeKind::Heart => from_shape::heart_path(x0, y0, x1, y1),
     };
     let object = VectorObjectData::new(path, data.style, AffineTransform::IDENTITY);
 

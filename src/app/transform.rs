@@ -1420,6 +1420,7 @@ mod tests {
             content_h: 2,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -1493,6 +1494,7 @@ mod tests {
             content_h: 8,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let make_state = |ls: LayerOrigState, offset, w, h, angle| TransformState {
             layer_states: vec![ls],
@@ -1586,6 +1588,7 @@ mod tests {
             content_h,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -1842,6 +1845,7 @@ mod tests {
             content_h: raster.height,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let mut ts = identity_text_transform_state();
         ts.layer_states = vec![ls];
@@ -1913,6 +1917,7 @@ mod tests {
             content_h,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2009,6 +2014,7 @@ mod tests {
             content_h,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         let ts = TransformState {
             layer_states: vec![ls],
@@ -2088,6 +2094,7 @@ mod tests {
             content_h,
             source_to_current: MAT3_IDENTITY,
             before: None,
+            placed: None,
         };
         (sd, ls)
     }

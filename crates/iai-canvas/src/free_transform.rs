@@ -65,6 +65,9 @@ pub struct LayerOrigState {
     /// The layer as it is, when these are the source pixels kept from an
     /// earlier commit rather than the layer's own: what undo gives back.
     pub before: Option<Box<LayerOrigState>>,
+    /// These are a placed picture's own pixels, finer than the page (a
+    /// generated illustration): the result keeps it for the files.
+    pub placed: Option<std::sync::Arc<iai_doc::placed_image::PlacedImage>>,
 }
 
 #[derive(Clone)]
@@ -125,6 +128,8 @@ pub struct TransformCommitLayer {
     pub height: u32,
     pub offset: (i32, i32),
     pub lineage: Option<RasterTransformLineage>,
+    /// The placed picture the layer still shows, at its new place.
+    pub placed: Option<std::sync::Arc<iai_doc::placed_image::PlacedImage>>,
 }
 
 pub struct TransformCommitResult {
@@ -959,6 +964,7 @@ pub fn orig_state_with_bounds(
         content_h: c_h,
         source_to_current: MAT3_IDENTITY,
         before: None,
+        placed: None,
     }
 }
 
@@ -1244,12 +1250,41 @@ pub fn bake_transform_commit(
         let mut out_w = new_w;
         let mut out_h = new_h;
         let mut out_offset = (new_ox, new_oy);
+        let crisp_vector_layer_was_none = crisp_vector_layer.is_none();
         if let Some((tiles, width, height, offset)) = crisp_vector_layer {
             new_tiles = tiles;
             out_w = width;
             out_h = height;
             out_offset = offset;
         }
+        // A placed picture scaled and moved, not turned or mirrored: the
+        // result shows it whole over its new box, and still carries it.
+        // Judged on the whole way from its own pixels to the page, not this
+        // transform alone: turned once, then scaled, it is still turned
+        // (10/11 audit: the second transform put back the picture upright).
+        let placed = ls.placed.as_ref().and_then(|p| {
+            let m = final_source_to_canvas;
+            let big = m[0].abs().max(m[4].abs()).max(f32::EPSILON);
+            let upright = ts.quad.is_none()
+                && m[1].abs() <= 1e-4 * big
+                && m[3].abs() <= 1e-4 * big
+                && m[6].abs() <= 1e-7
+                && m[7].abs() <= 1e-7
+                && m[0] > 0.0
+                && m[4] > 0.0;
+            (upright && crisp_vector_layer_was_none).then(|| {
+                std::sync::Arc::new(iai_doc::placed_image::PlacedImage {
+                    rect: [
+                        (new_ox - out_offset.0) as f32,
+                        (new_oy - out_offset.1) as f32,
+                        new_w as f32,
+                        new_h as f32,
+                    ],
+                    sig: iai_doc::placed_image::pixels_sig(&new_tiles.flatten(), out_w, out_h),
+                    ..(**p).clone()
+                })
+            })
+        });
         let undo = ls.before.as_deref().unwrap_or(ls);
         cmd.add_layer(
             ls.layer_id,
@@ -1289,6 +1324,7 @@ pub fn bake_transform_commit(
             height: out_h,
             offset: out_offset,
             lineage,
+            placed,
         });
     }
 
@@ -1451,6 +1487,43 @@ pub fn session(
             None => {}
         }
     }
+    // A picture placed finer than the page (a generated illustration) is
+    // scaled from its own pixels, not the page's (10/11: the giraffe made
+    // twice as large came out soft).
+    for ls in &mut layer_states {
+        if ls.before.is_some() || !matches!(ls.layer_type, LayerType::Raster) || ls.mask.is_some() {
+            continue;
+        }
+        let Some(layer) = stack.layers.iter().find(|l| l.id == ls.layer_id) else {
+            continue;
+        };
+        let Some(p) = layer.placed.as_ref().filter(|p| p.still_in(layer)) else {
+            continue;
+        };
+        let (fw, fh) = (p.width.max(1), p.height.max(1));
+        let r = p.on_page(layer);
+        let (kx, ky) = (r[2] / fw as f32, r[3] / fh as f32);
+        let source_to_current = [kx, 0.0, r[0], 0.0, ky, r[1], 0.0, 0.0, 1.0];
+        let layer_idx = ls.layer_idx;
+        let source = LayerOrigState {
+            layer_id: ls.layer_id,
+            layer_idx,
+            layer_type: LayerType::Raster,
+            tiles: iai_raster::tile::TileMap::from_rgba(&p.rgba, fw, fh),
+            mask: None,
+            offset: (0, 0),
+            width: fw,
+            height: fh,
+            content_offset: (0, 0),
+            content_w: fw,
+            content_h: fh,
+            source_to_current,
+            before: None,
+            placed: Some(p.clone()),
+        };
+        let current = std::mem::replace(ls, source);
+        ls.before = Some(Box::new(current));
+    }
 
     let layer_id = layer_states[0].layer_id;
     let layer_idx = layer_states[0].layer_idx;
@@ -1536,6 +1609,7 @@ pub fn land(
             layer.height = update.height;
             layer.offset = update.offset;
             layer.layer_type = update.layer_type;
+            layer.placed = update.placed;
         }
     }
     // A path drawn afresh needs its ink again on a CMYK page.

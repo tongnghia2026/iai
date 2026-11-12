@@ -14,6 +14,7 @@ pub mod layer_clip;
 pub mod model;
 pub mod page;
 pub mod palette;
+pub mod placed_image;
 pub mod portrait_recipe;
 pub mod selection;
 pub mod shape;

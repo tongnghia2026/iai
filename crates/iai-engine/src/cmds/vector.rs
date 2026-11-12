@@ -82,6 +82,10 @@ pub enum Shape {
     /// A regular polygon inscribed in the rectangle.
     Polygon,
     Star,
+    /// A block arrow pointing right; `starInner` is the shaft thickness as a
+    /// fraction of the rectangle's height.
+    Arrow,
+    Heart,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -183,6 +187,8 @@ impl Command for AddShape {
             Shape::Line => ShapeKind::Line,
             Shape::Polygon => ShapeKind::Polygon,
             Shape::Star => ShapeKind::Star,
+            Shape::Arrow => ShapeKind::Arrow,
+            Shape::Heart => ShapeKind::Heart,
         };
         let (x0, y0, x1, y1) = match (p.rect, p.span) {
             (_, Some([x0, y0, x1, y1])) => (x0, y0, x1, y1),

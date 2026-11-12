@@ -121,6 +121,10 @@ pub struct LayerInfo {
     pub has_mask: bool,
     /// The text of a text layer.
     pub text: Option<String>,
+    /// A layer of a drawing beside its picture: where its ink lies over
+    /// the picture (the places every drawing command takes there).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_picture: Option<Bounds>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -195,6 +199,7 @@ pub(crate) fn layer_infos(c: &Canvas) -> Vec<LayerInfo> {
                 LayerType::Text(t) => Some(t.content.clone()),
                 _ => None,
             },
+            on_picture: None,
         })
         .collect()
 }
@@ -273,7 +278,14 @@ impl Command for Inspect {
             layers: if d.is_flow_text() {
                 Vec::new()
             } else {
-                layer_infos(c)
+                let mut layers = layer_infos(c);
+                if let Some(frame) = s.registry().sheet_frame() {
+                    for l in &mut layers {
+                        l.on_picture =
+                            (frame.on_picture)(c, l.id).map(|(x, y, w, h)| Bounds { x, y, w, h });
+                    }
+                }
+                layers
             },
             active_layer: c
                 .layer_stack

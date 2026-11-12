@@ -419,6 +419,94 @@ pub fn star_path(x0: f32, y0: f32, x1: f32, y1: f32, points: u32, inner: f32) ->
     PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
 }
 
+/// The corners of a block arrow filling the box `(x0,y0)`–`(x1,y1)`, pointing
+/// right: a shaft `shaft`×height thick (clamped to `[0.05, 0.95]`) and a head
+/// half the shorter side long, so widening the box lengthens only the shaft.
+pub fn arrow_points(x0: f32, y0: f32, x1: f32, y1: f32, shaft: f32) -> Vec<(f32, f32)> {
+    let (left, right) = (x0.min(x1), x0.max(x1));
+    let (top, bottom) = (y0.min(y1), y0.max(y1));
+    let (w, h) = (right - left, bottom - top);
+    let cy = (top + bottom) * 0.5;
+    let half_shaft = h * shaft.clamp(0.05, 0.95) * 0.5;
+    let neck = right - w.min(h) * 0.5;
+    vec![
+        (left, cy - half_shaft),
+        (neck, cy - half_shaft),
+        (neck, top),
+        (right, cy),
+        (neck, bottom),
+        (neck, cy + half_shaft),
+        (left, cy + half_shaft),
+    ]
+}
+
+/// A block arrow (see [`arrow_points`]) as one closed contour of sharp nodes.
+pub fn arrow_path(x0: f32, y0: f32, x1: f32, y1: f32, shaft: f32) -> PathData {
+    let nodes = arrow_points(x0, y0, x1, y1, shaft)
+        .into_iter()
+        .map(|(x, y)| Node::sharp(Point::new(x, y)))
+        .collect();
+    PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
+}
+
+/// A heart drawn in a 100 × 80 box (x 0–100, y 15–95): each node is
+/// `[anchor, in handle, out handle]`, starting at the dip between the lobes
+/// and going round anticlockwise on screen. The lobes are near-quarter circles.
+const HEART: [[(f32, f32); 3]; 6] = [
+    [(50.0, 28.0), (53.0, 19.0), (47.0, 19.0)],
+    [(25.0, 15.0), (37.0, 15.0), (11.2, 15.0)],
+    [(0.0, 40.0), (0.0, 26.2), (0.0, 62.0)],
+    [(50.0, 95.0), (25.0, 78.0), (75.0, 78.0)],
+    [(100.0, 40.0), (100.0, 62.0), (100.0, 26.2)],
+    [(75.0, 15.0), (88.8, 15.0), (63.0, 15.0)],
+];
+
+/// [`HEART`] stretched to fill the box `(x0,y0)`–`(x1,y1)`.
+fn heart_in_box(x0: f32, y0: f32, x1: f32, y1: f32) -> [[Point; 3]; 6] {
+    let (left, top) = (x0.min(x1), y0.min(y1));
+    let (w, h) = ((x1 - x0).abs(), (y1 - y0).abs());
+    HEART.map(|node| {
+        node.map(|(x, y)| Point::new(left + w * x / 100.0, top + h * (y - 15.0) / 80.0))
+    })
+}
+
+/// A heart filling the box, as one closed Bézier contour: smooth lobes, a
+/// sharp dip on top and a sharp tip at the bottom.
+pub fn heart_path(x0: f32, y0: f32, x1: f32, y1: f32) -> PathData {
+    let nodes = heart_in_box(x0, y0, x1, y1)
+        .iter()
+        .enumerate()
+        .map(|(i, [anchor, in_h, out_h])| Node {
+            anchor: *anchor,
+            in_handle: Some(*in_h),
+            out_handle: Some(*out_h),
+            kind: if i == 0 || i == 3 {
+                NodeKind::Cusp
+            } else {
+                NodeKind::Smooth
+            },
+        })
+        .collect();
+    PathData::new(vec![Contour::new(nodes, true)], FillRule::NonZero)
+}
+
+/// The outline of [`heart_path`] flattened to `steps` points per curve — the
+/// polygon the raster renderer measures distance to.
+pub fn heart_points(x0: f32, y0: f32, x1: f32, y1: f32, steps: usize) -> Vec<(f32, f32)> {
+    let nodes = heart_in_box(x0, y0, x1, y1);
+    let steps = steps.max(2);
+    let mut points = Vec::with_capacity(nodes.len() * steps);
+    for i in 0..nodes.len() {
+        let [p0, _, p1] = nodes[i];
+        let [p3, p2, _] = nodes[(i + 1) % nodes.len()];
+        for s in 0..steps {
+            let p = iai_geom::geometry::cubic_bezier(p0, p1, p2, p3, s as f32 / steps as f32);
+            points.push((p.x, p.y));
+        }
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

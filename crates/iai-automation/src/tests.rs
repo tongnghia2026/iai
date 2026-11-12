@@ -243,7 +243,7 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
     let info = tool(&mut server, "iai_doc_inspect", json!({}));
     assert_eq!(info["result"]["layers"].as_array().unwrap().len(), 1);
 
-    // A command list filtered by prefix, with schemas.
+    // A command list filtered by prefix.
     let list = tool(&mut server, "iai_command_list", json!({"prefix": "layer."}));
     let ids: Vec<&str> = list["commands"]
         .as_array()
@@ -278,12 +278,14 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
             "layer.via_copy"
         ]
     );
-    let delete = list["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["id"] == "layer.delete")
-        .unwrap();
+    // Too many for their schemas within the answer's bound: narrower, they come.
+    assert!(list["hint"].as_str().unwrap().contains("narrow"), "{list}");
+    let list = tool(
+        &mut server,
+        "iai_command_list",
+        json!({"prefix": "layer.delete"}),
+    );
+    let delete = &list["commands"][0];
     assert!(delete["paramsSchema"]["properties"]["layer"].is_object());
 
     // Unknown job.
@@ -645,6 +647,7 @@ struct Window {
     inner: LocalHost,
     told: Vec<String>,
     granted: PathBuf,
+    mode: crate::host::TaskMode,
 }
 
 impl crate::host::Host for Window {
@@ -674,8 +677,9 @@ impl crate::host::Host for Window {
     fn cancel(&mut self, job: iai_engine::JobId) -> Result<bool, iai_engine::CmdError> {
         self.inner.cancel(job)
     }
-    fn task_begin(&mut self, request: &str) {
+    fn task_begin(&mut self, request: &str) -> crate::host::TaskMode {
         self.told.push(format!("begin {request}"));
+        self.mode
     }
     fn task_end(&mut self, status: &str, title: &str) {
         self.told.push(format!("end {status} {title}"));
@@ -703,6 +707,7 @@ fn the_window_hears_of_the_task_and_the_folder_it_granted_opens_to_the_agent() {
         inner: host(),
         told: Vec::new(),
         granted: errand.0.clone(),
+        mode: crate::host::TaskMode::default(),
     };
     for dir in [&errand, &other] {
         window
@@ -758,4 +763,264 @@ fn the_window_hears_of_the_task_and_the_folder_it_granted_opens_to_the_agent() {
     }
     let unique: std::collections::BTreeSet<&String> = names.iter().collect();
     assert_eq!(unique.len(), names.len());
+}
+
+#[test]
+fn a_redraw_is_offered_no_skill_and_kept_as_none() {
+    use crate::skills::Store;
+
+    let (own, lib) = (Dir::new("r-own"), Dir::new("r-lib"));
+    let mut window = Window {
+        inner: host(),
+        told: Vec::new(),
+        granted: own.0.clone(),
+        mode: crate::host::TaskMode {
+            offer_skills: false,
+            learn: false,
+        },
+    };
+    let store = Store::new(&lib.0);
+    {
+        let gate = Gate::new(Policy::agent(), Roots::new(&[], &[own.0.clone()]).unwrap());
+        let mut server = Server::new(&mut window, gate, "test")
+            .unwrap()
+            .with_skills(Store::new(&lib.0));
+        let begun = tool(
+            &mut server,
+            "iai_task_begin",
+            json!({"request": "Vẽ lại vector"}),
+        );
+        assert_eq!(begun["skills"], json!([]), "{begun}");
+        let e = tool_error(&mut server, "iai_skill_run", json!({"name": "x"}));
+        assert_eq!(e["hint"]["gate"], "no_skills", "{e}");
+        tool(
+            &mut server,
+            "iai_command_run",
+            json!({"command": "file.new", "args": {"widthPx": 8, "heightPx": 8}}),
+        );
+        let ended = tool(
+            &mut server,
+            "iai_task_end",
+            json!({"status": "done", "title": "Vẽ lại"}),
+        );
+        assert_eq!(ended["saved"], Value::Null, "{ended}");
+    }
+    assert!(store.list().is_empty());
+}
+
+#[test]
+fn the_command_list_is_short_and_found_by_words() {
+    let mut host = host();
+    let gate = Gate::new(Policy::agent(), Roots::new(&[], &[]).unwrap());
+    let mut server = Server::new(&mut host, gate, "test").unwrap();
+    // Everything: within the bound, schemas left out.
+    let all = tool(&mut server, "iai_command_list", json!({}));
+    assert!(all.to_string().len() <= 21_000, "{}", all.to_string().len());
+    assert!(all["commands"][0].get("paramsSchema").is_none());
+    // A few, by words: with their schemas.
+    let found = tool(&mut server, "iai_command_list", json!({"query": "flip"}));
+    let ids: Vec<&str> = found["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"image.flip"), "{ids:?}");
+    assert!(found["commands"][0].get("paramsSchema").is_some());
+    // A key it does not know is said, with the ones it does.
+    let e = tool_error(&mut server, "iai_command_list", json!({"filter": "x"}));
+    assert_eq!(e["hint"]["params"][1], "query", "{e}");
+}
+
+#[test]
+fn a_dry_run_says_nothing_was_kept() {
+    let mut host = host();
+    let gate = Gate::new(Policy::agent(), Roots::new(&[], &[]).unwrap());
+    let mut server = Server::new(&mut host, gate, "test").unwrap();
+    let dry = tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "file.new", "args": {"widthPx": 8, "heightPx": 8}, "dryRun": true}),
+    );
+    assert_eq!(
+        (dry["dryRun"].clone(), dry["kept"].clone()),
+        (json!(true), json!(false)),
+        "{dry}"
+    );
+    let docs = tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "doc.list"}),
+    );
+    assert_eq!(docs["result"]["docs"], json!([]), "{docs}");
+}
+
+/// A `task.ready` worked out on a worker, as the redraw's is: says the
+/// work is not finished.
+struct NotReady;
+
+static NOT_READY: iai_engine::CommandMeta = iai_engine::CommandMeta {
+    id: "task.ready",
+    label_vi: "Đã xong chưa",
+    label_en: "Ready",
+    doc: "Whether the work is finished.",
+    effects: &[iai_engine::Effect::Query],
+    featured: false,
+};
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct NoParams {}
+
+impl iai_engine::Validate for NoParams {}
+
+impl iai_engine::Command for NotReady {
+    type Params = NoParams;
+    type Output = Value;
+    fn meta(&self) -> &'static iai_engine::CommandMeta {
+        &NOT_READY
+    }
+    fn plan(
+        &self,
+        _s: &mut iai_engine::Session<'_>,
+        _p: NoParams,
+    ) -> Result<iai_engine::Plan<Value>, iai_engine::CmdError> {
+        Ok(iai_engine::Plan::Job(iai_engine::Job {
+            doc: None,
+            label_vi: "Kiểm".into(),
+            work: Box::new(|_cx| {
+                Ok(Box::new(|_: &mut iai_engine::Session<'_>| {
+                    Ok(json!({"ready": false, "reasons": ["chưa lưu file"]}))
+                }) as iai_engine::Apply<Value>)
+            }),
+        }))
+    }
+}
+
+/// A window runs an agent's commands on its workers: their answers come
+/// as jobs.
+struct OnWorkers(LocalHost);
+
+impl crate::host::Host for OnWorkers {
+    fn commands(&mut self) -> Result<Vec<iai_engine::CommandInfo>, iai_engine::CmdError> {
+        self.0.commands()
+    }
+    fn execute(
+        &mut self,
+        mut call: iai_engine::CommandCall,
+    ) -> Result<iai_engine::Reply, iai_engine::CmdError> {
+        call.background = true;
+        self.0.execute(call)
+    }
+    fn batch(
+        &mut self,
+        calls: Vec<iai_engine::CommandCall>,
+        atomic: bool,
+    ) -> Result<iai_engine::BatchReply, iai_engine::CmdError> {
+        self.0.batch(calls, atomic)
+    }
+    fn job(
+        &mut self,
+        job: iai_engine::JobId,
+        wait: std::time::Duration,
+    ) -> Result<Option<iai_engine::JobState>, iai_engine::CmdError> {
+        self.0.job(job, wait)
+    }
+    fn cancel(&mut self, job: iai_engine::JobId) -> Result<bool, iai_engine::CmdError> {
+        self.0.cancel(job)
+    }
+}
+
+/// G6 with `task.ready` on a worker (10/11): "done" waits for its answer
+/// and is still refused while the work is not finished.
+#[test]
+fn done_waits_for_a_ready_check_on_a_worker() {
+    let mut registry = iai_engine::cmds::core_registry();
+    registry.register(NotReady);
+    let mut host = OnWorkers(LocalHost::new(Engine::new(
+        registry,
+        Source::Agent,
+        Policy::agent(),
+    )));
+    let lib = Dir::new("ready-lib");
+    let gate = Gate::new(Policy::agent(), Roots::new(&[], &[]).unwrap());
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(crate::skills::Store::new(&lib.0));
+    tool(&mut server, "iai_task_begin", json!({"request": "Vẽ lại"}));
+    tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "file.new", "args": {"widthPx": 20, "heightPx": 20}}),
+    );
+    let e = tool_error(&mut server, "iai_task_end", json!({"status": "done"}));
+    assert_eq!(e["hint"]["gate"], "not_done", "{e}");
+    tool(
+        &mut server,
+        "iai_task_end",
+        json!({"status": "failed", "title": "Chưa xong"}),
+    );
+}
+
+/// 10/11 audit: a task that worked on no document is not held up by a
+/// redraw sheet's `task.ready` (an ID photo's «done» after an old redraw
+/// tab was left open).
+#[test]
+fn a_task_on_no_document_is_not_held_by_a_ready_check() {
+    let mut registry = iai_engine::cmds::core_registry();
+    registry.register(NotReady);
+    let mut host = OnWorkers(LocalHost::new(Engine::new(
+        registry,
+        Source::Agent,
+        Policy::agent(),
+    )));
+    let lib = Dir::new("ready-none-lib");
+    let gate = Gate::new(Policy::agent(), Roots::new(&[], &[]).unwrap());
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(crate::skills::Store::new(&lib.0));
+    tool(&mut server, "iai_task_begin", json!({"request": "Ảnh thẻ"}));
+    tool(&mut server, "iai_task_end", json!({"status": "done"}));
+}
+
+/// §8 point 14: a task with work done is not dropped by another begin; the
+/// same request again goes on; once ended, another begins.
+#[test]
+fn a_task_under_way_is_ended_before_another_begins() {
+    let lib = Dir::new("busy-lib");
+    let mut host = host();
+    let gate = Gate::new(Policy::agent(), Roots::new(&[], &[]).unwrap());
+    let mut server = Server::new(&mut host, gate, "test")
+        .unwrap()
+        .with_skills(crate::skills::Store::new(&lib.0));
+    tool(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "Vẽ lại logo"}),
+    );
+    tool(
+        &mut server,
+        "iai_command_run",
+        json!({"command": "file.new", "args": {"widthPx": 8, "heightPx": 8}}),
+    );
+    let e = tool_error(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "Soát bản vẽ"}),
+    );
+    assert_eq!(e["hint"]["gate"], "busy_task", "{e}");
+    tool(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "Vẽ lại logo"}),
+    );
+    tool(
+        &mut server,
+        "iai_task_end",
+        json!({"status": "failed", "title": "Vẽ lại"}),
+    );
+    tool(
+        &mut server,
+        "iai_task_begin",
+        json!({"request": "Soát bản vẽ"}),
+    );
 }

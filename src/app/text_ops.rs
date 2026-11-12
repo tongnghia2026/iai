@@ -508,6 +508,7 @@ impl App {
             flip_y: false,
             glyph_styles,
             path: None,
+            fill: None,
         };
         // Keep glyph_styles either empty (uniform) or exactly one per char.
         if !td.glyph_styles.is_empty() {
@@ -1043,6 +1044,8 @@ impl App {
         td.flip_x = session.flip_x;
         td.flip_y = session.flip_y;
         td.path = session.path.clone();
+        // A gradient across the letters is not the Type tool's: it stays.
+        td.fill = session.orig.as_ref().and_then(|o| o.fill.clone());
 
         let empty = session.buffer.trim().is_empty();
         let changed = session.is_new || session.orig.as_ref() != Some(&td);
@@ -1172,13 +1175,17 @@ impl App {
         let Some(fonts) = self.win.ui_fonts.as_mut() else {
             return;
         };
-        let Some(data) = crate::core::text::validated_font_bytes_for(family) else {
+        // The face's own number: a collection's (.ttc) later faces too.
+        let Some((data, index)) = crate::core::text::validated_font_face_for(family) else {
             self.edit.text_fonts_failed.insert(id);
             return;
         };
         fonts.font_data.insert(
             id.clone(),
-            std::sync::Arc::new(egui::FontData::from_owned(data)),
+            std::sync::Arc::new(egui::FontData {
+                index,
+                ..egui::FontData::from_owned(data)
+            }),
         );
         fonts
             .families

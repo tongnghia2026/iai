@@ -25,6 +25,14 @@ use iai_doc::vector::style::{Gradient, GradientKind, LineCap, LineJoin};
 /// flattened into a transparent image, or a run of layers kept as native paths.
 enum SvgRun {
     Raster(Vec<u8>),
+    /// A picture placed finer than the page, at its own pixels, in its
+    /// place: left, top, width, height.
+    Placed {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        rect: [f32; 4],
+    },
     /// Paths, each with the PowerClip frame that cuts it, if any.
     Vectors(Vec<(PdfVectorObject, Option<std::rc::Rc<PathData>>)>),
 }
@@ -43,6 +51,19 @@ fn collect_svg_runs(canvas: &Canvas) -> Vec<SvgRun> {
         // Group containers carry no pixels of their own; their children are
         // classified individually. Hidden layers contribute nothing.
         if layer.is_group() || !canvas.layer_stack.is_effectively_visible(i) {
+            continue;
+        }
+        // A picture placed finer than the page, still shown as placed: its
+        // own pixels, in its place.
+        if let Some(p) = layer.placed.as_deref().filter(|p| p.still_in(layer)) {
+            flush_raster_run(&mut runs, &mut raster_ids, canvas);
+            let r = p.on_page(layer);
+            runs.push(SvgRun::Placed {
+                rgba: p.rgba.clone(),
+                width: p.width,
+                height: p.height,
+                rect: r,
+            });
             continue;
         }
         let objects = match layer_vector_objects_srgb(canvas, i) {
@@ -119,6 +140,20 @@ pub fn build_svg(canvas: &Canvas) -> Result<String, String> {
 
     for run in &runs {
         match run {
+            SvgRun::Placed {
+                rgba,
+                width,
+                height,
+                rect,
+            } => {
+                let png = rgba_to_png(rgba, *width, *height)?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+                body.push_str(&format!(
+                    "  <image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
+                     preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{b64}\"/>\n",
+                    rect[0], rect[1], rect[2], rect[3]
+                ));
+            }
             SvgRun::Raster(rgba) => {
                 let png = rgba_to_png(rgba, w, h)?;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&png);

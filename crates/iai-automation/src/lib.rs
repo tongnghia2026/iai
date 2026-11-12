@@ -32,7 +32,7 @@ pub mod script;
 pub mod skills;
 
 pub use gate::{Gate, Roots};
-pub use host::{Grants, Host, LocalHost};
+pub use host::{Grants, Host, LocalHost, TaskMode};
 
 /// Limits on what an agent may send or be sent.
 pub mod limits {

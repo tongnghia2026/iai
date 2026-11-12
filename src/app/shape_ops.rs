@@ -53,6 +53,8 @@ impl App {
             ShapeKind::Line => "line",
             ShapeKind::Polygon => "polygon",
             ShapeKind::Star => "star",
+            ShapeKind::Arrow => "arrow",
+            ShapeKind::Heart => "heart",
         };
         let corners = match corner_type {
             RectCorner::Round => "round",

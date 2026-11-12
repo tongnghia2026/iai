@@ -202,6 +202,59 @@ pub struct TextData {
     /// Set along a path instead of in straight lines (stretch, rotation and
     /// flips do not apply then).
     pub path: Option<TextPath>,
+    /// Filled with a gradient across the letters instead of their colours
+    /// (gold lettering on a price list, plan M3.3); the words stay
+    /// editable. `None`: the colours as they are.
+    pub fill: Option<TextFill>,
+}
+
+/// A gradient across a text's letters: colours at shares of the way across
+/// the letters' own box, along `angle_deg` (0: left to right, 90: top to
+/// bottom). It goes with the text: moved, edited or resized, it spans the
+/// letters again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextFill {
+    /// Straight RGBA and its place, 0..1, in order; 2 to 8 of them.
+    pub stops: Vec<([u8; 4], f32)>,
+    pub angle_deg: f32,
+}
+
+impl TextFill {
+    /// The colour at `t` (0..1) of the way.
+    pub fn at(&self, t: f32) -> [u8; 4] {
+        let t = t.clamp(0.0, 1.0);
+        let Some(first) = self.stops.first() else {
+            return [0, 0, 0, 255];
+        };
+        if t <= first.1 {
+            return first.0;
+        }
+        for w in self.stops.windows(2) {
+            let ((a, ta), (b, tb)) = (w[0], w[1]);
+            if t <= tb {
+                let k = if tb > ta { (t - ta) / (tb - ta) } else { 1.0 };
+                let mix = |i: usize| {
+                    (f32::from(a[i]) + (f32::from(b[i]) - f32::from(a[i])) * k).round() as u8
+                };
+                return [mix(0), mix(1), mix(2), mix(3)];
+            }
+        }
+        self.stops.last().map_or(first.0, |l| l.0)
+    }
+
+    /// The share of the way of point `(x, y)` in the box `(x0, y0, x1, y1)`.
+    pub fn share(&self, x: f32, y: f32, b: (f32, f32, f32, f32)) -> f32 {
+        let (c, s) = (
+            self.angle_deg.to_radians().cos(),
+            self.angle_deg.to_radians().sin(),
+        );
+        let (cx, cy) = ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0);
+        let half = ((b.2 - b.0) * c.abs() + (b.3 - b.1) * s.abs()) / 2.0;
+        if half <= 0.0 {
+            return 0.5;
+        }
+        (((x - cx) * c + (y - cy) * s) / half + 1.0) / 2.0
+    }
 }
 
 impl TextData {
@@ -265,6 +318,7 @@ impl Default for TextData {
             flip_y: false,
             glyph_styles: Vec::new(),
             path: None,
+            fill: None,
         }
     }
 }

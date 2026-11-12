@@ -27,7 +27,7 @@ use iai_engine::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::host::{Grants, Host};
+use crate::host::{Grants, Host, TaskMode};
 use crate::jsonrpc::{self, Line};
 use crate::limits::MAX_LINKS;
 
@@ -77,6 +77,13 @@ pub enum Op {
         errand: u64,
         message: String,
     },
+    /// A relay asks for the next word the window has for a conversation it
+    /// began (the agent nudged on when it stopped short, the person's
+    /// verdict on its work); `relay` names it.
+    NextWord {
+        #[serde(default)]
+        relay: String,
+    },
 }
 
 impl Op {
@@ -106,6 +113,16 @@ pub struct Errand {
     /// The model asked for, when the person chose one.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+/// Word the window has for an agent's conversation, for a relay to send
+/// on (`agentapi send-message`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Word {
+    /// The conversation the relay began for the errand.
+    pub conversation: String,
+    /// What to tell the agent there.
+    pub text: String,
 }
 
 /// A request waiting for the app's answer.
@@ -408,6 +425,14 @@ impl BridgeHost {
         .map(|_| ())
     }
 
+    /// The next word the window has for a conversation, if any. A window
+    /// from before words answers an error: there are none then.
+    pub fn next_word(&mut self, relay: &str) -> Result<Option<Word>, CmdError> {
+        self.typed(Op::NextWord {
+            relay: relay.to_string(),
+        })
+    }
+
     /// Tell the window the errand could not be handed on, and why.
     pub fn errand_failed(&mut self, errand: u64, message: &str) -> Result<(), CmdError> {
         self.ask(Op::ErrandFailed {
@@ -449,10 +474,13 @@ impl Host for BridgeHost {
 
     // A window from before these were known answers them with an error:
     // what it is told is a courtesy, not a need.
-    fn task_begin(&mut self, request: &str) {
-        let _ = self.ask(Op::TaskBegin {
+    fn task_begin(&mut self, request: &str) -> TaskMode {
+        self.ask(Op::TaskBegin {
             request: request.to_string(),
-        });
+        })
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
     }
 
     fn task_end(&mut self, status: &str, title: &str) {
@@ -472,12 +500,24 @@ impl Host for BridgeHost {
 /// when a task begins, and before a call while nothing is open on the host
 /// of its own (so no work is left behind there); a control file that led
 /// nowhere is not tried again until it changes.
+///
+/// From `task_begin` to `task_end` the calls stay with the window the task
+/// began on, whatever window takes the control file meanwhile (08/11: a
+/// redraw's calls followed another window halfway); that window gone, they
+/// fail with "link lost" rather than land on the host of its own. With no
+/// task open, they follow the control file at each call.
 pub struct PreferWindow<H: Host> {
     control: PathBuf,
     window: Option<BridgeHost>,
     alone: H,
     /// The control file as it was when it last led nowhere.
     tried: Option<(Option<SystemTime>, u64)>,
+    /// The window linked to: when another window takes the file over (the
+    /// person sent the errand from it), the calls follow it rather than land
+    /// in an older window, unless a task is pinned to this one.
+    linked: Option<Control>,
+    /// A task is open on the linked window: the calls stay with it.
+    pinned: bool,
 }
 
 impl<H: Host> PreferWindow<H> {
@@ -487,6 +527,8 @@ impl<H: Host> PreferWindow<H> {
             window: None,
             alone,
             tried: None,
+            linked: None,
+            pinned: false,
         };
         host.look();
         host
@@ -502,6 +544,7 @@ impl<H: Host> PreferWindow<H> {
         if self.window.as_ref().is_some_and(BridgeHost::broken) {
             self.window = None;
         }
+        self.follow();
         if self.window.is_some() {
             return;
         }
@@ -513,25 +556,66 @@ impl<H: Host> PreferWindow<H> {
         if self.tried == Some(stamp) {
             return;
         }
-        match Control::read(&self.control).and_then(|c| BridgeHost::connect(&c)) {
+        let read = Control::read(&self.control);
+        match read
+            .as_ref()
+            .map_err(|e| io::Error::new(e.kind(), e.to_string()))
+            .and_then(BridgeHost::connect)
+        {
             Ok(link) => {
                 self.window = Some(link);
                 self.tried = None;
+                self.linked = read.ok();
             }
             Err(_) => self.tried = Some(stamp),
         }
     }
 
+    /// Let the linked window go when the file names another one now (not
+    /// while a task is pinned to it).
+    fn follow(&mut self) {
+        if self.window.is_none() || self.pinned {
+            return;
+        }
+        if let Ok(now) = Control::read(&self.control)
+            && self.linked.as_ref() != Some(&now)
+        {
+            self.window = None;
+            self.linked = None;
+            self.tried = None;
+        }
+    }
+
     /// Where calls go now, looking for the window first when that loses
-    /// nothing.
-    fn host(&mut self) -> &mut dyn Host {
+    /// nothing; a task's window that went away is an error, not a reason
+    /// to go elsewhere.
+    fn host(&mut self) -> Result<&mut dyn Host, CmdError> {
+        self.check_pinned()?;
         if self.window.as_ref().is_some_and(BridgeHost::broken) {
             self.window = None;
+        }
+        if self.window.is_some() {
+            self.follow();
         }
         if self.window.is_none() && self.alone.idle() {
             self.look();
         }
-        self.current()
+        Ok(self.current())
+    }
+
+    /// The window the open task is pinned to is gone.
+    fn check_pinned(&self) -> Result<(), CmdError> {
+        let gone = self.window.as_ref().is_none_or(BridgeHost::broken);
+        if self.pinned && gone {
+            return Err(CmdError::new(
+                ErrorCode::Io,
+                "link_lost: the iAi window this task began on is gone; end the task \
+                 (iai_task_end \"failed\") and begin again",
+            )
+            .vi("Cửa sổ iAi đang làm việc này đã đóng")
+            .with_hint(json!({"gate": "link_lost", "tool": "iai_task_end"})));
+        }
+        Ok(())
     }
 
     /// Where calls go now, as it stands (a job is asked after where it runs).
@@ -545,32 +629,44 @@ impl<H: Host> PreferWindow<H> {
 
 impl<H: Host> Host for PreferWindow<H> {
     fn commands(&mut self) -> Result<Vec<CommandInfo>, CmdError> {
-        self.host().commands()
+        self.host()?.commands()
     }
 
     fn execute(&mut self, call: CommandCall) -> Result<Reply, CmdError> {
-        self.host().execute(call)
+        self.host()?.execute(call)
     }
 
     fn batch(&mut self, calls: Vec<CommandCall>, atomic: bool) -> Result<BatchReply, CmdError> {
-        self.host().batch(calls, atomic)
+        self.host()?.batch(calls, atomic)
     }
 
     fn job(&mut self, job: JobId, wait: Duration) -> Result<Option<JobState>, CmdError> {
+        self.check_pinned()?;
         self.current().job(job, wait)
     }
 
     fn cancel(&mut self, job: JobId) -> Result<bool, CmdError> {
+        self.check_pinned()?;
         self.current().cancel(job)
     }
 
-    fn task_begin(&mut self, request: &str) {
+    fn task_begin(&mut self, request: &str) -> TaskMode {
+        // A new task goes to the window that holds the file now.
+        self.pinned = false;
+        if self.window.as_ref().is_some_and(BridgeHost::broken) {
+            self.window = None;
+        }
+        self.follow();
         self.look();
-        self.current().task_begin(request);
+        self.pinned = self.window.is_some();
+        self.current().task_begin(request)
     }
 
     fn task_end(&mut self, status: &str, title: &str) {
-        self.current().task_end(status, title);
+        if self.check_pinned().is_ok() {
+            self.current().task_end(status, title);
+        }
+        self.pinned = false;
     }
 
     fn grants(&mut self) -> Grants {
@@ -586,7 +682,14 @@ impl<H: Host> Host for PreferWindow<H> {
 /// loop calls for each command that came in (see [`Op::is_command`]). `Job`
 /// is answered at once, the client waits by asking again.
 pub fn answer_with(host: &mut dyn Host, request: Request) {
-    let outcome = match &request.op {
+    let outcome = outcome_with(host, &request.op);
+    request.answer(outcome);
+}
+
+/// What [`answer_with`] answers `op` with, for a window that looks at it
+/// before answering.
+pub fn outcome_with(host: &mut dyn Host, op: &Op) -> Result<Value, CmdError> {
+    match op {
         Op::Commands => host.commands().and_then(to_value),
         Op::Execute { call } => host.execute(call.clone()).and_then(to_value),
         Op::Batch { calls, atomic } => host.batch(calls.clone(), *atomic).and_then(to_value),
@@ -596,8 +699,7 @@ pub fn answer_with(host: &mut dyn Host, request: Request) {
             ErrorCode::UnknownCommand,
             "this end of the link runs commands only",
         )),
-    };
-    request.answer(outcome);
+    }
 }
 
 fn to_value<T: Serialize>(v: T) -> Result<Value, CmdError> {
@@ -803,6 +905,74 @@ mod tests {
         let _ = std::fs::remove_file(&file);
         host.task_begin("x");
         assert!(host.tried.is_none() && !host.on_window());
+    }
+
+    #[test]
+    fn calls_follow_a_newer_window_that_takes_the_file() {
+        let file = std::env::temp_dir().join(format!("iai-follow-{}.json", std::process::id()));
+        let alone = LocalHost::new(Engine::new(
+            iai_engine::cmds::core_registry(),
+            Source::Agent,
+            Policy::agent(),
+        ));
+        let (old, old_done, old_told) = app();
+        old.write(&file).unwrap();
+        let mut host = PreferWindow::new(file.clone(), alone);
+        assert!(host.on_window());
+        // The person sends the errand from a newer window: it takes the file.
+        let (new, new_done, new_told) = app();
+        new.write(&file).unwrap();
+        host.task_begin("Vẽ lại vector");
+        assert!(host.on_window());
+        assert_eq!(host.linked.as_ref(), Some(&new));
+        assert_eq!(new_told.lock().unwrap()[0], "begin Vẽ lại vector");
+        assert!(old_told.lock().unwrap().is_empty());
+        old_done.store(true, Ordering::Relaxed);
+        new_done.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_task_stays_with_its_window_and_a_lost_window_is_said() {
+        let file = std::env::temp_dir().join(format!("iai-pin-{}.json", std::process::id()));
+        let alone = LocalHost::new(Engine::new(
+            iai_engine::cmds::core_registry(),
+            Source::Agent,
+            Policy::agent(),
+        ));
+        let (old, old_done, old_told) = app();
+        old.write(&file).unwrap();
+        let mut host = PreferWindow::new(file.clone(), alone);
+        host.task_begin("Vẽ lại vector");
+        file_new(&mut host);
+        // Another window takes the file halfway: the task's calls stay.
+        let (new, new_done, new_told) = app();
+        new.write(&file).unwrap();
+        file_new(&mut host);
+        assert_eq!(docs(&mut host), 2);
+        assert_eq!(host.linked.as_ref(), Some(&old));
+        host.task_end("done", "Vẽ lại");
+        assert_eq!(
+            old_told.lock().unwrap().clone(),
+            ["begin Vẽ lại vector", "end done Vẽ lại"]
+        );
+        // No task open: the calls follow the file; a new task is pinned there.
+        assert_eq!(docs(&mut host), 0);
+        host.task_begin("Ảnh thẻ");
+        assert_eq!(host.linked.as_ref(), Some(&new));
+        assert_eq!(new_told.lock().unwrap()[0], "begin Ảnh thẻ");
+        // The window goes away mid-task: an error, not the host of its own.
+        new_done.store(true, Ordering::Relaxed);
+        if let Some(w) = host.window.as_mut() {
+            w.broken = true;
+        }
+        let e = host
+            .execute(CommandCall::new("doc.list", json!({})))
+            .unwrap_err();
+        assert_eq!(e.hint.as_ref().unwrap()["gate"], "link_lost");
+        host.task_end("failed", "");
+        old_done.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

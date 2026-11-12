@@ -307,24 +307,28 @@ impl Session<'_> {
             .with_hint(serde_json::json!({"tool": "command_list"}))
         })?;
         let meta = cmd.meta();
-        self.engine.policy.check(meta)?;
-        self.check_not_working(cmd, &call.args)?;
-        if call.dry_run && !meta.can_dry_run() {
-            return Err(CmdError::bad_param(
-                "dryRun",
-                "false: this command writes files, prints or uses the network",
-            ));
-        }
-        if let Some(expected) = call.expect_revision {
-            self.check_revision(&call.args, expected)?;
+        if let Err(e) = self.admit(cmd, &call) {
+            // Every refusal has its line: the journal tells what an agent
+            // tried, not only what ran.
+            iai_diag::note(
+                "cmd",
+                &format!(
+                    "{} refused {}: {}",
+                    self.engine.source.as_str(),
+                    meta.id,
+                    refusal_code(&e)
+                ),
+            );
+            return Err(e);
         }
         // What the window's tools did before this call is theirs.
         self.take_window_steps();
         let source = self.engine.source.as_str();
+        let dry = if call.dry_run { " (dry run)" } else { "" };
         iai_diag::note(
             "cmd",
             &format!(
-                "{source} {} {}",
+                "{source} {}{dry} {}",
                 meta.id,
                 short(&for_journal(&call.args, cmd.private_params()))
             ),
@@ -332,22 +336,7 @@ impl Session<'_> {
 
         let txn = self.begin();
         // A pack's after-edit work goes in the command's own undo step.
-        let hook = registry
-            .after_edit()
-            .filter(|_| meta.effects.contains(&Effect::Edit) && !meta.id.starts_with("edit."));
-        let hooked: Vec<u32> = match hook {
-            Some(h) => self
-                .ws
-                .documents_mut()
-                .iter_mut()
-                .filter(|d| (h.applies)(&d.canvas))
-                .map(|d| {
-                    d.canvas.begin_undo_group(meta.label_en);
-                    d.id.0
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+        let hooked = self.open_after_edit(meta.id);
         let planned = match jobs::guarded(|| cmd.plan_json(self, call.args.clone())) {
             Ok(planned) => planned,
             Err(payload) => Err(jobs::panicked(meta.id, &jobs::panic_text(payload.as_ref()))),
@@ -384,17 +373,7 @@ impl Session<'_> {
             }
             Err(e) => Err(e),
         };
-        if let Some(h) = hook {
-            let done = matches!(outcome, Ok(Outcome::Done(_)));
-            for id in hooked {
-                if let Some(d) = self.ws.documents_mut().iter_mut().find(|d| d.id.0 == id) {
-                    if done && (h.applies)(&d.canvas) {
-                        (h.settle)(&mut d.canvas);
-                    }
-                    d.canvas.end_undo_group();
-                }
-            }
-        }
+        self.close_after_edit(hooked, matches!(outcome, Ok(Outcome::Done(_))));
         // The steps it recorded are its own: its line in the journal says them.
         self.drop_recorded_steps();
 
@@ -406,9 +385,13 @@ impl Session<'_> {
                 }
                 Ok(reply)
             }
-            Ok(Outcome::Done(result)) => {
+            Ok(Outcome::Done(mut result)) => {
                 if call.dry_run {
                     self.rollback(txn);
+                } else if self.engine.source == Source::Agent
+                    && let Some(after) = self.engine.registry.agent_guard().and_then(|g| g.after)
+                {
+                    after(self, &call, &mut result);
                 }
                 let revision = self.target_revision(&call.args);
                 let reply = Reply::Done { result, revision };
@@ -425,6 +408,68 @@ impl Session<'_> {
                 Err(e)
             }
         }
+    }
+
+    /// Open an undo group on each document a pack's after-edit work applies
+    /// to, when command `id` edits: the documents, for `close_after_edit`.
+    fn open_after_edit(&mut self, id: &str) -> Vec<u32> {
+        let registry = Arc::clone(&self.engine.registry);
+        let edits = registry.get(id).is_some_and(|c| {
+            c.meta().effects.contains(&Effect::Edit) && !c.meta().id.starts_with("edit.")
+        });
+        let (Some(h), true) = (registry.after_edit(), edits) else {
+            return Vec::new();
+        };
+        let label = registry.get(id).map_or(id, |c| c.meta().label_en);
+        self.ws
+            .documents_mut()
+            .iter_mut()
+            .filter(|d| (h.applies)(&d.canvas))
+            .map(|d| {
+                d.canvas.begin_undo_group(label);
+                d.id.0
+            })
+            .collect()
+    }
+
+    /// Do the after-edit work when the change was `done`, and close the
+    /// groups `open_after_edit` opened.
+    fn close_after_edit(&mut self, hooked: Vec<u32>, done: bool) {
+        let Some(h) = self.engine.registry.after_edit() else {
+            return;
+        };
+        for id in hooked {
+            if let Some(d) = self.ws.documents_mut().iter_mut().find(|d| d.id.0 == id) {
+                if done && (h.applies)(&d.canvas) {
+                    (h.settle)(&mut d.canvas);
+                }
+                d.canvas.end_undo_group();
+            }
+        }
+    }
+
+    /// The checks before a call runs: what the session was granted, a job
+    /// at work on the document, a dry run of a command that cannot take
+    /// back, the revision expected, and a pack's guard for an agent's call.
+    fn admit(&mut self, cmd: &dyn DynCommand, call: &CommandCall) -> Result<(), CmdError> {
+        let meta = cmd.meta();
+        self.engine.policy.check(meta)?;
+        self.check_not_working(cmd, &call.args)?;
+        if call.dry_run && !meta.can_dry_run() {
+            return Err(CmdError::bad_param(
+                "dryRun",
+                "false: this command writes files, prints or uses the network",
+            ));
+        }
+        if let Some(expected) = call.expect_revision {
+            self.check_revision(&call.args, expected)?;
+        }
+        if self.engine.source == Source::Agent
+            && let Some(guard) = self.engine.registry.agent_guard()
+        {
+            (guard.before)(self, call)?;
+        }
+        Ok(())
     }
 
     /// Run calls in order. `atomic`: the first failure takes back the calls
@@ -513,6 +558,9 @@ impl Session<'_> {
                     Ok(apply) => {
                         self.take_window_steps();
                         let txn = self.begin();
+                        // A pack's after-edit work goes in the job's own undo
+                        // step, as it does for a command that ran at once.
+                        let hooked = self.open_after_edit(job.command);
                         let applied = match jobs::guarded(|| apply(self)) {
                             Ok(out) => out,
                             Err(payload) => Err(jobs::panicked(
@@ -520,6 +568,7 @@ impl Session<'_> {
                                 &jobs::panic_text(payload.as_ref()),
                             )),
                         };
+                        self.close_after_edit(hooked, applied.is_ok());
                         self.drop_recorded_steps();
                         match applied {
                             Ok(result) => {
@@ -771,6 +820,12 @@ impl Session<'_> {
     pub fn registry(&self) -> &Registry {
         &self.engine.registry
     }
+
+    /// The registry, held apart from the session: a command that runs
+    /// another (a pack's `vector.build_region`) plans it on this session.
+    pub fn registry_arc(&self) -> Arc<Registry> {
+        Arc::clone(&self.engine.registry)
+    }
 }
 
 /// What tells two states of a document apart for its revision: its history,
@@ -807,6 +862,23 @@ fn arg_doc(args: &Value) -> Option<u32> {
 
 /// Args for the flight recorder: short, one line.
 /// `args` as the journal keeps them: a private param only said given.
+/// What a refusal says in the journal: a pack's gate by its name
+/// (`hint.gate`), else the error's code.
+pub fn refusal_code(e: &CmdError) -> String {
+    if let Some(gate) = e
+        .hint
+        .as_ref()
+        .and_then(|h| h.get("gate"))
+        .and_then(Value::as_str)
+    {
+        return gate.to_string();
+    }
+    serde_json::to_value(e.code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{:?}", e.code))
+}
+
 fn for_journal(args: &Value, private: &[&str]) -> Value {
     match args {
         Value::Object(fields) if !private.is_empty() => Value::Object(

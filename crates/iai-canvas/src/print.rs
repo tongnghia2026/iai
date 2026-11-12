@@ -1526,25 +1526,61 @@ fn collect_pdf_vectors_impl(
                     }
                 }
             }
+            // Solid letters, or letters filled with a gradient (gold
+            // lettering) on an RGB page.
             if text_objects.is_empty()
                 || text_objects.iter().any(|object| {
                     (object.style.opacity - 1.0).abs() > 1e-3
-                        || !matches!(object.style.fill, Paint::Solid(color) if color.alpha() >= 1.0 - 1e-3)
+                        || !match object.style.fill {
+                            Paint::Solid(color) => color.alpha() >= 1.0 - 1e-3,
+                            // Opaque stops: on a CMYK page too, baked
+                            // into the page's ink below.
+                            Paint::Gradient(g) => g
+                                .active_stops()
+                                .iter()
+                                .all(|s| s.color.alpha() >= 1.0 - 1e-3),
+                            Paint::None => false,
+                        }
                 })
             {
                 break;
             }
             close_band(&mut pending, &mut bands, objects.len());
             for object in text_objects {
+                let fill_gradient = match object.style.fill {
+                    Paint::Gradient(g) => {
+                        let mut g = iai_doc::vector::style::Gradient {
+                            transform: object.transform.then(&g.transform),
+                            ..g
+                        };
+                        // On a CMYK page each stop in the page's process
+                        // ink, as a path's gradient is.
+                        if let Some(conv) = &cmyk_conv {
+                            for stop in g.stops.iter_mut() {
+                                let a = stop.color.alpha();
+                                let [c, m, y, k] = stop.color.to_cmyk8(conv);
+                                stop.color = iai_doc::vector::color::ColorValue::Cmyk {
+                                    c: c as f32 / 255.0,
+                                    m: m as f32 / 255.0,
+                                    y: y as f32 / 255.0,
+                                    k: k as f32 / 255.0,
+                                    a,
+                                };
+                            }
+                        }
+                        Some(g)
+                    }
+                    _ => None,
+                };
                 let fill = paint_color(object.style.fill);
-                if fill.is_none() {
+                if fill.is_none() && fill_gradient.is_none() {
                     break;
                 }
                 objects.push(PdfVectorObject {
                     clips: clip_path.iter().cloned().collect(),
                     path: object.path_in_layer_space(),
                     fill,
-                    fill_gradient: None,
+                    fill_gradient,
                     stroke: None,
                     stroke_width_px: 0.0,
                     stroke_cap: object.style.stroke_style.cap,
@@ -1781,10 +1817,27 @@ fn collect_pdf_vectors_impl(
         }
         promoted_layer_ids.push(layer.id);
     }
+    // The run still being gathered has no vector under it and stays in the
+    // base, at the page's pixels; but pictures placed finer than the page
+    // (a generated illustration under the whole drawing) at its top go as a
+    // run of their own, drawn on the base before every object, each at its
+    // own pixels (plan M4.3).
+    if allow_overlay && cmyk_conv.is_none() {
+        let placed = |id: &u32| {
+            layers
+                .iter()
+                .find(|l| l.id == *id)
+                .is_some_and(|l| l.placed.as_deref().is_some_and(|p| p.still_in(l)))
+        };
+        let lead = pending.iter().take_while(|id| placed(id)).count();
+        if lead > 0 {
+            let top: Vec<u32> = pending.drain(..lead).collect();
+            bands.push((top, objects.len()));
+        }
+    }
     objects.reverse();
     promoted_layer_ids.reverse();
-    // Bottom up: each run is drawn after the objects below it. The run still
-    // being gathered has no vector under it and stays in the base.
+    // Bottom up: each run is drawn after the objects below it.
     let total = objects.len();
     let bands: Vec<PdfPictureBand> = bands
         .into_iter()
@@ -1909,16 +1962,28 @@ fn vector_objects_srgb(
         }
         let mut out = Vec::new();
         for object in text_objects {
-            let color = match object.style.fill {
-                Paint::Solid(c) => c,
-                _ => return None,
+            // Solid letters, or a gradient across them (gold lettering).
+            let (fill, fill_gradient, alpha) = match object.style.fill {
+                Paint::Solid(c) => (
+                    Some(rgb(c)),
+                    None,
+                    object.style.opacity.clamp(0.0, 1.0) * c.alpha(),
+                ),
+                Paint::Gradient(g) => (
+                    None,
+                    Some(iai_doc::vector::style::Gradient {
+                        transform: object.transform.then(&g.transform),
+                        ..g
+                    }),
+                    object.style.opacity.clamp(0.0, 1.0),
+                ),
+                Paint::None => return None,
             };
-            let alpha = object.style.opacity.clamp(0.0, 1.0) * color.alpha();
             out.push(PdfVectorObject {
                 clips: Vec::new(),
                 path: object.path_in_layer_space(),
-                fill: Some(rgb(color)),
-                fill_gradient: None,
+                fill,
+                fill_gradient,
                 stroke: None,
                 stroke_width_px: 0.0,
                 stroke_cap: object.style.stroke_style.cap,
@@ -2056,7 +2121,54 @@ pub fn pdf_overlays(
     selection
         .bands
         .iter()
-        .filter_map(|band| {
+        .flat_map(|band| -> Vec<PdfOverlay> {
+            // Pictures placed finer than the page (a generated
+            // illustration): each at its own pixels, when every layer of the
+            // run still shows its own.
+            let placed: Vec<(&iai_doc::layer::Layer, &iai_doc::placed_image::PlacedImage)> = band
+                .layer_ids
+                .iter()
+                .filter_map(|id| canvas.layer_stack.layers.iter().find(|l| l.id == *id))
+                .filter_map(|l| {
+                    l.placed
+                        .as_deref()
+                        .filter(|p| p.still_in(l))
+                        .map(|p| (l, p))
+                })
+                .collect();
+            if !placed.is_empty() && placed.len() == band.layer_ids.len() {
+                // Each one whole on the page; one cut by the page's edge
+                // (or off it) sends the run the flattened way below, as its
+                // pixels show — not left out of the PDF, nor moved by a
+                // left or top edge clamped to 0 (10/11 audit).
+                let whole: Option<Vec<PdfOverlay>> = placed
+                    .into_iter()
+                    .map(|(l, p)| {
+                        let r = p.on_page(l);
+                        let (left, top) = (r[0].round(), r[1].round());
+                        if left < 0.0 || top < 0.0 {
+                            return None;
+                        }
+                        let (x, y) = (left as u32, top as u32);
+                        let rw = (r[2].round() as u32).min(w.saturating_sub(x));
+                        let rh = (r[3].round() as u32).min(h.saturating_sub(y));
+                        if rw == 0 || rh == 0 || rw + 1 < r[2] as u32 || rh + 1 < r[3] as u32 {
+                            return None;
+                        }
+                        Some(PdfOverlay {
+                            rgba: p.rgba.clone(),
+                            px_w: p.width,
+                            px_h: p.height,
+                            rect: [x, y, rw, rh],
+                            after_objects: band.after_objects,
+                            cmyk_alpha: None,
+                        })
+                    })
+                    .collect();
+                if let Some(whole) = whole {
+                    return whole;
+                }
+            }
             let keep: std::collections::HashSet<u32> = band.layer_ids.iter().copied().collect();
             let mut stack = canvas.layer_stack.clone();
             for layer in &mut stack.layers {
@@ -2066,15 +2178,17 @@ pub fn pdf_overlays(
                 }
             }
             let rgba = stack.flatten(w, h);
-            let rect = alpha_bounds(&rgba, w, h)?;
-            Some(PdfOverlay {
+            let Some(rect) = alpha_bounds(&rgba, w, h) else {
+                return Vec::new();
+            };
+            vec![PdfOverlay {
                 rgba: crop_rgba(&rgba, w, rect),
                 px_w: rect[2],
                 px_h: rect[3],
                 rect,
                 after_objects: band.after_objects,
                 cmyk_alpha: None,
-            })
+            }]
         })
         .collect()
 }
@@ -4200,6 +4314,132 @@ mod tests {
         let pic = content.find("/Im1 Do").expect("the picture");
         assert!(blue < pic && pic < green, "drawn bottom up: {content}");
         assert!(text.contains("/Width 8 /Height 6"), "the picture is 8 × 6");
+    }
+
+    /// M4.3: a picture placed under every vector (a generated
+    /// illustration) goes in the PDF at its own pixels, drawn on the base
+    /// before the vectors, not in the base at the page's.
+    #[test]
+    fn a_placed_picture_under_the_vectors_keeps_its_own_pixels() {
+        use iai_doc::vector::color::ColorValue;
+        use iai_doc::vector::object::VectorObjectData;
+        use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
+        use iai_doc::vector::style::VectorStyle;
+        use iai_geom::geometry::Point;
+        use iai_geom::vector::affine::AffineTransform;
+        use iai_vector::command_vector::apply_object_to_layer;
+
+        let mut canvas = crate::canvas::Canvas::from_rgba(vec![255; 64 * 64 * 4], 64, 64);
+        let art = canvas.add_layer();
+        let page_px = vec![90u8; 16 * 16 * 4];
+        {
+            let layer = &mut canvas.layer_stack.layers[art];
+            layer.tiles = iai_raster::tile::TileMap::from_rgba(&page_px, 16, 16);
+            (layer.width, layer.height, layer.offset) = (16, 16, (8, 8));
+            layer.placed = Some(std::sync::Arc::new(iai_doc::placed_image::PlacedImage {
+                rgba: vec![90u8; 64 * 64 * 4],
+                width: 64,
+                height: 64,
+                rect: [0.0, 0.0, 16.0, 16.0],
+                sig: iai_doc::placed_image::pixels_sig(&page_px, 16, 16),
+            }));
+        }
+        let shape = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[shape],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(30.0, 30.0)),
+                            Node::sharp(Point::new(60.0, 30.0)),
+                            Node::sharp(Point::new(60.0, 60.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        canvas.flatten_full();
+        let art_id = canvas.layer_stack.layers[art].id;
+        let selection = collect_pdf_vectors_layered(&canvas);
+        assert_eq!(
+            selection.bands,
+            vec![PdfPictureBand {
+                layer_ids: vec![art_id],
+                after_objects: 0
+            }]
+        );
+        let overlays = pdf_overlays(&canvas, &selection);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(
+            (overlays[0].px_w, overlays[0].px_h),
+            (64, 64),
+            "its own pixels"
+        );
+        let base = pdf_raster_base(&canvas, &selection);
+        assert!(base.chunks_exact(4).all(|px| px == [255, 255, 255, 255]));
+        // Printing (not layered) keeps it in the base as before.
+        let plain = collect_pdf_vectors(&canvas);
+        assert!(plain.bands.is_empty());
+    }
+
+    /// 10/11 audit: a placed picture the page's left edge cuts is not left
+    /// out of the PDF (nor moved right by its edge clamped to 0): the run
+    /// goes in as its pixels show.
+    #[test]
+    fn a_placed_picture_cut_by_the_page_edge_stays_in_the_pdf() {
+        use iai_doc::vector::color::ColorValue;
+        use iai_doc::vector::object::VectorObjectData;
+        use iai_doc::vector::path::{Contour, FillRule, Node, PathData};
+        use iai_doc::vector::style::VectorStyle;
+        use iai_geom::geometry::Point;
+        use iai_geom::vector::affine::AffineTransform;
+        use iai_vector::command_vector::apply_object_to_layer;
+
+        let mut canvas = crate::canvas::Canvas::from_rgba(vec![255; 64 * 64 * 4], 64, 64);
+        let art = canvas.add_layer();
+        let page_px = vec![90u8; 16 * 16 * 4];
+        {
+            let layer = &mut canvas.layer_stack.layers[art];
+            layer.tiles = iai_raster::tile::TileMap::from_rgba(&page_px, 16, 16);
+            (layer.width, layer.height, layer.offset) = (16, 16, (-4, 8));
+            layer.placed = Some(std::sync::Arc::new(iai_doc::placed_image::PlacedImage {
+                rgba: vec![90u8; 64 * 64 * 4],
+                width: 64,
+                height: 64,
+                rect: [0.0, 0.0, 16.0, 16.0],
+                sig: iai_doc::placed_image::pixels_sig(&page_px, 16, 16),
+            }));
+        }
+        let shape = canvas.add_layer();
+        apply_object_to_layer(
+            &mut canvas.layer_stack.layers[shape],
+            VectorObjectData::new(
+                PathData::new(
+                    vec![Contour::new(
+                        vec![
+                            Node::sharp(Point::new(30.0, 30.0)),
+                            Node::sharp(Point::new(60.0, 30.0)),
+                            Node::sharp(Point::new(60.0, 60.0)),
+                        ],
+                        true,
+                    )],
+                    FillRule::NonZero,
+                ),
+                VectorStyle::filled(ColorValue::rgb(1.0, 0.0, 0.0)),
+                AffineTransform::IDENTITY,
+            ),
+        );
+        canvas.flatten_full();
+        let selection = collect_pdf_vectors_layered(&canvas);
+        assert_eq!(selection.bands.len(), 1);
+        let overlays = pdf_overlays(&canvas, &selection);
+        assert_eq!(overlays.len(), 1, "still in the PDF");
+        assert_eq!(overlays[0].rect, [0, 8, 12, 16], "where its pixels show");
     }
 
     #[test]

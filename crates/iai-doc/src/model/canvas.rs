@@ -74,6 +74,10 @@ pub struct CanvasMetadata {
     /// has a master — see [`crate::core::document::Document::master`]. Persisted
     /// only when `false`, so default pages stay byte-identical.
     pub use_master: bool,
+    /// Notes a tool keeps with the page, by the tool's own key (its state
+    /// as text, e.g. JSON). Saved in `.iai` when there are any; not part of
+    /// the undo history.
+    pub notes: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for CanvasMetadata {
@@ -94,6 +98,7 @@ impl Default for CanvasMetadata {
             page_margin_px: 0.0,
             page_name: None,
             use_master: true,
+            notes: std::collections::BTreeMap::new(),
         }
     }
 }

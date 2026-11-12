@@ -39,6 +39,8 @@ const SHAPE_GROUP: &[(ToolId, &str, &str)] = &[
     (ToolId::Shape, ph::LINE_SEGMENT, "Line (U)"),
     (ToolId::Shape, ph::POLYGON, "Polygon (U)"),
     (ToolId::Shape, ph::STAR, "Star (U)"),
+    (ToolId::Shape, ph::ARROW_FAT_RIGHT, "Arrow shape (U)"),
+    (ToolId::Shape, ph::HEART, "Heart (U)"),
     (ToolId::Arrow, ph::ARROW_UP_RIGHT, "Arrow / Connector"),
 ];
 
@@ -698,7 +700,7 @@ fn group_btn(
     let is_shape_group = entries.iter().any(|&(id, _, _)| id == ToolId::Shape)
         && entries.iter().any(|&(id, _, _)| id == ToolId::Arrow);
     let active_entry = if is_shape_group && data.tool.active_tool == ToolId::Shape {
-        entries.get(data.tool.shape_kind.min(4) as usize)
+        entries.get(data.tool.shape_kind.min(6) as usize)
     } else {
         entries
             .iter()
@@ -711,7 +713,7 @@ fn group_btn(
         .find_map(|pref| entries.iter().find(|&&(id, _, _)| id == *pref));
     let preferred_entry =
         if is_shape_group && preferred_entry.is_some_and(|&(id, _, _)| id == ToolId::Shape) {
-            entries.get(data.tool.shape_kind.min(4) as usize)
+            entries.get(data.tool.shape_kind.min(6) as usize)
         } else {
             preferred_entry
         };
@@ -793,7 +795,7 @@ fn group_btn(
                 );
                 if ui.add(egui::Button::selectable(checked, label)).clicked() {
                     if is_shape_group && entry_id == ToolId::Shape {
-                        actions.tool.set_shape_kind = Some(entry_index.min(4) as u8);
+                        actions.tool.set_shape_kind = Some(entry_index.min(6) as u8);
                     }
                     actions.tool.select_tool = Some(entry_id);
                     ui.close();

@@ -1930,6 +1930,21 @@ fn draw_shape_preview(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::
                 }
                 format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
             }
+            5 | 6 => {
+                use crate::core::vector::from_shape;
+                let outline = if data.tool.shape_kind == 5 {
+                    from_shape::arrow_points(x0, y0, x1, y1, data.tool.shape_star_inner)
+                } else {
+                    from_shape::heart_points(x0, y0, x1, y1, 12)
+                };
+                let mut pts: Vec<egui::Pos2> =
+                    outline.iter().map(|&(x, y)| to_screen_pos(x, y)).collect();
+                if let Some(&first) = pts.first() {
+                    pts.push(first);
+                }
+                painter.add(egui::Shape::line(pts, stroke));
+                format!("{:.0} × {:.0}", (x1 - x0).abs(), (y1 - y0).abs())
+            }
             _ => {
                 let w = (x1 - x0).abs();
                 let h = (y1 - y0).abs();
@@ -3884,6 +3899,7 @@ fn draw_text_editing_overlay(
             flip_x: data.tool.text_flip_x,
             flip_y: data.tool.text_flip_y,
             path: data.tool.text_path.clone(),
+            fill: None,
             // Only valid while the buffer matches; a mid-frame edit falls
             // back to uniform for that frame (re-synced next frame).
             glyph_styles: if data.tool.text_glyph_styles.len() == buf.chars().count() {

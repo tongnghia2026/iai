@@ -151,6 +151,14 @@ pub(crate) struct Ended {
 /// How many ended jobs are remembered for `job_status`.
 const KEEP_ENDED: usize = 64;
 
+/// Run a command's `job` here, now, as an engine does a call not sent to
+/// the background: for a command that runs another (a pack's
+/// `vector.build_region`). Its result is applied by calling what it gives
+/// back on the session.
+pub fn run_job_here(command: &'static str, job: Job<Value>) -> Result<Apply<Value>, CmdError> {
+    Jobs::run_here(command, job)
+}
+
 #[derive(Default)]
 pub(crate) struct Jobs {
     next: u64,

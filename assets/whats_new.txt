@@ -2,6 +2,13 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+12/11/2026
+- Nhóm công cụ vẽ hình (chuột phải vào nút hình chữ nhật) có thêm «mũi tên khối» và «trái tim». Kéo ra như vẽ chữ nhật; sau đó kéo các nút vuông quanh hình để kéo dài, kéo ngang hay kéo cao tùy ý. Mũi tên chỉnh được độ dày thân ở ô «Shaft» trên thanh trên cùng.
+
+08/11/2026
+- «Vẽ lại thành vector» (Gói Pro): ngôi sao, hình tròn, cầu vồng được dựng thành hình chuẩn, đẹp và gọn hơn; chỗ đổi màu dần dùng tô chuyển màu.
+- Hình minh họa nhỏ nhiều chi tiết (con vật, người, đồ vật) được AI vẽ lại cho nét rồi ghép vào đúng chỗ, tự bỏ nền trắng.
+
 07/11/2026
 - Chữ chạy theo đường: chữ bám theo đường đó, sửa hay kéo đường thì chữ tự chạy theo. Chọn lớp chữ bằng công cụ Move sẽ thấy một hình thoi màu cam chỗ chữ đứng; kéo hình thoi để đẩy chữ dọc theo đường.
 - Menu Object có thêm «Hiệu ứng thiết kế» (Gói Pro): phát sáng, đổ bóng, nổi khối, mờ dần, tô chuyển màu, bo góc, dao cắt, lặp thành lưới, chuyển dần giữa hai hình và kẻ bảng, trước đây chỉ AI dùng được.

@@ -158,6 +158,13 @@ fn layers_are_added_changed_moved_and_deleted_by_id() {
         .try_run("layer.delete", json!({"layer": 999}))
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::NotFound);
+    // Several at once (09/11: the agent asked for "layers"), one step.
+    t.run("layer.delete", json!({"layers": [red_id, group_id]}));
+    assert_eq!(t.inspect()["layers"].as_array().unwrap().len(), 1);
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.inspect()["layers"].as_array().unwrap().len(), 3);
+    let e = t.try_run("layer.delete", json!({})).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
 }
 
 #[test]
@@ -2042,6 +2049,7 @@ fn a_type_spec_carries_every_style_of_a_type_layer() {
         rotation_deg: -12.5,
         flip_x: true,
         flip_y: false,
+        fill: None,
         glyph_styles: (0..12)
             .map(|i| GlyphStyle {
                 color: [i, 0, 0, 255],
@@ -2288,4 +2296,66 @@ fn text_goes_round_a_circle_turns_over_and_comes_off_again() {
         t.mean(json!({"x": 60, "y": 215, "w": 180, "h": 40})),
         "#FFFFFF"
     );
+}
+
+/// M3.1: text.add draws in a face of the font (named, or its own bold for
+/// `bold`), says whether the font is here and draws Vietnamese, and
+/// text.fonts lists fonts with their faces.
+#[test]
+fn text_add_takes_a_real_face_and_text_fonts_lists_them() {
+    use iai_text::text::SystemFonts;
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 400, "heightPx": 120, "background": "#FFFFFF"}),
+    );
+    let missing = t.run(
+        "text.add",
+        json!({"text": "Xin chào", "x": 5, "y": 5, "font": "Không Có Font Này Đâu"}),
+    );
+    assert_eq!(missing["fontFound"], false, "{missing}");
+    let e = t
+        .try_run(
+            "text.add",
+            json!({"text": "A", "x": 5, "y": 5, "font": "Arial", "face": "Không có mặt này"}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+    let arial = iai_doc::model::text::TextFontFamily::Arial;
+    // Only where Arial and its bold face are installed (Windows).
+    if !iai_text::text::installed(&arial) || !arial.faces().iter().any(|f| f.style_name() == "Bold")
+    {
+        return;
+    }
+    let bold = t.run(
+        "text.add",
+        json!({"text": "Đậm thật", "x": 5, "y": 40, "font": "Arial", "bold": true,
+               "tracking": 2, "stretchX": 0.9}),
+    );
+    assert_eq!(bold["fontFound"], true, "{bold}");
+    assert_eq!(bold["faceUsed"], "Bold", "{bold}");
+    assert_eq!(bold["vietnamese"], true, "{bold}");
+    let list = t.run("text.fonts", json!({"query": "arial", "vietnamese": true}));
+    let fonts = list["fonts"].as_array().expect("fonts");
+    let a = fonts
+        .iter()
+        .find(|f| f["name"] == "Arial")
+        .unwrap_or_else(|| panic!("{list}"));
+    assert!(
+        a["faces"].as_array().unwrap().iter().any(|f| f == "Bold"),
+        "{list}"
+    );
+}
+
+/// text.fonts' kinds by name.
+#[test]
+fn a_fonts_kind_is_told_by_its_name() {
+    use super::text::{FontClass, font_class};
+    assert_eq!(font_class("Times New Roman"), FontClass::Serif);
+    assert_eq!(font_class("Noto Sans"), FontClass::Sans);
+    assert_eq!(font_class("PT Serif"), FontClass::Serif);
+    assert_eq!(font_class("Consolas"), FontClass::Mono);
+    assert_eq!(font_class("Segoe Script"), FontClass::Script);
+    assert_eq!(font_class("Impact"), FontClass::Display);
+    assert_eq!(font_class("Arial"), FontClass::Sans);
 }

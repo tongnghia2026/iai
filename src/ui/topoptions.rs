@@ -1725,6 +1725,24 @@ fn shape_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         }
     }
 
+    if kind == 5 {
+        ui.separator();
+        ui.label("Shaft:");
+        let mut shaft = data.tool.shape_star_inner * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut shaft)
+                    .range(5.0..=95.0)
+                    .suffix(" %")
+                    .speed(0.5),
+            )
+            .on_hover_text("Thickness of the arrow's body, as a share of its height")
+            .changed()
+        {
+            actions.tool.set_shape_star_inner = Some(shaft / 100.0);
+        }
+    }
+
     ui.separator();
     ui.label(
         egui::RichText::new("Drag · Shift = constrain · Alt = centered + constrain")

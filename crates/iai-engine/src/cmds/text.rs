@@ -55,6 +55,23 @@ pub struct TextParams {
     #[serde(default = "line_1_2")]
     #[schemars(range(min = 0.5, max = 5.0))]
     pub line_height: f32,
+    /// The layer's name; the text's first words when omitted.
+    #[schemars(length(min = 1, max = 200))]
+    pub name: Option<String>,
+    /// One face of the font by its style name ("Bold", "Light Italic",
+    /// "Black"; `text.fonts` lists them). Without it `bold` / `italic`
+    /// take the font's own bold / italic face when it has one.
+    #[schemars(length(min = 1, max = 100))]
+    pub face: Option<String>,
+    /// More (or, below 0, less) space between letters, pixels.
+    #[schemars(range(min = -200.0, max = 2000.0))]
+    pub tracking: Option<f32>,
+    /// Letters widened (above 1) or narrowed, 0.3 to 3.
+    #[schemars(range(min = 0.3, max = 3.0))]
+    pub stretch_x: Option<f32>,
+    /// Turned clockwise, degrees.
+    #[schemars(range(min = -360.0, max = 360.0))]
+    pub turn_deg: Option<f32>,
 }
 
 fn size_48() -> f32 {
@@ -84,6 +101,63 @@ pub struct TextAdded {
     pub layer: u32,
     /// Where the text's pixels lie on the page.
     pub bounds: Bounds,
+    /// text.add with a `font`: whether it is on this computer (false: the
+    /// letters are drawn in another font).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_found: Option<bool>,
+    /// text.add: the face the letters are drawn in ("Regular", "Bold").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_used: Option<String>,
+    /// text.add: whether that face draws every Vietnamese letter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vietnamese: Option<bool>,
+}
+
+/// The face of `family` called `style`, if the font has it.
+fn face_named(family: &TextFontFamily, style: &str) -> Option<TextFontFamily> {
+    use iai_text::text::SystemFonts;
+    let want = style.trim();
+    family
+        .faces()
+        .into_iter()
+        .find(|f| f.style_name().eq_ignore_ascii_case(want))
+}
+
+/// The family and face to draw in, and whether bold / italic are then
+/// still to be faked: a named face, else the font's own bold / italic.
+pub fn choose_face(
+    family: TextFontFamily,
+    face: Option<&str>,
+    bold: bool,
+    italic: bool,
+) -> Result<(TextFontFamily, bool, bool), CmdError> {
+    if let Some(style) = face {
+        return match face_named(&family, style) {
+            Some(f) => Ok((f, false, false)),
+            None => {
+                use iai_text::text::SystemFonts;
+                let have: Vec<String> = family
+                    .faces()
+                    .iter()
+                    .map(|f| f.style_name().to_string())
+                    .collect();
+                Err(CmdError::bad_param(
+                    "face",
+                    &format!("a face of {}: {}", family.name(), have.join(", ")),
+                ))
+            }
+        };
+    }
+    let wanted = match (bold, italic) {
+        (true, true) => ["Bold Italic", "BoldItalic"].as_slice(),
+        (true, false) => ["Bold"].as_slice(),
+        (false, true) => ["Italic", "Oblique"].as_slice(),
+        (false, false) => return Ok((family, false, false)),
+    };
+    match wanted.iter().find_map(|w| face_named(&family, w)) {
+        Some(f) => Ok((f, false, false)),
+        None => Ok((family, bold, italic)),
+    }
 }
 
 static ADD: CommandMeta = CommandMeta {
@@ -110,23 +184,31 @@ impl Command for AddText {
             Some(c) => parse_color("color", c)?,
             None => [0, 0, 0, 255],
         };
+        let family = match &p.font {
+            Some(name) => TextFontFamily::from_storage_name(&format!("System:{}", name.trim())),
+            None => TextFontFamily::SegoeUi,
+        };
+        let font_found = p.font.as_ref().map(|_| iai_text::text::installed(&family));
+        let (family, bold, italic) = choose_face(family, p.face.as_deref(), p.bold, p.italic)?;
+        let face_used = family.style_name().to_string();
+        let vietnamese = iai_text::text::covers(&family, iai_text::text::VIETNAMESE_PROBE);
         let td = TextData {
             content: p.text.clone(),
             font_px: p.size_px,
             color,
-            font_family: match &p.font {
-                Some(name) => TextFontFamily::from_storage_name(&format!("System:{name}")),
-                None => TextFontFamily::SegoeUi,
-            },
+            font_family: family,
             align: match p.align {
                 Align::Left => TextAlign::Left,
                 Align::Center => TextAlign::Center,
                 Align::Right => TextAlign::Right,
             },
             line_height: p.line_height,
-            bold: p.bold,
-            italic: p.italic,
+            bold,
+            italic,
             underline: p.underline,
+            tracking_px: p.tracking.unwrap_or(0.0),
+            stretch_x: p.stretch_x.unwrap_or(1.0),
+            rotation_deg: p.turn_deg.unwrap_or(0.0),
             ..TextData::default()
         };
         let canvas = s.canvas_mut(Some(doc))?;
@@ -134,6 +216,11 @@ impl Command for AddText {
         let mut cmd = LayerStructureCommand::capture_before("Text", &canvas.layer_stack, cw, ch);
         let idx = canvas.layer_stack.add_layer(cw, ch);
         rasterize_into_layer(canvas, idx, (p.x, p.y), td);
+        if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
+            && let Some(l) = canvas.layer_stack.layers.get_mut(idx)
+        {
+            l.name = name.to_string();
+        }
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
         canvas.layer_revision = canvas.layer_revision.saturating_add(1);
@@ -152,6 +239,9 @@ impl Command for AddText {
                 w: layer.width,
                 h: layer.height,
             },
+            font_found,
+            face_used: Some(face_used),
+            vietnamese: Some(vietnamese),
         };
         s.emit(EngineEvent::Structure { doc });
         Ok(Plan::Done(out))
@@ -339,6 +429,7 @@ impl TypeSpec {
             rotation_deg: self.rotation,
             flip_x: self.flip_x,
             flip_y: self.flip_y,
+            fill: None,
             glyph_styles: self
                 .glyphs
                 .iter()
@@ -463,7 +554,16 @@ impl Command for SetText {
             }
         };
         canvas.layer_stack.active_idx = idx;
-        rasterize_into_layer(canvas, idx, origin, p.spec.data());
+        // A gradient across the letters stays when the words are edited
+        // (the Type tool writes the type whole).
+        let mut td = p.spec.data();
+        if let Some(iai_doc::layer::LayerType::Text(old)) = target
+            .and_then(|i| canvas.layer_stack.layers.get(i))
+            .map(|l| &l.layer_type)
+        {
+            td.fill = old.fill.clone();
+        }
+        rasterize_into_layer(canvas, idx, origin, td);
         cmd.capture_after(&canvas.layer_stack, cw, ch);
         canvas.record(Box::new(cmd));
         canvas.layer_revision = canvas.layer_revision.saturating_add(1);
@@ -482,6 +582,9 @@ impl Command for SetText {
                 w: layer.width,
                 h: layer.height,
             },
+            font_found: None,
+            face_used: None,
+            vietnamese: None,
         };
         s.emit(EngineEvent::Structure { doc });
         Ok(Plan::Done(out))
@@ -600,6 +703,9 @@ impl Command for FitTextToFrame {
                 w: layer.width,
                 h: layer.height,
             },
+            font_found: None,
+            face_used: None,
+            vietnamese: None,
         };
         s.emit(EngineEvent::Structure { doc });
         s.notice("Co chữ vừa khung".to_string(), label.to_string());
@@ -859,9 +965,212 @@ impl Command for FitTextToPath {
                 w: layer.width,
                 h: layer.height,
             },
+            font_found: None,
+            face_used: None,
+            vietnamese: None,
         };
         s.emit(EngineEvent::Structure { doc });
         s.notice(label.to_string(), label.to_string());
         Ok(Plan::Done(out))
+    }
+}
+
+// ---- text.fonts --------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FontsParams {
+    /// Only fonts whose name has these letters ("roboto", "times").
+    #[schemars(length(min = 1, max = 100))]
+    pub query: Option<String>,
+    /// Only fonts that draw every Vietnamese letter.
+    #[serde(default)]
+    pub vietnamese: bool,
+    /// Only fonts of this kind: "sans", "serif", "mono", "script" (hand
+    /// lettering, brush) or "display" (heavy, decorated headlines).
+    pub class: Option<FontClass>,
+    /// The most to list (40 when omitted).
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<u32>,
+}
+
+impl Validate for FontsParams {}
+
+/// What kind of letters a font has, as its name tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FontClass {
+    Sans,
+    Serif,
+    Mono,
+    Script,
+    Display,
+}
+
+/// A font's kind from its name (the names of the fonts Windows and
+/// designers install; a font not known is taken for a sans).
+pub fn font_class(name: &str) -> FontClass {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&[
+        "mono",
+        "courier",
+        "consol",
+        "code",
+        "lucida console",
+        "typewriter",
+    ]) {
+        FontClass::Mono
+    } else if has(&[
+        "script",
+        "brush",
+        "hand",
+        "dancing",
+        "pacifico",
+        "lobster",
+        "comic",
+        "segoe print",
+        "vivaldi",
+        "freestyle",
+        "kunstler",
+        "mistral",
+        "signature",
+        "calligraph",
+        "satisfy",
+        "great vibes",
+        "ink free",
+        "gabriola",
+        "edwardian",
+        "palace",
+        "vladimir",
+    ]) {
+        FontClass::Script
+    } else if has(&[
+        "impact",
+        "stencil",
+        "showcard",
+        "jokerman",
+        "chiller",
+        "old english",
+        "algerian",
+        "broadway",
+        "bauhaus",
+        "black",
+        "poster",
+        "display",
+        "cooper",
+        "ravie",
+        "snap",
+    ]) {
+        FontClass::Display
+    } else if (has(&["serif"]) && !has(&["sans"]))
+        || has(&[
+            "times",
+            "georgia",
+            "garamond",
+            "cambria",
+            "book antiqua",
+            "palatino",
+            "baskerville",
+            "bodoni",
+            "cormorant",
+            "merriweather",
+            "playfair",
+            "constantia",
+            "century schoolbook",
+            "roman",
+            "lora",
+            "noto serif",
+            "sylfaen",
+        ])
+    {
+        FontClass::Serif
+    } else {
+        FontClass::Sans
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FontOut {
+    /// The name `text.add` takes as `font`.
+    pub name: String,
+    /// Its kind, by its name.
+    pub class: FontClass,
+    /// Its faces, the names `text.add` takes as `face`.
+    pub faces: Vec<String>,
+    /// Whether it draws every Vietnamese letter.
+    pub vietnamese: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FontsList {
+    pub fonts: Vec<FontOut>,
+    /// More matched than were listed.
+    pub more: bool,
+}
+
+static FONTS: CommandMeta = CommandMeta {
+    id: "text.fonts",
+    label_vi: "Danh sách font",
+    label_en: "List Fonts",
+    doc: "The fonts installed on this computer (for everyone and for this person), each with its \
+          faces (Regular, Bold, Light Italic…) and whether it draws every Vietnamese letter. \
+          Narrow it with `query` (letters of the name), `vietnamese: true` and `class` (sans, \
+          serif, mono, script, display).",
+    effects: &[Effect::Query],
+    featured: false,
+};
+
+pub struct ListFonts;
+
+impl Command for ListFonts {
+    type Params = FontsParams;
+    type Output = FontsList;
+    fn meta(&self) -> &'static CommandMeta {
+        &FONTS
+    }
+    fn plan(&self, _s: &mut Session<'_>, p: FontsParams) -> Result<Plan<FontsList>, CmdError> {
+        use iai_text::text::SystemFonts;
+        let limit = p.limit.unwrap_or(40) as usize;
+        let query = p.query.as_deref().map(|q| q.trim().to_lowercase());
+        let mut fonts = Vec::new();
+        let mut more = false;
+        let mut seen = std::collections::HashSet::new();
+        for family in TextFontFamily::all() {
+            let name = family.name().to_string();
+            if !seen.insert(name.to_lowercase()) {
+                continue;
+            }
+            if let Some(q) = &query
+                && !name.to_lowercase().contains(q.as_str())
+            {
+                continue;
+            }
+            let class = font_class(&name);
+            if p.class.is_some_and(|c| c != class) {
+                continue;
+            }
+            if fonts.len() >= limit {
+                more = true;
+                break;
+            }
+            let vietnamese = iai_text::text::covers_once(family, iai_text::text::VIETNAMESE_PROBE);
+            if p.vietnamese && !vietnamese {
+                continue;
+            }
+            fonts.push(FontOut {
+                class,
+                faces: family
+                    .faces()
+                    .iter()
+                    .map(|f| f.style_name().to_string())
+                    .collect(),
+                name,
+                vietnamese,
+            });
+        }
+        Ok(Plan::Done(FontsList { fonts, more }))
     }
 }
