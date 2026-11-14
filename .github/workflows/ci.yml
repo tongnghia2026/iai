@@ -31,7 +31,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: Cargo 1.100 breaks the ONNX Runtime build script on Windows.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       # `--all`: the crates under crates/ too.
       - name: Check formatting
@@ -71,7 +75,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: Cargo 1.100 breaks the ONNX Runtime build script on Windows.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-latest'
@@ -104,7 +112,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: Cargo 1.100 breaks the ONNX Runtime build script on Windows.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-latest'
