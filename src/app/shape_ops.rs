@@ -94,7 +94,7 @@ impl App {
         if matches!(
             layer.layer_type,
             LayerType::Vector(VectorGeometry::Primitive(_))
-        ) && layer.visible
+        ) && canvas.layer_stack.is_effectively_visible(idx)
             && !layer.locked
         {
             Some(idx)

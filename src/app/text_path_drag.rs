@@ -30,7 +30,11 @@ impl App {
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
         match &layer.layer_type {
-            LayerType::Text(td) if td.path.is_some() && layer.visible && !layer.locked => {
+            LayerType::Text(td)
+                if td.path.is_some()
+                    && canvas.layer_stack.is_effectively_visible(idx)
+                    && !layer.locked =>
+            {
                 Some((idx, iai_canvas::text_follow::text_anchor(layer)?))
             }
             _ => None,

@@ -576,6 +576,24 @@ mod icc_roundtrip_tests {
         Canvas::from_rgba(vec![128u8; 4 * 4 * 4], 4, 4)
     }
 
+    /// A resolution a hair under 300 (from a cm / inch round trip) is written
+    /// as 300, not cut to 299 (14/11).
+    #[test]
+    fn a_resolution_near_300_is_written_as_300() {
+        for ext in ["jpg", "png", "tif"] {
+            let mut canvas = small_canvas();
+            canvas.metadata.resolution_ppi = 299.9994;
+            let path = tmp(&format!("dpi.{ext}"));
+            FormatRegistry::new()
+                .export(&canvas, &path, &ExportOptions::default())
+                .unwrap();
+            let loaded = FormatRegistry::new().import(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            let dpi = loaded.metadata.resolution_ppi;
+            assert!((dpi - 300.0).abs() < 0.05, "{ext}: {dpi}");
+        }
+    }
+
     #[test]
     fn fdf_reports_that_it_is_not_a_renderable_pdf() {
         let error = match FormatRegistry::new().import(Path::new("form-data.fdf")) {

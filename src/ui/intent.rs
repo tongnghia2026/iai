@@ -317,12 +317,10 @@ pub struct ToolIntent {
     pub set_smart_select_auto_enhance: Option<bool>,
     pub set_fill_tolerance: Option<u8>,
     pub set_fill_contiguous: Option<bool>,
-    pub set_fill_anti_alias: Option<bool>,
     pub set_fill_all_layers: Option<bool>,
     pub set_gradient_type: Option<u8>,
     pub set_gradient_opacity: Option<f32>,
     pub set_gradient_reverse: Option<bool>,
-    pub set_gradient_dither: Option<bool>,
     /// Replace the Gradient tool's color ramp (from the gradient editor).
     pub set_gradient_stops: Option<Vec<(f32, [u8; 4])>>,
     pub toggle_gradient_editor: Option<bool>,
@@ -886,6 +884,8 @@ pub enum ErrandIntent {
     Close,
     /// Set Antigravity up to take errands from iAi.
     Connect,
+    /// Link Claude or ChatGPT to iAi.
+    ConnectAssistant(crate::ui::AiAssistant),
     /// Choose the folder of photos.
     PickFolder,
     /// Send this job, on the folder chosen, to Gemini.

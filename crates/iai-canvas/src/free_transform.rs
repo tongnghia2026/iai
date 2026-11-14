@@ -1341,6 +1341,9 @@ pub fn bake_transform_commit(
 pub enum NoSession {
     /// No layer that can be transformed is picked (or active).
     NothingToTransform,
+    /// What is picked is hidden (its own eye, or a folder's above it, is
+    /// off): nothing on the page to put a box around.
+    Hidden,
 }
 
 /// The session Ctrl+T starts on `canvas`: the layers `picked` names, or the
@@ -1358,7 +1361,7 @@ pub fn session(
     let stack = &canvas.layer_stack;
     let active_idx = stack.active_idx;
     let movable = |l: &Layer| !l.locked && !l.is_background;
-    let candidates: Vec<usize> = match picked {
+    let mut candidates: Vec<usize> = match picked {
         Some(ids) => stack
             .layers
             .iter()
@@ -1386,6 +1389,12 @@ pub fn session(
     };
     if candidates.is_empty() {
         return Err(NoSession::NothingToTransform);
+    }
+    // A hidden layer, or one inside a hidden folder, is not on the page: it
+    // is not transformed (14/11: Ctrl+T took a hidden group along).
+    candidates.retain(|&i| stack.is_effectively_visible(i));
+    if candidates.is_empty() {
+        return Err(NoSession::Hidden);
     }
 
     let mut target_indices = Vec::new();
@@ -1426,6 +1435,15 @@ pub fn session(
         return Err(NoSession::NothingToTransform);
     }
 
+    // A member whose own eye is off inside a shown folder goes along, so the
+    // folder keeps its look, but does not widen the box: it is not seen.
+    let shown: Vec<&LayerOrigState> = layer_states
+        .iter()
+        .filter(|ls| stack.is_effectively_visible(ls.layer_idx))
+        .collect();
+    if shown.is_empty() && bounds.is_none() {
+        return Err(NoSession::Hidden);
+    }
     let (u_x0, u_y0, u_x1, u_y1) = match bounds {
         Some((top_left, bottom_right)) => (
             top_left.0 as i32,
@@ -1433,7 +1451,7 @@ pub fn session(
             bottom_right.0 as i32,
             bottom_right.1 as i32,
         ),
-        None => layer_states.iter().fold(
+        None => shown.iter().fold(
             (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
             |(x0, y0, x1, y1), ls| {
                 (
@@ -1688,5 +1706,63 @@ mod tests {
         ));
         let mask = out.mask.as_ref().expect("the mask goes with it");
         assert_eq!((mask.width, mask.height), (out.width, out.height));
+    }
+
+    /// A square of ink, 8 px, at `at` on the page.
+    fn inked(id: u32, at: (i32, i32)) -> Layer {
+        let mut l = Layer::new(id, "ink", 8, 8);
+        l.tiles = TileMap::from_rgba(&[200u8; 8 * 8 * 4], 8, 8);
+        l.offset = at;
+        l
+    }
+
+    /// Two inked layers wrapped in a folder; returns the folder's index.
+    fn canvas_with_group() -> (Canvas, usize) {
+        let mut canvas = Canvas::new(64, 64);
+        canvas.layer_stack.layers.push(inked(100, (4, 4)));
+        canvas.layer_stack.layers.push(inked(101, (40, 40)));
+        for l in canvas.layer_stack.layers.iter_mut() {
+            l.selected = !l.is_background;
+        }
+        let g = canvas
+            .layer_stack
+            .create_group_from_selected(64, 64)
+            .expect("grouped");
+        for l in canvas.layer_stack.layers.iter_mut() {
+            l.selected = false;
+        }
+        canvas.layer_stack.layers[g].selected = true;
+        canvas.layer_stack.active_idx = g;
+        (canvas, g)
+    }
+
+    /// Ctrl+T on a hidden folder opens nothing (14/11: it took the hidden
+    /// layers along).
+    #[test]
+    fn a_hidden_group_is_not_transformed() {
+        let (mut canvas, g) = canvas_with_group();
+        canvas.layer_stack.layers[g].visible = false;
+        let mut lineage = std::collections::HashMap::new();
+        let got = session(&canvas, &mut lineage, None, None);
+        assert_eq!(got.err(), Some(NoSession::Hidden));
+    }
+
+    /// A member with its own eye off in a shown folder goes along but does
+    /// not widen the box.
+    #[test]
+    fn a_hidden_member_does_not_widen_the_box() {
+        let (mut canvas, _) = canvas_with_group();
+        let hidden = canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.id == 101)
+            .expect("member");
+        canvas.layer_stack.layers[hidden].visible = false;
+        let mut lineage = std::collections::HashMap::new();
+        let ts = session(&canvas, &mut lineage, None, None).expect("a session");
+        assert_eq!(ts.layer_states.len(), 2, "both members go along");
+        assert_eq!(ts.orig_offset, (4, 4));
+        assert_eq!((ts.orig_w, ts.orig_h), (8, 8));
     }
 }

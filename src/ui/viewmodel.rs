@@ -223,14 +223,12 @@ pub struct ToolViewModel {
     pub crop_h_display: f32,
     pub fill_tolerance: u8,
     pub fill_contiguous: bool,
-    pub fill_anti_alias: bool,
     pub fill_all_layers: bool,
     /// Context-sensitive Gradient target: 0 disabled, 1 pixel, 2 vector, 3 mask.
     pub gradient_mode: u8,
     pub gradient_type: u8,
     pub gradient_opacity: f32,
     pub gradient_reverse: bool,
-    pub gradient_dither: bool,
     /// The Gradient tool's editable color ramp: (position 0..1, RGBA).
     pub gradient_stops: Vec<(f32, [u8; 4])>,
     pub show_gradient_editor: bool,
@@ -949,6 +947,37 @@ pub enum AntigravityState {
     Ready,
 }
 
+/// Another AI app iAi can be linked to from "Nhờ AI làm".
+#[cfg(feature = "pro")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiAssistant {
+    /// Claude Desktop and Claude Code.
+    Claude,
+    /// ChatGPT's Codex.
+    ChatGpt,
+}
+
+#[cfg(feature = "pro")]
+impl AiAssistant {
+    pub const ALL: [Self; 2] = [Self::Claude, Self::ChatGpt];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::ChatGpt => "ChatGPT",
+        }
+    }
+}
+
+/// Where one of them stands on this machine.
+#[cfg(feature = "pro")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssistantView {
+    pub which: AiAssistant,
+    pub installed: bool,
+    pub connected: bool,
+}
+
 /// The errand under way, as "Nhờ AI làm" shows it.
 #[cfg(feature = "pro")]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -989,6 +1018,10 @@ pub struct ErrandView {
     pub antigravity: AntigravityState,
     /// What "Nối với Antigravity" came to.
     pub connect_note: Option<String>,
+    /// Claude and ChatGPT on this machine.
+    pub assistants: Vec<AssistantView>,
+    /// What "Nối với Claude / ChatGPT" came to.
+    pub assistant_note: Option<String>,
     /// The folder of photos chosen.
     pub folder: String,
     /// The photo open in the window (its tab's title), for "Sửa ảnh đang mở".
@@ -1400,13 +1433,11 @@ impl Default for UiData {
                 crop_h_display: 0.0,
                 fill_tolerance: 32,
                 fill_contiguous: true,
-                fill_anti_alias: true,
                 fill_all_layers: false,
                 gradient_mode: 1,
                 gradient_type: 0,
                 gradient_opacity: 1.0,
                 gradient_reverse: false,
-                gradient_dither: true,
                 gradient_stops: vec![(0.0, [0, 0, 0, 255]), (1.0, [255, 255, 255, 255])],
                 show_gradient_editor: false,
                 eyedropper_sample: 0,

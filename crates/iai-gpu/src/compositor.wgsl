@@ -2360,7 +2360,7 @@ fn layer_texel_srgb(ix: i32, iy: i32, local: vec2<f32>, lod: f32) -> vec4<f32> {
     }
     if (u.adj_kind == 20u) {
         srgb = develop_apply(srgb, local, lod);
-    } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+    } else if (u.adj_kind >= 1u && u.adj_kind <= 16u) {
         srgb = apply_adjustment(srgb);
     }
     return vec4<f32>(srgb, c.a * m);
@@ -2759,12 +2759,14 @@ fn area_sample(lx: f32, ly: f32, footprint: f32) -> vec4<f32> {
     return vec4<f32>(acc / cov, cov / area);
 }
 
-// ── Per-layer adjustment preview (adj_kind 1..=13) ────────────────────────────
+// ── Per-layer adjustment preview (adj_kind 1..=16) ────────────────────────────
 // These functions are a VERBATIM copy of the ones in ADJUSTMENT_SHADER so the
 // live Ctrl+L/M preview (applied to a raster layer's own pixels here) matches
 // the adjustment-LAYER pipeline and the CPU bake exactly. Keep both copies and
 // core::layer::AdjustmentType::apply_pixel in sync.
-fn lum299(c: vec3<f32>) -> f32 { return dot(c, vec3(0.299, 0.587, 0.114)); }
+// Rec. 709 weights, as the CPU bake (`iai_color::color::luminance_f32`):
+// the old 0.299 / 0.587 / 0.114 made the preview differ from OK (14/11).
+fn adj_luma(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 fn adj_chroma(c: vec3<f32>) -> f32 {
     return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
@@ -2801,7 +2803,7 @@ fn adj_chroma_headroom(d: vec3<f32>, l: f32) -> f32 {
 }
 
 fn adj_scale_chroma_around_luma(c: vec3<f32>, factor_in: f32) -> vec3<f32> {
-    let l = clamp(lum299(c), 0.0, 1.0);
+    let l = clamp(adj_luma(c), 0.0, 1.0);
     let protect = adj_smootherstep(0.035, 0.14, l) * (1.0 - adj_smootherstep(0.90, 0.99, l));
     let req = (clamp(factor_in, 0.0, 2.35) - 1.0) * protect;
     let d = c - vec3(l);
@@ -2878,7 +2880,7 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             );
         }
         case 5u: { // ColorBalance
-            let orig_lum = lum299(c);
+            let orig_lum = adj_luma(c);
             let lw = orig_lum;
             let sw = max(1.0 - 2.0 * lw, 0.0);
             let hw = max(2.0 * lw - 1.0, 0.0);
@@ -2888,16 +2890,45 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             let highlights = P2.xyz;
             var nc = clamp(c + sw * shadows / 100.0 + mw * midtones / 100.0 + hw * highlights / 100.0, vec3(0.0), vec3(1.0));
             if (P0.w > 0.5) {
-                let new_lum = lum299(nc);
+                let new_lum = adj_luma(nc);
                 if (new_lum > 0.001) { nc = clamp(nc * (orig_lum / new_lum), vec3(0.0), vec3(1.0)); }
             }
             return nc;
         }
-        case 6u: { // Vibrance
+        case 6u: { // Vibrance: saturation grows in proportion to what is
+                   // there, so a grey stays grey (it turned red, 14/11).
             let hsl = rgb_to_hsl(c);
-            let boost = P0.x / 100.0 * (1.0 - hsl.y);
-            let ns = clamp(hsl.y + boost + P0.y / 100.0, 0.0, 1.0);
+            let k = 1.0 + P0.x / 100.0 * (1.0 - hsl.y) + P0.y / 100.0;
+            let ns = clamp(hsl.y * k, 0.0, 1.0);
             return hsl_to_rgb(vec3(hsl.x, ns, hsl.z));
+        }
+        case 14u: { // BlackAndWhite: P0 = red, yellow, green, cyan; P1.xy = blue, magenta
+            let hsl = rgb_to_hsl(c);
+            var sl = array<f32, 6>(P0.x, P0.y, P0.z, P0.w, P1.x, P1.y);
+            var weight = (P0.x + P0.y + P0.z + P0.w + P1.x + P1.y) / 600.0;
+            if (hsl.y >= 0.05) {
+                let zone = hsl.x * 6.0;
+                let i = u32(floor(zone)) % 6u;
+                let fr = zone - floor(zone);
+                let w0 = sl[i] / 100.0;
+                let w1 = sl[(i + 1u) % 6u] / 100.0;
+                weight = w0 + (w1 - w0) * fr;
+            }
+            return vec3(clamp(hsl.z * (1.0 + (weight - 1.0) * hsl.y), 0.0, 1.0));
+        }
+        case 15u: { // PhotoFilter: P0.xyz the colour, P0.w density, P1.x keep luminosity
+            let d = clamp(P0.w, 0.0, 1.0);
+            var n = clamp(c * P0.xyz * d + c * (1.0 - d), vec3(0.0), vec3(1.0));
+            if (P1.x > 0.5) {
+                let nl = adj_luma(n);
+                if (nl > 0.001) { n = clamp(n * (adj_luma(c) / nl), vec3(0.0), vec3(1.0)); }
+            }
+            return n;
+        }
+        case 16u: { // ChannelMixer: rows in P0.xyz, P1.xyz, P2.xyz; P0.w monochrome
+            var n = clamp(vec3(dot(c, P0.xyz), dot(c, P1.xyz), dot(c, P2.xyz)), vec3(0.0), vec3(1.0));
+            if (P0.w > 0.5) { n = vec3(adj_luma(n)); }
+            return n;
         }
         case 7u: { // Exposure
             var v = c * pow(2.0, P0.x);
@@ -2908,7 +2939,7 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             return vec3(1.0) - c;
         }
         case 9u: { // Threshold
-            let v = select(0.0, 1.0, lum299(c) >= P0.x / 255.0);
+            let v = select(0.0, 1.0, adj_luma(c) >= P0.x / 255.0);
             return vec3(v);
         }
         case 10u: { // Posterize
@@ -2916,10 +2947,10 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             return floor(c * lv) / (lv - 1.0);
         }
         case 11u: { // Desaturate
-            return vec3(lum299(c));
+            return vec3(adj_luma(c));
         }
         case 12u: { // GradientMap: 64 RGB ramp samples packed in u.lut
-            var t = lum299(c);
+            var t = adj_luma(c);
             if (P0.x > 0.5) {
                 t = 1.0 - t;
             }
@@ -3086,7 +3117,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 return dst;
             }
             var srgb = r.rgb;
-            if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+            if (u.adj_kind >= 1u && u.adj_kind <= 16u) {
                 srgb = apply_adjustment(srgb);
             }
             src = vec4<f32>(dev_srgb_to_linear(srgb), r.a);
@@ -3137,7 +3168,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let srgb = dev_linear_to_srgb(src.rgb);
         let cr = develop_apply(srgb, dev_local, dev_lod);
         src = vec4<f32>(dev_srgb_to_linear(dev_dither_srgb(cr, in.pos.xy)), src.a);
-    } else if (u.adj_kind >= 1u && u.adj_kind <= 13u) {
+    } else if (u.adj_kind >= 1u && u.adj_kind <= 16u) {
         // Live Ctrl+L/M preview on this raster layer's own pixels. Use the exact
         // sRGB curve (not pow 2.2): src is linear (Rgba8UnormSrgb atlas), so
         // dev_linear_to_srgb recovers the byte-space value the CPU bake operates

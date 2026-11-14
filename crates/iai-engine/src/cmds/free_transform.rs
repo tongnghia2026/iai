@@ -161,6 +161,10 @@ impl Command for FreeTransform {
                 "no layer to transform: pick an unlocked layer that is not the Background",
                 "Không có layer nào để biến đổi (chọn layer không khóa, không phải nền)",
             ),
+            NoSession::Hidden => not_enabled(
+                "the picked layers are hidden: turn their eye on to transform them",
+                "Layer đang ẩn — bật con mắt để biến đổi",
+            ),
         })?;
         if p.corners.is_some() && ts.has_path() {
             return Err(not_enabled(

@@ -151,13 +151,17 @@ impl App {
         // A CMYK doc must go through the CPU ink bake below — the shader overlay
         // is an RGB LUT on the mirror and can't reproduce a per-ink LUT.
         let is_cmyk = self.docs.active().canvas.is_cmyk();
+        // The shader overlay changes the whole layer; with a selection the
+        // preview goes through the CPU bake, which keeps to it as OK does
+        // (14/11: Levels previewed over the whole picture).
+        let has_selection = self.docs.active().canvas.selection.active;
 
         // GPU path: apply the adjustment in the compositor shader on the layer's
         // own pixels and just recomposite — no per-tick CPU bake/flatten of the
         // whole layer (that full-image work was the source of the Ctrl+L/M lag on
         // large canvases). The layer tiles stay pristine; commit bakes them. Skipped
         // when the layer sits in an isolated group (the overlay would never show).
-        if self.win.gpu.is_some() && !in_isolated_group && !is_cmyk {
+        if self.win.gpu.is_some() && !in_isolated_group && !is_cmyk && !has_selection {
             if let Some(gpu) = &mut self.win.gpu {
                 gpu.compositor.preview_adj = Some((layer_id, adj));
             }

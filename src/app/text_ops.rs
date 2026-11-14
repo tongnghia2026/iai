@@ -526,7 +526,9 @@ impl App {
         let x = cx.floor() as i32;
         let y = cy.floor() as i32;
         for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
-            if !layer.visible || !matches!(layer.layer_type, LayerType::Text(_)) {
+            if !canvas.layer_stack.is_effectively_visible(idx)
+                || !matches!(layer.layer_type, LayerType::Text(_))
+            {
                 continue;
             }
             let lx = x - layer.offset.0;

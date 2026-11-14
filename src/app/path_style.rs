@@ -30,7 +30,11 @@ impl App {
         let Some(layer) = canvas.layer_stack.layers.get(canvas.layer_stack.active_idx) else {
             return 0;
         };
-        if !layer.visible || (layer.locked && !layer.is_background) {
+        if !canvas
+            .layer_stack
+            .is_effectively_visible(canvas.layer_stack.active_idx)
+            || (layer.locked && !layer.is_background)
+        {
             return 0;
         }
         if layer.paint_target == crate::core::layer::PaintTarget::Mask {
@@ -175,7 +179,12 @@ impl App {
             .layer_stack
             .layers
             .get(canvas.layer_stack.active_idx)?;
-        if !layer.visible || layer.locked || layer.is_background {
+        if !canvas
+            .layer_stack
+            .is_effectively_visible(canvas.layer_stack.active_idx)
+            || layer.locked
+            || layer.is_background
+        {
             return None;
         }
         match &layer.layer_type {

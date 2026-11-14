@@ -18,7 +18,13 @@ impl App {
             .layer_stack
             .layers
             .get(canvas.layer_stack.active_idx)?;
-        if !layer.selected || !layer.visible || layer.locked || layer.is_background {
+        if !layer.selected
+            || !canvas
+                .layer_stack
+                .is_effectively_visible(canvas.layer_stack.active_idx)
+            || layer.locked
+            || layer.is_background
+        {
             return None;
         }
         let LayerType::Vector(VectorGeometry::Path(object)) = &layer.layer_type else {
@@ -203,8 +209,8 @@ impl App {
         let canvas = &self.docs.active().canvas;
         let anchor_at = |p: crate::core::geometry::Point| -> Option<ConnectorAnchor> {
             // Topmost eligible layer whose opaque bounds contain the point.
-            for layer in canvas.layer_stack.layers.iter().rev() {
-                if !layer.visible
+            for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
+                if !canvas.layer_stack.is_effectively_visible(idx)
                     || layer.is_background
                     || layer.is_group()
                     || layer.connector.is_some()

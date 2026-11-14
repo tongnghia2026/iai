@@ -359,7 +359,10 @@ impl App {
             let canvas = &mut self.docs.active_mut().canvas;
             let mut hit = None;
             for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
-                if !layer.visible || layer.is_background || layer.is_group() {
+                if !canvas.layer_stack.is_effectively_visible(idx)
+                    || layer.is_background
+                    || layer.is_group()
+                {
                     continue;
                 }
                 let lx = cx - layer.offset.0;

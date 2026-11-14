@@ -1397,9 +1397,24 @@ fn ahd_idx(w: usize, h: usize, r: i32, c: i32) -> usize {
     rr * w + cc
 }
 
+/// How far the directional green may leave the range of the two green samples it
+/// interpolates between: this share below the lower, this share above the higher.
+///
+/// The Hamilton-Adams correction borrows the curvature of the red (or blue)
+/// channel, which is only sound for gentle detail. Across a strong edge of a
+/// strongly coloured subject (skin against shadow) the red step is so large that
+/// the correction drives green on the dark side to zero, leaving a row of pure
+/// red pixels, one every second pixel along the edge. dcraw and LibRaw clamp the
+/// estimate to its two neighbours outright; measured on a 36 MP portrait that
+/// costs 10% of the fine skin detail, while this much slack keeps it (−0.2%) and
+/// removes the dots just the same.
+const AHD_GREEN_SLACK: f32 = 0.05;
+
 /// Hamilton-Adams directional green plane: at each red/blue site estimate green
 /// along one axis, correcting the neighbour average with the same-colour Laplacian
-/// at ±2. Green sites keep their measured value. `horizontal` selects the axis.
+/// at ±2, and hold the result near its two green neighbours (see
+/// [`AHD_GREEN_SLACK`]). Green sites keep their measured value. `horizontal`
+/// selects the axis.
 fn ahd_green(plane: &[f32], w: usize, h: usize, cfa: &Cfa, horizontal: bool) -> Vec<f32> {
     (0..w * h)
         .into_par_iter()
@@ -1424,29 +1439,62 @@ fn ahd_green(plane: &[f32], w: usize, h: usize, cfa: &Cfa, horizontal: bool) -> 
                     ahd_idx(w, h, r + 2, c),
                 )
             };
-            ((plane[n1] + plane[n2]) * 0.5 + (2.0 * center - plane[f1] - plane[f2]) * 0.25).max(0.0)
+            let (a, b) = (plane[n1], plane[n2]);
+            let estimate = (a + b) * 0.5 + (2.0 * center - plane[f1] - plane[f2]) * 0.25;
+            // The slack is a share of each bound, not of the mean: beside a
+            // bright neighbour a share of the mean would dwarf the dark one.
+            // `max` then `min`, not `clamp`: a NaN sample must not panic here.
+            estimate
+                .max(a.min(b) * (1.0 - AHD_GREEN_SLACK))
+                .min(a.max(b) * (1.0 + AHD_GREEN_SLACK))
+                .max(0.0)
         })
         .collect()
+}
+
+/// A neighbour may be this many times brighter (in green) before the colour
+/// difference it lends is scaled down, so ordinary texture and noise are
+/// interpolated exactly as plain colour differences.
+const AHD_DIFF_LEEWAY: f32 = 1.5;
+/// Green added to both sides of that comparison, so sensor-floor noise does
+/// not decide it.
+const AHD_DIFF_FLOOR: f32 = 0.004;
+
+/// The share of a neighbour's colour difference (X − G) a pixel takes.
+///
+/// Colour differences are linear, so they grow with brightness: a dark pixel
+/// handed the difference of a far brighter neighbour (shadow beside skin, an
+/// eyelash on a cheek) takes on more red than it has green and turns into a
+/// red-brown fringe. Past [`AHD_DIFF_LEEWAY`] the difference is scaled by the
+/// two greens' ratio, which keeps the neighbour's hue at this pixel's own
+/// brightness. Never scaled up: a dark neighbour's noise must not be amplified
+/// into a bright pixel.
+#[inline]
+fn ahd_diff_share(green_here: f32, green_there: f32) -> f32 {
+    ((green_here + AHD_DIFF_FLOOR) * AHD_DIFF_LEEWAY / (green_there + AHD_DIFF_FLOOR)).min(1.0)
 }
 
 /// Reconstruct full camera RGB for one directional green plane by interpolating
 /// the colour DIFFERENCES (X − G), which are smooth across edges: green sites take
 /// R and B from their horizontal vs vertical neighbour pairs; red/blue sites take
-/// the opposite colour from the four diagonals. The known channel stays measured.
+/// the opposite colour from the four diagonals. A far brighter neighbour lends
+/// only part of its difference (see [`ahd_diff_share`]). The known channel stays
+/// measured.
 fn ahd_reconstruct(plane: &[f32], green: &[f32], w: usize, h: usize, cfa: &Cfa) -> Vec<[f32; 3]> {
     (0..w * h)
         .into_par_iter()
         .map(|i| {
             let (r, c) = ((i / w) as i32, (i % w) as i32);
             let g = green[i];
+            let lent = |j: usize| (plane[j] - green[j]) * ahd_diff_share(g, green[j]);
             match cfa.color_at(r as usize, c as usize) {
                 1 => {
                     let l = ahd_idx(w, h, r, c - 1);
                     let rt = ahd_idx(w, h, r, c + 1);
                     let u = ahd_idx(w, h, r - 1, c);
                     let d = ahd_idx(w, h, r + 1, c);
-                    let horiz = g + 0.5 * ((plane[l] - green[l]) + (plane[rt] - green[rt]));
-                    let vert = g + 0.5 * ((plane[u] - green[u]) + (plane[d] - green[d]));
+                    let horiz = g + 0.5 * (lent(l) + lent(rt));
+                    let vert = g + 0.5 * (lent(u) + lent(d));
                     // The horizontal neighbours carry one colour, the vertical the other.
                     if cfa.color_at(r as usize, (c + 1) as usize) == 0 {
                         [horiz.max(0.0), g, vert.max(0.0)]
@@ -1457,8 +1505,7 @@ fn ahd_reconstruct(plane: &[f32], green: &[f32], w: usize, h: usize, cfa: &Cfa) 
                 col => {
                     let mut sum = 0.0;
                     for (dr, dc) in [(-1i32, -1i32), (-1, 1), (1, -1), (1, 1)] {
-                        let j = ahd_idx(w, h, r + dr, c + dc);
-                        sum += plane[j] - green[j];
+                        sum += lent(ahd_idx(w, h, r + dr, c + dc));
                     }
                     let opp = (g + sum * 0.25).max(0.0);
                     if col == 0 {
@@ -2927,56 +2974,127 @@ const SCENE_COLOR_NR: f32 = 0.85;
 /// `CHROMA_NR_ATTEN`.
 const SCENE_CHROMA_NR_ATTEN: [f32; 3] = [1.0, 0.85, 0.55];
 
-/// One separable à-trous B3-spline smoothing pass at hole spacing `1 << level`,
-/// edge-clamped, parallel over rows. Plain (not edge-aware) taps: a single-pixel
-/// colour speck must be smoothed, not "protected" as an edge.
-fn atrous_smooth_plane(src: &[f32], w: usize, h: usize, level: usize) -> Vec<f32> {
-    const B3: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
-    let step = 1i64 << level;
+/// Scene luminance added to both sides before the colour NR compares two
+/// pixels. Deep shadow is mostly noise: there every pixel must still count as a
+/// neighbour of the next, or the speckle that most needs smoothing is fenced in.
+const CHROMA_NR_LUMA_FLOOR: f32 = 0.02;
+
+/// How freely the colour NR mixes two pixels, 0..=255, from their scene
+/// luminance: all of it within half a stop, half at one stop, nothing past two.
+///
+/// The chroma offsets are linear, so they grow with brightness. Averaged across
+/// a bright/dark edge the bright side's offsets swamp the dark side's: skin
+/// spills a red-brown band into the shadow beside it and its red edge widens by
+/// half. The link follows luminance, not chroma, so a colour speck on even
+/// ground is still smoothed away rather than protected as an edge.
+#[inline]
+fn chroma_nr_link(a: f32, b: f32) -> u8 {
+    let a = a.max(0.0) + CHROMA_NR_LUMA_FLOOR;
+    let b = b.max(0.0) + CHROMA_NR_LUMA_FLOOR;
+    let apart = if a > b { a / b } else { b / a } - 1.0;
+    let apart = apart * apart;
+    (255.0 / (1.0 + apart * apart) + 0.5) as u8
+}
+
+/// The links of one à-trous level: from each pixel to the one `hole` and
+/// `2 * hole` to its right (`right`) and below it (`below`); 0 past the frame.
+struct ChromaNrLinks {
+    right: [Vec<u8>; 2],
+    below: [Vec<u8>; 2],
+}
+
+fn chroma_nr_links(luma: &[f32], w: usize, h: usize, level: usize) -> ChromaNrLinks {
     let hole = 1usize << level;
-    let reach = 2 * hole;
+    let towards = |dx: usize, dy: usize| -> Vec<u8> {
+        let mut links = vec![0u8; w * h];
+        links.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            if y + dy >= h {
+                return;
+            }
+            let here = &luma[y * w..][..w];
+            let there = &luma[(y + dy) * w..][..w];
+            for (x, slot) in row.iter_mut().enumerate().take(w.saturating_sub(dx)) {
+                *slot = chroma_nr_link(here[x], there[x + dx]);
+            }
+        });
+        links
+    };
+    ChromaNrLinks {
+        right: [towards(hole, 0), towards(2 * hole, 0)],
+        below: [towards(0, hole), towards(0, 2 * hole)],
+    }
+}
+
+/// One separable à-trous B3-spline smoothing pass at hole spacing `1 << level`,
+/// each tap weighted by its link to the pixel being smoothed; taps past the
+/// frame are left out. Parallel over rows.
+fn atrous_smooth_linked(
+    src: &[f32],
+    w: usize,
+    h: usize,
+    level: usize,
+    links: &ChromaNrLinks,
+) -> Vec<f32> {
+    // B3 = [1, 4, 6, 4, 1] / 16 and links run to 255; both scales cancel in the
+    // normalisation.
+    const CENTRE: f32 = 6.0 * 255.0;
+    const NEAR: f32 = 4.0;
+    const FAR: f32 = 1.0;
+    let hole = 1usize << level;
     let mut tmp = vec![0.0f32; w * h];
     tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        let row = &src[y * w..(y + 1) * w];
+        let row = &src[y * w..][..w];
+        let near = &links.right[0][y * w..][..w];
+        let far = &links.right[1][y * w..][..w];
         for (x, slot) in out.iter_mut().enumerate() {
-            let mut acc = 0.0f32;
-            if x >= reach && x + reach < w {
-                let first = x - reach;
-                for (t, &kv) in B3.iter().enumerate() {
-                    acc += row[first + t * hole] * kv;
-                }
-            } else {
-                for (t, &kv) in B3.iter().enumerate() {
-                    let o = (t as i64 - 2) * step;
-                    let sx = (x as i64 + o).clamp(0, w as i64 - 1) as usize;
-                    acc += row[sx] * kv;
-                }
+            let mut acc = CENTRE * row[x];
+            let mut norm = CENTRE;
+            let mut tap = |at: usize, weight: f32| {
+                acc += weight * row[at];
+                norm += weight;
+            };
+            if x >= hole {
+                tap(x - hole, NEAR * near[x - hole] as f32);
             }
-            *slot = acc;
+            if x >= 2 * hole {
+                tap(x - 2 * hole, FAR * far[x - 2 * hole] as f32);
+            }
+            if x + hole < w {
+                tap(x + hole, NEAR * near[x] as f32);
+            }
+            if x + 2 * hole < w {
+                tap(x + 2 * hole, FAR * far[x] as f32);
+            }
+            *slot = acc / norm;
         }
     });
+    let (near, far) = (&links.below[0], &links.below[1]);
+    let tmp = &tmp;
     let mut dst = vec![0.0f32; w * h];
     dst.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
-        if y >= reach && y + reach < h {
-            let rows: [&[f32]; 5] =
-                std::array::from_fn(|t| &tmp[(y - reach + t * hole) * w..][..w]);
-            for (x, slot) in out.iter_mut().enumerate() {
-                let mut acc = 0.0f32;
-                for (t, &kv) in B3.iter().enumerate() {
-                    acc += rows[t][x] * kv;
-                }
-                *slot = acc;
-            }
-            return;
-        }
         for (x, slot) in out.iter_mut().enumerate() {
-            let mut acc = 0.0f32;
-            for (t, &kv) in B3.iter().enumerate() {
-                let o = (t as i64 - 2) * step;
-                let sy = (y as i64 + o).clamp(0, h as i64 - 1) as usize;
-                acc += tmp[sy * w + x] * kv;
+            let i = y * w + x;
+            let mut acc = CENTRE * tmp[i];
+            let mut norm = CENTRE;
+            let mut tap = |at: usize, weight: f32| {
+                acc += weight * tmp[at];
+                norm += weight;
+            };
+            if y >= hole {
+                let up = i - hole * w;
+                tap(up, NEAR * near[up] as f32);
             }
-            *slot = acc;
+            if y >= 2 * hole {
+                let up = i - 2 * hole * w;
+                tap(up, FAR * far[up] as f32);
+            }
+            if y + hole < h {
+                tap(i + hole * w, NEAR * near[i] as f32);
+            }
+            if y + 2 * hole < h {
+                tap(i + 2 * hole * w, FAR * far[i] as f32);
+            }
+            *slot = acc / norm;
         }
     });
     dst
@@ -2985,8 +3103,9 @@ fn atrous_smooth_plane(src: &[f32], w: usize, h: usize, level: usize) -> Vec<f32
 /// Whole-frame colour-noise reduction on the linear RGBA-f16 scene master. Splits
 /// each pixel into luminance + chroma offsets (the chroma part carries zero luma
 /// by construction, so this cannot shift brightness or luma detail), à-trous
-/// shrinks the finest chroma detail levels, and recomposes. Neutral pixels have
-/// zero chroma so they are untouched.
+/// shrinks the finest chroma detail levels among pixels of like luminance (see
+/// [`chroma_nr_link`]), and recomposes. Neutral pixels have zero chroma so they
+/// are untouched.
 fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
     if strength.abs() < 1e-4 || w < 8 || h < 8 {
         return;
@@ -3017,12 +3136,15 @@ fn denoise_scene_chroma(scene: &mut [u16], w: usize, h: usize, strength: f32) {
                 }
             });
     }
+    let links: Vec<ChromaNrLinks> = (0..SCENE_CHROMA_NR_ATTEN.len())
+        .map(|level| chroma_nr_links(&luma, w, h, level))
+        .collect();
     // À-trous shrink each chroma plane in place: subtract the attenuated fine
     // detail of each level (memory-light: only prev/next/accumulator live).
     for plane in chroma.iter_mut() {
         let mut prev = plane.clone();
-        for (level, &atten) in SCENE_CHROMA_NR_ATTEN.iter().enumerate() {
-            let next = atrous_smooth_plane(&prev, w, h, level);
+        for (level, (&atten, links)) in SCENE_CHROMA_NR_ATTEN.iter().zip(&links).enumerate() {
+            let next = atrous_smooth_linked(&prev, w, h, level, links);
             let k = strength * atten;
             plane
                 .par_iter_mut()
@@ -4559,6 +4681,65 @@ mod tests {
     }
 
     #[test]
+    fn colour_nr_keeps_bright_skin_out_of_the_shadow_beside_it() {
+        // Chroma offsets are linear, so the skin's dwarf the shadow's. Smoothed
+        // across the edge without regard to brightness they paint the shadow
+        // red-brown for several pixels and drain the skin beside it.
+        let (w, h) = (48usize, 16usize);
+        let skin = [0.80f32, 0.42, 0.33];
+        let shadow = [0.012f32, 0.012, 0.012];
+        let vals: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| if i % w < w / 2 { skin } else { shadow })
+            .collect();
+        let mut buf = scene_buf_rgb(&vals);
+        let skin_chroma = chroma_of(&buf[..4]);
+        denoise_scene_chroma(&mut buf, w, h, SCENE_COLOR_NR);
+        let px = |x: usize| &buf[(8 * w + x) * 4..][..4];
+        for x in w / 2..w {
+            assert!(
+                chroma_of(px(x)) < 0.002,
+                "the shadow at x={x} stays neutral: chroma {}",
+                chroma_of(px(x))
+            );
+        }
+        let beside = chroma_of(px(w / 2 - 1));
+        assert!(
+            (beside - skin_chroma).abs() < 0.01,
+            "the skin keeps its colour up to the edge: {beside} of {skin_chroma}"
+        );
+    }
+
+    #[test]
+    fn colour_nr_still_clears_speckle_in_deep_shadow() {
+        // Shadow noise swings luminance by a large ratio. The luminance floor
+        // keeps those pixels neighbours, so their colour speckle is smoothed.
+        let (w, h) = (16usize, 16usize);
+        let off = [1.0f32, 0.0, -LW_TEST[0] / LW_TEST[2]]; // LW·off ≈ 0
+        let mut vals = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let base = if (x / 2 + y / 2) % 2 == 0 {
+                    0.004f32
+                } else {
+                    0.009
+                };
+                let s = if (x + y) % 2 == 0 { 0.002f32 } else { -0.002 };
+                vals.push([base + s * off[0], base + s * off[1], base + s * off[2]]);
+            }
+        }
+        let mut buf = scene_buf_rgb(&vals);
+        let mean_chroma =
+            |b: &[u16]| b.chunks_exact(4).map(chroma_of).sum::<f32>() / (w * h) as f32;
+        let before = mean_chroma(&buf);
+        denoise_scene_chroma(&mut buf, w, h, SCENE_COLOR_NR);
+        let after = mean_chroma(&buf);
+        assert!(
+            after < before * 0.5,
+            "shadow colour speckle attenuated: before={before} after={after}"
+        );
+    }
+
+    #[test]
     fn suppress_false_color_fixes_speck_keeps_green_and_neutral() {
         // A uniform warm field (surround R−G=+0.1, B−G=−0.1) with one isolated
         // false-colour speck. The median must pull the speck's colour differences
@@ -4721,6 +4902,58 @@ mod tests {
             "AHD should leave less colour moiré than Malvar on gray high-frequency \
              detail: ahd={e_ahd:.3} malvar={e_malvar:.3}"
         );
+    }
+
+    #[test]
+    fn ahd_keeps_green_alive_on_the_dark_side_of_a_coloured_edge() {
+        // Skin (strongly red once white-balanced) against shadow, along a
+        // diagonal edge two pixels soft. The red step is far larger than the
+        // green there is on the dark side, so an unbounded Laplacian correction
+        // drives green to zero at every red site beside the edge: a row of
+        // pure-red dots, one every second pixel.
+        let (w, h) = (48usize, 48usize);
+        let cfa = rggb();
+        let skin = [0.37f32, 0.25, 0.20];
+        let shadow = [0.022f32, 0.012, 0.008];
+        let truth = |x: usize, y: usize| -> [f32; 3] {
+            let t = ((x as f32 - y as f32) * 0.5 + 0.5).clamp(0.0, 1.0);
+            [0, 1, 2].map(|c| skin[c] + (shadow[c] - skin[c]) * t)
+        };
+        let plane: Vec<f32> = (0..w * h)
+            .map(|i| truth(i % w, i / w)[chroma_channel(cfa.color_at(i / w, i % w))])
+            .collect();
+        let cam2xyz = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let rgb = demosaic_ahd(&plane, w, h, &cfa, &cam2xyz, None).unwrap();
+        for y in 4..h - 4 {
+            for x in 4..w - 4 {
+                let [r, g, _] = rgb[y * w + x];
+                assert!(
+                    g >= 0.75 * shadow[1],
+                    "green at ({x},{y}) fell to {g}, under the darkest green there is"
+                );
+                // Skin is 1.5 red to green, the shadow 1.8.
+                assert!(r <= 3.0 * g, "a red dot at ({x},{y}): r={r} g={g}");
+            }
+        }
+    }
+
+    #[test]
+    fn ahd_green_keeps_fine_detail_within_its_slack() {
+        // A gray crest one pixel wide on a red site: the correction lifts green
+        // there above both its green neighbours. Clamped hard to them the crest
+        // would be shaved off (soft skin); the slack lets it through.
+        let (w, h) = (32usize, 32usize);
+        let cfa = rggb();
+        let level = |x: usize| if x % 4 == 0 { 0.52f32 } else { 0.50 };
+        let plane: Vec<f32> = (0..w * h).map(|i| level(i % w)).collect();
+        let green = ahd_green(&plane, w, h, &cfa, true);
+        // Row 8 of RGGB has red at even x; x = 8 sits between greens of 0.50.
+        let at = green[8 * w + 8];
+        assert!((at - 0.51).abs() < 1e-3, "the crest is kept: {at}");
     }
 
     #[test]

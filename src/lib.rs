@@ -24,6 +24,9 @@
 pub mod agent;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
+pub mod ai_links;
+#[cfg(feature = "pro")]
+#[rustfmt::skip]
 pub mod antigravity;
 pub mod app;
 pub mod author_mail;

@@ -8,6 +8,7 @@
 
 use crate::core::canvas::Canvas;
 use crate::core::layer::{Layer, PaintTarget};
+use crate::core::selection::Selection;
 use crate::core::tile::{TILE_SIZE, TilePos};
 
 /// Soft-round brush coverage at squared distance `dist2` for a tip of `radius`
@@ -52,6 +53,20 @@ pub fn sample_active_pixel(canvas: &Canvas, cx: f32, cy: f32) -> Option<[f32; 4]
     ])
 }
 
+/// The active layer's offset and size, when the scrub tools may paint it:
+/// `None` for an empty stack, a locked layer, or a paint target they can't edit.
+pub fn paint_frame(canvas: &mut Canvas) -> Option<((i32, i32), (u32, u32))> {
+    if canvas.layer_stack.layers.is_empty() {
+        return None;
+    }
+    canvas.layer_stack.normalize_active_idx();
+    let l = &canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+    if (!l.is_background && l.locked) || !can_scrub(l) {
+        return None;
+    }
+    Some((l.offset, (l.width, l.height)))
+}
+
 /// Visit every active-layer pixel a brush dab centred at canvas-space `(cx, cy)`
 /// covers, calling `f(px, py, coverage, dst)` where `px/py` are LAYER-LOCAL pixel
 /// coordinates, `coverage` is the soft-round alpha already multiplied by `opacity`
@@ -71,26 +86,13 @@ pub fn for_each_dab_pixel<F>(
 where
     F: FnMut(u32, u32, f32, &mut [u8; 4]),
 {
-    if canvas.layer_stack.layers.is_empty() {
+    let Some(((ox, oy), (lw, lh))) = paint_frame(canvas) else {
         return false;
-    }
-    canvas.layer_stack.normalize_active_idx();
-    let idx = canvas.layer_stack.active_idx;
-    {
-        let l = &canvas.layer_stack.layers[idx];
-        if (!l.is_background && l.locked) || !can_scrub(l) {
-            return false;
-        }
-    }
+    };
 
     let r = radius.max(0.5).min(5000.0);
     let r2 = r * r;
     let opacity = opacity.clamp(0.0, 1.0);
-
-    let ox = canvas.layer_stack.layers[idx].offset.0;
-    let oy = canvas.layer_stack.layers[idx].offset.1;
-    let lw = canvas.layer_stack.layers[idx].width;
-    let lh = canvas.layer_stack.layers[idx].height;
 
     let lcx = cx - ox as f32;
     let lcy = cy - oy as f32;
@@ -99,19 +101,66 @@ where
     let ly0 = ((lcy - r).floor().max(0.0) as u32).min(lh);
     let lx1 = ((lcx + r).ceil() as u32).min(lw);
     let ly1 = ((lcy + r).ceil() as u32).min(lh);
+
+    for_each_rect_pixel(canvas, lx0, ly0, lx1, ly1, |sel, px, py, dst| {
+        let dx = px as f32 + 0.5 - lcx;
+        let dy = py as f32 + 0.5 - lcy;
+        let d2 = dx * dx + dy * dy;
+        if d2 > r2 {
+            return false;
+        }
+        let mut cov = dab_coverage(d2, r, hardness) * opacity;
+        if cov < 0.001 {
+            return false;
+        }
+        if sel.active {
+            cov *= sel.sample((px as i32 + ox) as u32, (py as i32 + oy) as u32);
+            if cov < 0.001 {
+                return false;
+            }
+        }
+        f(px, py, cov, dst);
+        true
+    })
+}
+
+/// Visit every active-layer pixel of the layer-local rect `lx0..lx1` ×
+/// `ly0..ly1` (clipped to the layer), calling `f(selection, px, py, dst)` with
+/// the pixel's RGBA to change in place; `f` returns whether to keep the change.
+/// Every kept change follows the rules the scrub tools share: mask texels stay
+/// opaque gray, "Lock transparent pixels" keeps coverage, and the Channels
+/// panel gates the colour channels. Returns `false` when the layer can't be
+/// painted or nothing was written. Marks the rect dirty.
+pub fn for_each_rect_pixel<F>(
+    canvas: &mut Canvas,
+    lx0: u32,
+    ly0: u32,
+    lx1: u32,
+    ly1: u32,
+    mut f: F,
+) -> bool
+where
+    F: FnMut(&Selection, u32, u32, &mut [u8; 4]) -> bool,
+{
+    let Some(((ox, oy), (lw, lh))) = paint_frame(canvas) else {
+        return false;
+    };
+    let (lx1, ly1) = (lx1.min(lw), ly1.min(lh));
     if lx1 <= lx0 || ly1 <= ly0 {
         return false;
     }
+    let idx = canvas.layer_stack.active_idx;
 
     // The selection and the layer's tiles are disjoint Canvas fields: both can
     // be borrowed at once.
-    let has_sel = canvas.selection.active;
     let sel = &canvas.selection;
 
     let tile_size = TILE_SIZE;
     // Channels-panel write gate: keep only the enabled channels of the
     // computed result (mask painting is grayscale and ignores the gate).
     let paint_mask = canvas.layer_stack.layers[idx].paint_target == PaintTarget::Mask;
+    // "Lock transparent pixels": the tools change colour, never coverage.
+    let lock_alpha = !paint_mask && canvas.layer_stack.layers[idx].lock_alpha;
     let channel_wm = if paint_mask {
         None
     } else {
@@ -138,27 +187,8 @@ where
                 y: ty as i32,
             });
             for py in py_min..py_max {
-                let dy = py as f32 + 0.5 - lcy;
-                let dy2 = dy * dy;
                 let row_off = (py - tile_y0) * tile_size;
                 for px in px_min..px_max {
-                    let dx = px as f32 + 0.5 - lcx;
-                    let d2 = dx * dx + dy2;
-                    if d2 > r2 {
-                        continue;
-                    }
-                    let mut cov = dab_coverage(d2, r, hardness) * opacity;
-                    if cov < 0.001 {
-                        continue;
-                    }
-                    if has_sel {
-                        let canvas_px = (px as i32 + ox) as u32;
-                        let canvas_py = (py as i32 + oy) as u32;
-                        cov *= sel.sample(canvas_px, canvas_py);
-                        if cov < 0.001 {
-                            continue;
-                        }
-                    }
                     let i = ((row_off + (px - tile_x0)) * 4) as usize;
                     let before = [
                         tile.pixels[i],
@@ -167,10 +197,17 @@ where
                         tile.pixels[i + 3],
                     ];
                     let mut dst = before;
-                    f(px, py, cov, &mut dst);
+                    if !f(sel, px, py, &mut dst) {
+                        continue;
+                    }
                     if paint_mask {
                         // Mask texels are opaque gray, as Brush writes them.
                         dst = [dst[0], dst[0], dst[0], 255];
+                    } else if lock_alpha {
+                        if before[3] == 0 {
+                            continue;
+                        }
+                        dst[3] = before[3];
                     }
                     if let Some(wm) = channel_wm {
                         crate::core::tile::apply_write_mask(before, &mut dst, wm);
@@ -187,26 +224,47 @@ where
 
     let cx0 = (lx0 as i32 + ox).max(0) as u32;
     let cy0 = (ly0 as i32 + oy).max(0) as u32;
-    let cx1 = ((lx1 as i32 + ox) as u32).min(canvas.width);
-    let cy1 = ((ly1 as i32 + oy) as u32).min(canvas.height);
+    let cx1 = ((lx1 as i32 + ox).max(0) as u32).min(canvas.width);
+    let cy1 = ((ly1 as i32 + oy).max(0) as u32).min(canvas.height);
     canvas.mark_dirty(cx0, cy0, cx1, cy1);
     touched
 }
 
-/// Walk a stroke segment from `(x0,y0)` to `(x1,y1)`, calling `dab(x, y)` at every
-/// spaced step. `spacing` is a fraction of the brush `diameter` (Brush convention).
-pub fn dab_segment<F>(x0: f32, y0: f32, x1: f32, y1: f32, diameter: f32, spacing: f32, mut dab: F)
-where
+/// Walk a stroke segment from `(x0,y0)` to `(x1,y1)`, calling `dab(x, y)` every
+/// `spacing` × `diameter` along the WHOLE stroke (Brush convention): `carry` is
+/// the distance from the segment start to the next dab and is kept between
+/// pointer events. Each event used to dab both its ends, so a slow drag (many
+/// short events) dabbed far more often and came out much stronger (14/11).
+/// Start a stroke with `carry = 0.0` to dab its first point.
+pub fn dab_path<F>(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    diameter: f32,
+    spacing: f32,
+    carry: &mut f32,
+    mut dab: F,
+) where
     F: FnMut(f32, f32),
 {
     if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
         return;
     }
     let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-    let step = (diameter * spacing).max(0.5);
-    let steps = ((dist / step).ceil() as u32).clamp(1, 4000);
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        dab(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+    let step = dab_step(diameter, spacing);
+    let mut t = carry.max(0.0);
+    let mut n = 0u32;
+    while t <= dist && n < 4000 {
+        let f = if dist > 0.0 { t / dist } else { 0.0 };
+        dab(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+        t += step;
+        n += 1;
     }
+    *carry = t - dist;
+}
+
+/// The distance between two dabs of a tip `diameter` wide at `spacing`.
+pub fn dab_step(diameter: f32, spacing: f32) -> f32 {
+    (diameter * spacing).max(0.5)
 }

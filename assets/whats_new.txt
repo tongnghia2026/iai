@@ -2,6 +2,15 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+14/11/2026
+- Mở ảnh RAW: mép giữa vùng da sáng và vùng tối (viền mặt, kẽ tay, sợi tóc nằm trên da) không còn hàng chấm đỏ sẫm và dải nâu đỏ loang sang phía tối; mép sạch và gọn như Photoshop. Ảnh RAW đã mở và lưu thành .iai từ trước thì giữ như cũ, muốn có mép sạch hãy mở lại file RAW gốc.
+- Công cụ Smudge (ngón tay): vệt kéo nay mượt và mờ dần đều như Photoshop, không còn hiện từng bậc như bậc thang, kể cả khi dùng cọ to hay kéo chéo. Lực 100% mang nguyên mảng màu ở chỗ bấm chuột đi tới hết nét kéo. Cỡ cọ Smudge tối đa 2500 px.
+- Sửa một loạt lỗi nhỏ: layer hoặc nhóm đã tắt mắt không còn bị Move bắt nhầm hay bị Ctrl+T, cọ đụng tới; vẽ khung Crop ngược (từ phải-dưới lên) vẫn kéo góc được; xem trước Levels, Curves… chỉ đổi trong vùng chọn và giống hệt lúc bấm OK; Vibrance không làm nền xám ám đỏ; Image Size thu nhỏ ảnh cho cạnh chéo mịn; Canvas Size tính đúng cm theo DPI của ảnh; kéo khung chọn đi rồi Đảo vùng chọn vẫn đúng chỗ; giữ phím mũi tên nhích layer rồi Ctrl+Z một lần là về chỗ cũ.
+- «Nhờ AI làm» nối được thêm với Claude và ChatGPT (Codex), ngoài Gemini.
+- «Ảnh thẻ Pro» — Xóa mụn: bắt được mụn đỏ, mụn mọc thành cụm và nốt to hơn trước; xóa xong không còn vết mờ. Có thêm ô «Xóa mụn giữ lại nốt ruồi» (bật sẵn) để ảnh thẻ vẫn còn nốt ruồi.
+- Làm mịn da: mịn đều hơn ở bọng mắt, quanh miệng và sát chân tóc, không còn cảnh má mịn mà mấy chỗ đó vẫn sần.
+- Dáng người: thanh «Vai» và «Cổ» nay dùng được trên ảnh thẻ; kéo «Cổ» không còn đẩy cổ áo nhô lên; «Eo thon» không lệch khi người đứng nghiêng vai; «Chân thon» không méo khi hai chân sát nhau; viền người sau khi chỉnh mượt hơn.
+
 12/11/2026
 - Nhóm công cụ vẽ hình (chuột phải vào nút hình chữ nhật) có thêm «mũi tên khối» và «trái tim». Kéo ra như vẽ chữ nhật; sau đó kéo các nút vuông quanh hình để kéo dài, kéo ngang hay kéo cao tùy ý. Mũi tên chỉnh được độ dày thân ở ô «Shaft» trên thanh trên cùng.
 

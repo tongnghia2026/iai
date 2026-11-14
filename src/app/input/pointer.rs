@@ -648,24 +648,37 @@ impl App {
             // No layer chosen (an empty spot was pressed with Move): a tool
             // that paints on a layer waits for one to be picked rather than
             // painting on whichever layer was last active.
+            let paints_layer = matches!(
+                self.edit.tools.active_id(),
+                ToolId::Brush
+                    | ToolId::Eraser
+                    | ToolId::Pencil
+                    | ToolId::Fill
+                    | ToolId::Gradient
+                    | ToolId::Clone
+                    | ToolId::Repair
+                    | ToolId::Smudge
+                    | ToolId::Dodge
+                    | ToolId::Burn
+                    | ToolId::Patch
+            );
             if self.edit.transform_state.is_none()
                 && self.docs.active().canvas.layer_stack.is_none_picked()
-                && matches!(
-                    self.edit.tools.active_id(),
-                    ToolId::Brush
-                        | ToolId::Eraser
-                        | ToolId::Pencil
-                        | ToolId::Fill
-                        | ToolId::Gradient
-                        | ToolId::Clone
-                        | ToolId::Repair
-                        | ToolId::Smudge
-                        | ToolId::Dodge
-                        | ToolId::Burn
-                        | ToolId::Patch
-                )
+                && paints_layer
             {
                 self.shell.status_msg = "Hãy chọn một layer trước".to_string();
+                if let Some(w) = &self.win.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // A hidden layer (its own eye or a folder's off) is not painted
+            // unseen: the stroke would land where nothing shows (14/11).
+            if self.edit.transform_state.is_none() && paints_layer && {
+                let stack = &self.docs.active().canvas.layer_stack;
+                !stack.is_effectively_visible(stack.active_idx)
+            } {
+                self.shell.status_msg = "Layer đang ẩn — bật con mắt để vẽ".to_string();
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
@@ -1307,7 +1320,7 @@ impl App {
             ) {
                 self.edit.tools.clone_like_mut().size = new_size;
             } else if self.edit.tools.active_id() == crate::tools::ToolId::Smudge {
-                self.edit.tools.smudge_mut().size = new_size;
+                self.edit.tools.smudge_mut().size = new_size.min(crate::tools::smudge::MAX_SIZE);
             } else if matches!(
                 self.edit.tools.active_id(),
                 crate::tools::ToolId::Dodge | crate::tools::ToolId::Burn

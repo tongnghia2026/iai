@@ -30,7 +30,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 let zoom_text = format!("{:.0}%", data.doc.zoom * 100.0);
                 if ui
                     .small_button(&zoom_text)
-                    .on_hover_text("Click to set zoom (Ctrl+0 = Fit)")
+                    .on_hover_text("Click for 100% (Ctrl+0 = Fit)")
                     .clicked()
                 {
                     actions.doc.zoom_100 = true;
@@ -144,7 +144,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                             "B=Brush | [ ]=Size | Shift+[ ]=Hard | X=Swap"
                         }
                         crate::tools::ToolId::Eraser => "E=Eraser | [ ]=Size",
-                        crate::tools::ToolId::Move => "V=Move | Click+Drag to pan",
+                        crate::tools::ToolId::Move => "V=Move | Drag=Move layer | Arrows=Nudge",
                         crate::tools::ToolId::Crop if data.tool.crop_rect.is_none() => {
                             "C=Crop | Drag=Select area | Click image=Start"
                         }

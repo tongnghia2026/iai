@@ -219,26 +219,10 @@ impl Canvas {
                 for pos in tiles_to_modify {
                     let tx0 = pos.x * ts + ox;
                     let ty0 = pos.y * ts + oy;
-                    let tx1 = tx0 + ts - 1;
 
-                    let tile_inside_bbox = tx0 >= sel_x0
-                        && ty0 >= sel_y0
-                        && (tx0 + ts) <= sel_x1
-                        && (ty0 + ts) <= sel_y1;
-                    if tile_inside_bbox {
-                        let cx0 = tx0.clamp(0, cw - 1) as u32;
-                        let cy0 = ty0.clamp(0, ch - 1) as u32;
-                        let cx1 = tx1.clamp(0, cw - 1) as u32;
-                        let cy1 = (ty0 + ts - 1).clamp(0, ch - 1) as u32;
-                        if self.selection.sample(cx0, cy0) >= 1.0
-                            && self.selection.sample(cx1, cy0) >= 1.0
-                            && self.selection.sample(cx0, cy1) >= 1.0
-                            && self.selection.sample(cx1, cy1) >= 1.0
-                        {
-                            continue;
-                        }
-                    }
-
+                    // Every pixel is read: four selected corners do not
+                    // mean the tile is all selected (14/11: a small hole
+                    // inside was copied too).
                     let tile = layer.tiles.get_tile_mut(pos);
                     for i in 0..ts {
                         for j in 0..ts {
@@ -602,7 +586,7 @@ impl Canvas {
             self.mark_dirty_layer_bounds(ox + dx, oy + dy, w, h);
         }
 
-        let cmd = iai_history::command::TranslateLayerCommand::from_applied_move(
+        let cmd = iai_history::command::TranslateLayerCommand::from_applied_nudge(
             ids,
             dx,
             dy,
@@ -644,6 +628,85 @@ mod folder_tests {
         (canvas, header)
     }
 
+    fn index_of(canvas: &Canvas, name: &str) -> usize {
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .position(|l| l.name == name)
+            .expect("layer exists")
+    }
+
+    /// Ctrl+J with a selection that has a small hole leaves the hole out
+    /// (14/11: four selected tile corners copied the whole tile).
+    #[test]
+    fn layer_via_copy_leaves_out_a_hole_in_the_selection() {
+        let mut canvas = Canvas::new(300, 300);
+        let mut mask = vec![255u8; 300 * 300];
+        for y in 100..103 {
+            for x in 100..103 {
+                mask[y * 300 + x] = 0;
+            }
+        }
+        canvas
+            .selection
+            .apply_with_mode(mask, iai_doc::selection::SelectionMode::New);
+        canvas.layer_stack.active_idx = 0;
+        canvas.layer_stack.layers[0].selected = true;
+        let new_idx = canvas.layer_via_copy();
+        let copy = &canvas.layer_stack.layers[new_idx];
+        let (ox, oy) = copy.offset;
+        let at = |x: i32, y: i32| copy.tiles.get_pixel((x - ox) as u32, (y - oy) as u32).3;
+        assert_eq!(at(101, 101), 0, "the hole is not copied");
+        assert_eq!(at(50, 50), 255);
+    }
+
+    /// Moving selected content past a small layer's edge keeps it: the layer
+    /// grows (14/11: it dropped off).
+    #[test]
+    fn moved_content_past_the_layer_edge_is_kept() {
+        let (mut canvas, _) = canvas_with_folder();
+        let idx = index_of(&canvas, "loose");
+        canvas.layer_stack.active_idx = idx;
+        canvas.selection.select_rect(200, 200, 210, 210);
+        canvas.selection.offset = (-30, 0);
+        assert!(canvas.move_selected_content(-30, 0));
+        let l = &canvas.layer_stack.layers[idx];
+        let (ox, oy) = l.offset;
+        assert!(ox <= 170, "the layer grew left to {ox}");
+        assert_eq!(
+            l.tiles.get_pixel((175 - ox) as u32, (205 - oy) as u32).3,
+            255
+        );
+        assert_eq!(l.tiles.get_pixel((205 - ox) as u32, (205 - oy) as u32).3, 0);
+        canvas.undo();
+        let l = &canvas.layer_stack.layers[idx];
+        assert_eq!((l.offset, l.width), ((200, 200), 10), "undo puts it back");
+    }
+
+    /// The Wand on one moved layer reads it where it sits on the page.
+    #[test]
+    fn the_wand_reads_a_moved_layer_where_it_sits() {
+        let (mut canvas, _) = canvas_with_folder();
+        let idx = index_of(&canvas, "loose");
+        canvas.layer_stack.active_idx = idx;
+        canvas.select_wand(
+            205,
+            205,
+            0,
+            0,
+            true,
+            false,
+            0.0,
+            false,
+            iai_doc::selection::SelectionMode::New,
+        );
+        assert!(canvas.selection.is_selected(205, 205));
+        assert!(canvas.selection.is_selected(200, 209));
+        assert!(!canvas.selection.is_selected(211, 205));
+        assert!(!canvas.selection.is_selected(5, 5));
+    }
+
     fn offset_of(canvas: &Canvas, name: &str) -> (i32, i32) {
         canvas
             .layer_stack
@@ -652,6 +715,25 @@ mod folder_tests {
             .find(|l| l.name == name)
             .map(|l| l.offset)
             .expect("layer exists")
+    }
+
+    /// Arrow-key nudges in a row are one undo step (14/11: holding an arrow
+    /// pushed the older history out).
+    #[test]
+    fn nudges_in_a_row_undo_as_one_step() {
+        let (mut canvas, _) = canvas_with_folder();
+        for _ in 0..30 {
+            assert!(canvas.nudge_selected_layers(1, 0));
+        }
+        assert_eq!(offset_of(&canvas, "one"), (70, 50));
+        canvas.undo();
+        assert_eq!(
+            offset_of(&canvas, "one"),
+            (40, 50),
+            "one undo takes all 30 back"
+        );
+        canvas.redo();
+        assert_eq!(offset_of(&canvas, "one"), (70, 50));
     }
 
     #[test]

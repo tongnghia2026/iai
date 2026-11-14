@@ -523,6 +523,9 @@ pub(crate) fn gradient_map_ui(
             } else {
                 stops[sel + 1].0 - 0.001
             };
+            // Two stops closer than 0.002 left lo above hi, and clamp
+            // panicked (14/11).
+            let hi = hi.max(lo);
             let mut pct = stops[sel].0 * 100.0;
             if ui
                 .add(
@@ -875,6 +878,9 @@ pub(crate) fn gradient_editor(
             } else {
                 stops[sel + 1].0 - 0.001
             };
+            // Two stops closer than 0.002 left lo above hi, and clamp
+            // panicked (14/11).
+            let hi = hi.max(lo);
             let mut pct = stops[sel].0 * 100.0;
             if ui
                 .add(
@@ -1270,7 +1276,7 @@ pub(crate) fn curves_point_values_ui(
             let tens = crate::ui::widgets::shift_arrow_tens(ui, &r, &mut input, 1.0, 0.0..=255.0);
             if r.changed() || tens {
                 let lo = points[idx - 1].0 + 0.001;
-                let hi = points[idx + 1].0 - 0.001;
+                let hi = (points[idx + 1].0 - 0.001).max(lo);
                 points[idx].0 = (input / 255.0).clamp(lo, hi);
                 changed = true;
             }
@@ -1499,7 +1505,7 @@ pub(crate) fn curve_graph_ui(
             nx = 1.0;
         } else {
             let lo = points[i - 1].0 + 0.001;
-            let hi = points[i + 1].0 - 0.001;
+            let hi = (points[i + 1].0 - 0.001).max(lo);
             nx = nx.clamp(lo, hi);
         }
         points[i] = (nx, ny);

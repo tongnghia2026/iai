@@ -153,7 +153,7 @@ impl MoveTool {
                 uy0 = uy0.min(ly0);
                 ux1 = ux1.max(lx1);
                 uy1 = uy1.max(ly1);
-            } else if layer.visible {
+            } else if canvas.layer_stack.is_effectively_visible(idx) {
                 tx.push((lx0, SnapKind::LayerEdge));
                 tx.push((lx1, SnapKind::LayerEdge));
                 tx.push(((lx0 + lx1) * 0.5, SnapKind::LayerCenter));
@@ -399,9 +399,10 @@ impl Tool for MoveTool {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let canvas = ctx.canvas_mut();
         self.toggle_vector_transform_requested = false;
-        self.click_selected_vector = canvas.layer_stack.layers.iter().any(|layer| {
+        let stack = &canvas.layer_stack;
+        self.click_selected_vector = stack.layers.iter().enumerate().any(|(idx, layer)| {
             layer.selected
-                && layer.visible
+                && stack.is_effectively_visible(idx)
                 && Self::can_move_layer(layer)
                 && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
                 && Self::shape_box(layer).map_or_else(
@@ -431,7 +432,9 @@ impl Tool for MoveTool {
             let y = cy as i32;
             let mut hit_idx = None;
             for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
-                if !layer.visible || !Self::can_move_layer(layer) {
+                // A layer hidden by its own eye or a folder's is not on the
+                // page: the press goes to what shows beneath (14/11).
+                if !canvas.layer_stack.is_effectively_visible(idx) || !Self::can_move_layer(layer) {
                     continue;
                 }
                 let lx = x - layer.offset.0;
@@ -476,7 +479,7 @@ impl Tool for MoveTool {
             if hit_idx.is_none() {
                 for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
                     if layer.selected
-                        && layer.visible
+                        && canvas.layer_stack.is_effectively_visible(idx)
                         && Self::can_move_layer(layer)
                         && matches!(layer.layer_type, crate::core::layer::LayerType::Vector(_))
                         // By the shape's own box: its raster can be the
@@ -799,9 +802,10 @@ impl Tool for MoveTool {
             // layer is caught only when the marquee holds all of what shows of
             // it, so small objects can be picked off a large one beneath
             // (02/11); with Alt, whatever it touches.
-            let has_shapes = canvas.layer_stack.layers.iter().any(|layer| {
+            let stack = &canvas.layer_stack;
+            let has_shapes = stack.layers.iter().enumerate().any(|(idx, layer)| {
                 use crate::core::layer::LayerType;
-                layer.visible
+                stack.is_effectively_visible(idx)
                     && Self::can_move_layer(layer)
                     && matches!(layer.layer_type, LayerType::Text(_) | LayerType::Vector(_))
             });
@@ -812,7 +816,9 @@ impl Tool for MoveTool {
                 .iter()
                 .enumerate()
                 .rev()
-                .filter(|(_, layer)| layer.visible && Self::can_move_layer(layer))
+                .filter(|(idx, layer)| {
+                    stack.is_effectively_visible(*idx) && Self::can_move_layer(layer)
+                })
                 .filter(|(_, layer)| {
                     if touch {
                         Self::marquee_touches(layer, x0, y0, x1, y1)

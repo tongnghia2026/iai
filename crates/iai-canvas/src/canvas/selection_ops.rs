@@ -319,10 +319,7 @@ impl Canvas {
             self.ensure_pixels();
             self.pixels.clone()
         } else {
-            let idx = self.layer_stack.active_idx;
-            self.layer_stack.layers[idx]
-                .tiles
-                .extract_region(0, 0, self.width, self.height)
+            self.layer_pixels_on_page(self.layer_stack.active_idx)
         };
 
         let raw_mask = iai_doc::selection::flood_fill_mask(
@@ -345,6 +342,36 @@ impl Canvas {
         }
         cmd.capture_after(&self.selection);
         self.record_as(Box::new(cmd), ChangeKind::Selection);
+    }
+
+    /// The pixels of layer `idx` where they sit on the page (page-sized RGBA,
+    /// clear where the layer is not). Read from the layer's own corner, a
+    /// moved layer was sampled as if it had not moved (14/11).
+    fn layer_pixels_on_page(&self, idx: usize) -> Vec<u8> {
+        let (w, h) = (self.width, self.height);
+        let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+        let Some(layer) = self.layer_stack.layers.get(idx) else {
+            return out;
+        };
+        let (ox, oy) = layer.offset;
+        let x0 = ox.max(0);
+        let y0 = oy.max(0);
+        let x1 = (ox + layer.width as i32).min(w as i32);
+        let y1 = (oy + layer.height as i32).min(h as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return out;
+        }
+        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let region =
+            layer
+                .tiles
+                .extract_region((x0 - ox) as u32, (y0 - oy) as u32, rw as u32, rh as u32);
+        for row in 0..rh {
+            let src = row * rw * 4;
+            let dst = ((y0 as usize + row) * w as usize + x0 as usize) * 4;
+            out[dst..dst + rw * 4].copy_from_slice(&region[src..src + rw * 4]);
+        }
+        out
     }
 
     /// Build (or reuse) the Lab + Sobel cache of the pixels Quick Select and
@@ -372,9 +399,7 @@ impl Canvas {
                 self.ensure_pixels();
                 self.pixels.clone()
             } else {
-                self.layer_stack.layers[active_idx]
-                    .tiles
-                    .extract_region(0, 0, w, h)
+                self.layer_pixels_on_page(active_idx)
             };
             let lab = pixels_to_lab(&pixels, w, h);
             let sobel = compute_sobel(&pixels, w, h);
@@ -692,6 +717,36 @@ impl Canvas {
             }
         }
 
+        // Content moved past the layer's own box (a layer smaller than the
+        // page) used to drop off it (14/11). The layer grows to hold it, by
+        // whole tiles left / up as `merge_down` grows, so nothing shifts.
+        let mut structure = None;
+        if !self.layer_stack.layers[idx].is_background && !lifted.is_empty() {
+            let (mut x0, mut y0, mut x1, mut y1) = (ox, oy, ox + lw, oy + lh);
+            for &(cx, cy, ..) in &lifted {
+                x0 = x0.min(cx);
+                y0 = y0.min(cy);
+                x1 = x1.max(cx + 1);
+                y1 = y1.max(cy + 1);
+            }
+            if (x0, y0, x1, y1) != (ox, oy, ox + lw, oy + lh) {
+                structure = Some(iai_history::command::LayerStructureCommand::capture_before(
+                    "Move Selection Content",
+                    &self.layer_stack,
+                    self.width,
+                    self.height,
+                ));
+                grow_layer_to(&mut self.layer_stack.layers[idx], x0, y0, x1, y1);
+            }
+        }
+        let layer = &self.layer_stack.layers[idx];
+        let (ox, oy, lw, lh) = (
+            layer.offset.0,
+            layer.offset.1,
+            layer.width as i32,
+            layer.height as i32,
+        );
+
         {
             let tiles = &mut self.layer_stack.layers[idx].tiles;
             for &(scx, scy, keep) in &cleared {
@@ -737,22 +792,26 @@ impl Canvas {
             }
         }
 
-        let after = self.layer_stack.layers[idx].tiles.clone();
-
-        let mut snap = iai_history::command::DeltaSnapshot::capture_before(
-            &before,
-            layer_id,
-            iai_doc::layer::PaintTarget::Pixels,
-        );
-        snap.after_tiles = after;
         self.begin_undo_group("Move Selection Content");
-        self.record_as(
-            Box::new(iai_history::command::PaintCommand::new(
-                "Move Selection Content",
-                snap,
-            )),
-            ChangeKind::LayerPixels,
-        );
+        if let Some(mut cmd) = structure {
+            cmd.capture_after(&self.layer_stack, self.width, self.height);
+            self.record_as(Box::new(cmd), ChangeKind::LayerStructure);
+        } else {
+            let after = self.layer_stack.layers[idx].tiles.clone();
+            let mut snap = iai_history::command::DeltaSnapshot::capture_before(
+                &before,
+                layer_id,
+                iai_doc::layer::PaintTarget::Pixels,
+            );
+            snap.after_tiles = after;
+            self.record_as(
+                Box::new(iai_history::command::PaintCommand::new(
+                    "Move Selection Content",
+                    snap,
+                )),
+                ChangeKind::LayerPixels,
+            );
+        }
         let sel_cmd = iai_history::command::TranslateSelectionCommand::from_applied_move(
             &self.selection,
             dx,
@@ -765,5 +824,35 @@ impl Canvas {
         self.dirty.expand_full(self.width, self.height);
         self.flatten_full();
         true
+    }
+}
+
+/// Grow `layer` to cover the page rectangle `x0..x1`, `y0..y1` as well as
+/// its own box: left / up by whole tiles, so its tiles move by a key remap
+/// (lossless), as `LayerStack::merge_down` grows the layer below.
+fn grow_layer_to(layer: &mut iai_doc::layer::Layer, x0: i32, y0: i32, x1: i32, y1: i32) {
+    let (bx, by) = layer.offset;
+    let x0 = x0.min(bx);
+    let y0 = y0.min(by);
+    let x1 = x1.max(bx + layer.width as i32);
+    let y1 = y1.max(by + layer.height as i32);
+    let ts = iai_raster::tile::TILE_SIZE as i32;
+    let shift_x = (bx - x0 + ts - 1) / ts * ts;
+    let shift_y = (by - y0 + ts - 1) / ts * ts;
+    let (ox, oy) = (bx - shift_x, by - shift_y);
+    let w = (x1 - ox) as u32;
+    let h = (y1 - oy) as u32;
+    layer.tiles.width = w;
+    layer.tiles.height = h;
+    layer.tiles.translate(shift_x, shift_y);
+    layer.width = w;
+    layer.height = h;
+    layer.offset = (ox, oy);
+    if let Some(mask) = layer.mask.as_mut() {
+        mask.tiles.width = w;
+        mask.tiles.height = h;
+        mask.tiles.translate(shift_x, shift_y);
+        mask.width = w;
+        mask.height = h;
     }
 }

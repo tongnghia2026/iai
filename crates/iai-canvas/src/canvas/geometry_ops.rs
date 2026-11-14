@@ -1402,6 +1402,8 @@ impl Canvas {
             }
         }
         {
+            // A moved selection turns from where it shows (14/11).
+            self.selection.commit_offset();
             let (nm, nw, nh) = PixelTransformCommand::transform_sel_mask_pub(
                 &self.selection.mask,
                 &PixelTransformKind::FlipH,
@@ -1449,6 +1451,8 @@ impl Canvas {
             }
         }
         {
+            // A moved selection turns from where it shows (14/11).
+            self.selection.commit_offset();
             let (nm, nw, nh) = PixelTransformCommand::transform_sel_mask_pub(
                 &self.selection.mask,
                 &PixelTransformKind::FlipV,
@@ -1500,6 +1504,8 @@ impl Canvas {
         }
         std::mem::swap(&mut self.width, &mut self.height);
         {
+            // A moved selection turns from where it shows (14/11).
+            self.selection.commit_offset();
             let (nm, nw, nh) = PixelTransformCommand::transform_sel_mask_pub(
                 &self.selection.mask,
                 &PixelTransformKind::Rotate90CW,
@@ -1552,6 +1558,8 @@ impl Canvas {
         }
         std::mem::swap(&mut self.width, &mut self.height);
         {
+            // A moved selection turns from where it shows (14/11).
+            self.selection.commit_offset();
             let (nm, nw, nh) = PixelTransformCommand::transform_sel_mask_pub(
                 &self.selection.mask,
                 &PixelTransformKind::Rotate90CCW,
@@ -1740,12 +1748,16 @@ impl Canvas {
 
         let scale_x = src.width.max(1) as f32 / new_w.max(1) as f32;
         let scale_y = src.height.max(1) as f32 / new_h.max(1) as f32;
-        Self::resample_into_tiles(
+        // A reduction averages the source pixels each output pixel spans, as
+        // Crop to a print size does: one bilinear tap per pixel aliased past
+        // a halving (14/11: jagged edges after Image Size to 1/4).
+        Self::resample_into_tiles_footprint(
             src,
             new_w,
             new_h,
             move |u, v| (u * scale_x - 0.5, v * scale_y - 0.5),
             None,
+            scale_x.max(scale_y),
         )
     }
 
@@ -1796,6 +1808,59 @@ impl Canvas {
 #[cfg(test)]
 mod page_change_tests {
     use super::*;
+
+    /// Canvas Size anchored top-left, on a page with no Background, keeps
+    /// what shows of a layer moved left (14/11: it was cut to its corner).
+    #[test]
+    fn a_wider_page_keeps_a_layer_moved_left() {
+        let mut canvas = Canvas::new(100, 100);
+        let mut layer = iai_doc::layer::Layer::from_rgba(
+            50,
+            "moved",
+            [200u8, 0, 0, 255].repeat(100 * 100),
+            100,
+            100,
+        );
+        layer.offset = (-20, 0);
+        canvas.layer_stack.layers = vec![layer];
+        canvas.layer_stack.active_idx = 0;
+        assert!(canvas.crop(0, 0, 150, 100, true));
+        let l = &canvas.layer_stack.layers[0];
+        let at = |x: i32, y: i32| {
+            let (lx, ly) = (x - l.offset.0, y - l.offset.1);
+            if lx < 0 || ly < 0 || lx >= l.width as i32 || ly >= l.height as i32 {
+                0
+            } else {
+                l.tiles.get_pixel(lx as u32, ly as u32).3
+            }
+        };
+        assert_eq!(at(10, 50), 255);
+        assert_eq!(at(79, 50), 255);
+        assert_eq!(at(81, 50), 0);
+    }
+
+    /// A 1-px checkerboard shrunk to a quarter comes out an even grey, not
+    /// one of its two colours (14/11: Image Size aliased past a halving).
+    #[test]
+    fn a_checkerboard_shrunk_to_a_quarter_is_even_grey() {
+        let (w, h) = (64u32, 64u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                let i = ((y * w + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let src = iai_raster::tile::TileMap::from_rgba(&px, w, h);
+        let out = Canvas::resample_tilemap(&src, 16, 16);
+        for y in 2..14 {
+            for x in 2..14 {
+                let (r, ..) = out.get_pixel(x, y);
+                assert!((100..=155).contains(&r), "({x}, {y}) = {r}");
+            }
+        }
+    }
     use iai_doc::vector::color::ColorValue;
     use iai_doc::vector::object::VectorObjectData;
     use iai_doc::vector::path::{Contour, FillRule, Node, PathData};

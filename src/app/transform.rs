@@ -90,7 +90,9 @@ impl App {
         // Nothing drawn on a layer (a fresh one) does not stretch the box.
         targets.retain(|&i| {
             stack.layers.get(i).is_some_and(|l| {
-                l.visible
+                // Hidden (own eye or a folder's) is not on the page and does
+                // not widen the box (14/11).
+                stack.is_effectively_visible(i)
                     && crate::core::free_transform::transformable_layer(l)
                     && (!l.tiles.tiles.is_empty()
                         // Wholly off the page it has no pixels, yet shows.
@@ -260,6 +262,10 @@ impl App {
         self.edit.transform_state = match session {
             Ok(ts) => Some(ts),
             Err(NoSession::NothingToTransform) => return,
+            Err(NoSession::Hidden) => {
+                self.shell.status_msg = "Layer đang ẩn — bật con mắt để biến đổi".to_string();
+                return;
+            }
         };
 
         self.update_transform_preview();
@@ -607,8 +613,8 @@ impl App {
             .map(|ts| ts.layer_states.iter().map(|l| l.layer_id).collect())
             .unwrap_or_default();
 
-        for layer in canvas.layer_stack.layers.iter() {
-            if !layer.visible || xform_ids.contains(&layer.id) {
+        for (idx, layer) in canvas.layer_stack.layers.iter().enumerate() {
+            if !canvas.layer_stack.is_effectively_visible(idx) || xform_ids.contains(&layer.id) {
                 continue;
             }
             // An empty (or group) layer's rectangle is not anything on screen.

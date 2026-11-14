@@ -85,6 +85,26 @@ pub trait Command: Send + Sync {
     fn can_merge_with(&self, _next: &dyn Command) -> bool {
         false
     }
+
+    /// Fold `next`, a step applied right after this one, into this one, so
+    /// both undo together. `false` leaves them two steps. Arrow-key nudges
+    /// fold: holding an arrow made one step per repeat and pushed the older
+    /// history out within seconds (14/11).
+    fn absorb(&mut self, _next: &dyn Command) -> bool {
+        false
+    }
+
+    /// The layers this step nudges, `(id, before, after)`, when it is an
+    /// arrow-key nudge of layers (see [`Command::absorb`]).
+    fn nudged_layers(&self) -> Option<&[(u32, (i32, i32), (i32, i32))]> {
+        None
+    }
+
+    /// The selection's offset before and after, when this step is an
+    /// arrow-key nudge of the selection (see [`Command::absorb`]).
+    fn nudged_selection(&self) -> Option<((i32, i32), (i32, i32))> {
+        None
+    }
 }
 
 pub struct DeltaSnapshot {
@@ -659,6 +679,8 @@ impl Command for AlphaPlanePaintCommand {
 
 pub struct TranslateLayerCommand {
     offsets: Vec<(u32, (i32, i32), (i32, i32))>,
+    /// An arrow-key nudge: the next nudge of the same layers folds into it.
+    nudge: bool,
 }
 
 impl TranslateLayerCommand {
@@ -674,7 +696,19 @@ impl TranslateLayerCommand {
             })
             .collect();
 
-        Self { offsets }
+        Self {
+            offsets,
+            nudge: false,
+        }
+    }
+
+    /// [`Self::from_applied_move`] for an arrow-key nudge, which the next
+    /// nudge of the same layers folds into.
+    pub fn from_applied_nudge(layer_ids: Vec<u32>, dx: i32, dy: i32, layers: &LayerStack) -> Self {
+        Self {
+            nudge: true,
+            ..Self::from_applied_move(layer_ids, dx, dy, layers)
+        }
     }
 }
 
@@ -703,11 +737,34 @@ impl Command for TranslateLayerCommand {
     fn memory_bytes(&self) -> usize {
         32 + self.offsets.capacity() * 20
     }
+
+    fn nudged_layers(&self) -> Option<&[(u32, (i32, i32), (i32, i32))]> {
+        self.nudge.then_some(&self.offsets[..])
+    }
+
+    fn absorb(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.nudged_layers().filter(|_| self.nudge) else {
+            return false;
+        };
+        let follows = next.len() == self.offsets.len()
+            && next
+                .iter()
+                .zip(&self.offsets)
+                .all(|(n, o)| n.0 == o.0 && n.1 == o.2);
+        if follows {
+            for (o, n) in self.offsets.iter_mut().zip(next) {
+                o.2 = n.2;
+            }
+        }
+        follows
+    }
 }
 
 pub struct TranslateSelectionCommand {
     before_offset: (i32, i32),
     after_offset: (i32, i32),
+    /// An arrow-key nudge: the next nudge folds into it.
+    nudge: bool,
 }
 
 impl TranslateSelectionCommand {
@@ -717,6 +774,16 @@ impl TranslateSelectionCommand {
         Self {
             before_offset,
             after_offset,
+            nudge: false,
+        }
+    }
+
+    /// [`Self::from_applied_move`] for an arrow-key nudge, which the next
+    /// nudge folds into.
+    pub fn from_applied_nudge(selection: &iai_doc::selection::Selection, dx: i32, dy: i32) -> Self {
+        Self {
+            nudge: true,
+            ..Self::from_applied_move(selection, dx, dy)
         }
     }
 }
@@ -743,6 +810,21 @@ impl Command for TranslateSelectionCommand {
     }
     fn memory_bytes(&self) -> usize {
         16
+    }
+
+    fn nudged_selection(&self) -> Option<((i32, i32), (i32, i32))> {
+        self.nudge
+            .then_some((self.before_offset, self.after_offset))
+    }
+
+    fn absorb(&mut self, next: &dyn Command) -> bool {
+        match next.nudged_selection() {
+            Some((before, after)) if self.nudge && before == self.after_offset => {
+                self.after_offset = after;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1007,6 +1089,19 @@ impl CommandHistory {
     pub fn push(&mut self, cmd: Box<dyn Command>) {
         if let Some((_, ref mut cmds)) = self.pending_group {
             cmds.push(cmd);
+        } else if self.redo_stack.is_empty()
+            && self
+                .undo_stack
+                .back_mut()
+                .is_some_and(|last| last.cmd.absorb(cmd.as_ref()))
+        {
+            // The folded step is a new state: a fresh id, so a save made
+            // between the two nudges does not still read as clean.
+            let id = self.mint_edit_id();
+            if let Some(last) = self.undo_stack.back_mut() {
+                last.id = id;
+            }
+            self.revision += 1;
         } else {
             self.push_to_stack(cmd);
         }

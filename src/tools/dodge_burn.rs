@@ -111,6 +111,8 @@ pub struct DodgeBurnTool {
     pub protect_tones: bool,
     pub spacing: f32,
     last: (f32, f32),
+    /// Distance to the next dab along the stroke (see `scrub::dab_path`).
+    carry: f32,
 }
 
 impl DodgeBurnTool {
@@ -124,6 +126,7 @@ impl DodgeBurnTool {
             protect_tones: true,
             spacing: 0.1,
             last: (0.0, 0.0),
+            carry: 0.0,
         }
     }
     pub fn dodge() -> Self {
@@ -182,6 +185,7 @@ impl Tool for DodgeBurnTool {
             .begin_stroke(if self.burn { "Burn" } else { "Dodge" });
         self.last = (event.canvas_x, event.canvas_y);
         self.dab(ctx, event.canvas_x, event.canvas_y);
+        self.carry = scrub::dab_step(self.size, self.spacing);
         ToolResponse::repaint()
     }
 
@@ -197,7 +201,11 @@ impl Tool for DodgeBurnTool {
         let spacing = self.spacing;
         // Collect step centres first so the dab closure doesn't borrow self twice.
         let mut pts: Vec<(f32, f32)> = Vec::new();
-        scrub::dab_segment(x0, y0, x1, y1, diameter, spacing, |x, y| pts.push((x, y)));
+        let mut carry = self.carry;
+        scrub::dab_path(x0, y0, x1, y1, diameter, spacing, &mut carry, |x, y| {
+            pts.push((x, y))
+        });
+        self.carry = carry;
         for (x, y) in pts {
             self.dab(ctx, x, y);
         }

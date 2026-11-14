@@ -194,7 +194,9 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
-fn lum299(c: vec3<f32>) -> f32 { return dot(c, vec3(0.299, 0.587, 0.114)); }
+// Rec. 709 weights, as the CPU bake (`iai_color::color::luminance_f32`):
+// the old 0.299 / 0.587 / 0.114 made the preview differ from OK (14/11).
+fn adj_luma(c: vec3<f32>) -> f32 { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     let mx = max(max(c.r, c.g), c.b);
@@ -268,7 +270,7 @@ fn adj_chroma_headroom(d: vec3<f32>, l: f32) -> f32 {
 // (and the camera-raw dev_scale_chroma_around_luma) so the Hue/Saturation preview
 // matches the bake and never hard-clips into blocky over-saturation.
 fn adj_scale_chroma_around_luma(c: vec3<f32>, factor_in: f32) -> vec3<f32> {
-    let l = clamp(lum299(c), 0.0, 1.0);
+    let l = clamp(adj_luma(c), 0.0, 1.0);
     let protect = adj_smootherstep(0.035, 0.14, l) * (1.0 - adj_smootherstep(0.90, 0.99, l));
     let req = (clamp(factor_in, 0.0, 2.35) - 1.0) * protect;
     let d = c - vec3(l);
@@ -383,7 +385,7 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             );
         }
         case 5u: { // ColorBalance
-            let orig_lum = lum299(c);
+            let orig_lum = adj_luma(c);
             let lw = orig_lum;
             let sw = max(1.0 - 2.0 * lw, 0.0);
             let hw = max(2.0 * lw - 1.0, 0.0);
@@ -393,16 +395,45 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             let highlights = P2.xyz;
             var nc = clamp(c + sw * shadows / 100.0 + mw * midtones / 100.0 + hw * highlights / 100.0, vec3(0.0), vec3(1.0));
             if (P0.w > 0.5) {
-                let new_lum = lum299(nc);
+                let new_lum = adj_luma(nc);
                 if (new_lum > 0.001) { nc = clamp(nc * (orig_lum / new_lum), vec3(0.0), vec3(1.0)); }
             }
             return nc;
         }
-        case 6u: { // Vibrance
+        case 6u: { // Vibrance: saturation grows in proportion to what is
+                   // there, so a grey stays grey (it turned red, 14/11).
             let hsl = rgb_to_hsl(c);
-            let boost = P0.x / 100.0 * (1.0 - hsl.y);
-            let ns = clamp(hsl.y + boost + P0.y / 100.0, 0.0, 1.0);
+            let k = 1.0 + P0.x / 100.0 * (1.0 - hsl.y) + P0.y / 100.0;
+            let ns = clamp(hsl.y * k, 0.0, 1.0);
             return hsl_to_rgb(vec3(hsl.x, ns, hsl.z));
+        }
+        case 14u: { // BlackAndWhite: P0 = red, yellow, green, cyan; P1.xy = blue, magenta
+            let hsl = rgb_to_hsl(c);
+            var sl = array<f32, 6>(P0.x, P0.y, P0.z, P0.w, P1.x, P1.y);
+            var weight = (P0.x + P0.y + P0.z + P0.w + P1.x + P1.y) / 600.0;
+            if (hsl.y >= 0.05) {
+                let zone = hsl.x * 6.0;
+                let i = u32(floor(zone)) % 6u;
+                let fr = zone - floor(zone);
+                let w0 = sl[i] / 100.0;
+                let w1 = sl[(i + 1u) % 6u] / 100.0;
+                weight = w0 + (w1 - w0) * fr;
+            }
+            return vec3(clamp(hsl.z * (1.0 + (weight - 1.0) * hsl.y), 0.0, 1.0));
+        }
+        case 15u: { // PhotoFilter: P0.xyz the colour, P0.w density, P1.x keep luminosity
+            let d = clamp(P0.w, 0.0, 1.0);
+            var n = clamp(c * P0.xyz * d + c * (1.0 - d), vec3(0.0), vec3(1.0));
+            if (P1.x > 0.5) {
+                let nl = adj_luma(n);
+                if (nl > 0.001) { n = clamp(n * (adj_luma(c) / nl), vec3(0.0), vec3(1.0)); }
+            }
+            return n;
+        }
+        case 16u: { // ChannelMixer: rows in P0.xyz, P1.xyz, P2.xyz; P0.w monochrome
+            var n = clamp(vec3(dot(c, P0.xyz), dot(c, P1.xyz), dot(c, P2.xyz)), vec3(0.0), vec3(1.0));
+            if (P0.w > 0.5) { n = vec3(adj_luma(n)); }
+            return n;
         }
         case 7u: { // Exposure
             var v = c * pow(2.0, P0.x);
@@ -413,7 +444,7 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             return vec3(1.0) - c;
         }
         case 9u: { // Threshold
-            let v = select(0.0, 1.0, lum299(c) >= P0.x / 255.0);
+            let v = select(0.0, 1.0, adj_luma(c) >= P0.x / 255.0);
             return vec3(v);
         }
         case 10u: { // Posterize
@@ -421,10 +452,10 @@ fn apply_adjustment(c_in: vec3<f32>) -> vec3<f32> {
             return floor(c * lv) / (lv - 1.0);
         }
         case 11u: { // Desaturate
-            return vec3(lum299(c));
+            return vec3(adj_luma(c));
         }
         case 12u: { // GradientMap: 64 RGB ramp samples packed in u.lut
-            var t = lum299(c);
+            var t = adj_luma(c);
             if (P0.x > 0.5) {
                 t = 1.0 - t;
             }
@@ -540,7 +571,7 @@ fn pack_clip_shift(dx: i32, dy: i32) -> u32 {
 }
 
 /// Converts `AdjustmentType` into shader kind, parameters, and LUT data.
-/// kind=0 means the adjustment is CPU-only for flattening. Kind 13 uses the LUT
+/// Every adjustment has a kind (1..=16; 0 is no longer used). Kind 13 uses the LUT
 /// as three 256-sample channel planes (R@0, G@256, B@512), each pre-composed
 /// as master(channel(v)); Gradient Map uses slots 0..256 as 64 packed RGB ramp
 /// samples.
@@ -684,7 +715,34 @@ fn adjustment_to_gpu(adj: &iai_doc::layer::AdjustmentType) -> (u32, [f32; 12], [
             }
             12
         }
-        _ => 0,
+        A::BlackAndWhite { r, y, g, c, b, m } => {
+            p[..6].copy_from_slice(&[*r, *y, *g, *c, *b, *m]);
+            14
+        }
+        A::PhotoFilter {
+            color,
+            density,
+            luminosity,
+        } => {
+            p[0] = color[0] as f32 / 255.0;
+            p[1] = color[1] as f32 / 255.0;
+            p[2] = color[2] as f32 / 255.0;
+            p[3] = *density;
+            p[4] = if *luminosity { 1.0 } else { 0.0 };
+            15
+        }
+        A::ChannelMixer {
+            red,
+            green,
+            blue,
+            monochrome,
+        } => {
+            p[..3].copy_from_slice(red);
+            p[3] = if *monochrome { 1.0 } else { 0.0 };
+            p[4..7].copy_from_slice(green);
+            p[8..11].copy_from_slice(blue);
+            16
+        }
     };
     (kind, p, lut)
 }
@@ -5309,7 +5367,7 @@ struct VsOut {
                         }
                     }
                 } else if let Some((pid, adj)) = &self.preview_adj {
-                    // Live Ctrl+L/M preview: the layer shader applies kinds 1..=13
+                    // Live Ctrl+L/M preview: the layer shader applies kinds 1..=16
                     // to this raster layer's own pixels (mutually exclusive with
                     // Develop, which the app cancels before starting one).
                     if *pid == layer.id {
@@ -6563,5 +6621,293 @@ mod backdrop_tests {
                 }
             }
         }
+    }
+}
+
+/// The adjustment preview shader against the CPU bake, on a palette of
+/// colours, for every adjustment (14/11: Black & White, Photo Filter and
+/// Channel Mixer had no shader kind, Vibrance turned greys red, and the
+/// shader's luminance weights were not the bake's). Runs the shader's own
+/// `apply_adjustment` in a compute pass on a headless device; skipped
+/// without an adapter. Run with `--test-threads=1` beside other GPU tests.
+#[cfg(test)]
+mod adjustment_parity_tests {
+    use iai_doc::layer::{AdjustmentType as A, LevelsParams, identity_curve};
+
+    fn shader_source() -> String {
+        let s = super::ADJUSTMENT_SHADER;
+        let cut = |from: &str, to: &str| -> String {
+            let a = s.find(from).expect("start");
+            let b = a + s[a..].find(to).expect("end");
+            s[a..b].to_string()
+        };
+        let uniforms = {
+            let a = s.find("struct CompositorUniforms {").expect("struct");
+            let b = a + s[a..].find("};").expect("struct end") + 2;
+            s[a..b].to_string()
+        };
+        format!(
+            "{uniforms}\n@group(0) @binding(0) var<uniform> u: CompositorUniforms;\n\
+             @group(0) @binding(1) var<storage, read> inp: array<vec4<f32>>;\n\
+             @group(0) @binding(2) var<storage, read_write> outp: array<vec4<f32>>;\n\
+             {}\n{}\n\
+             @compute @workgroup_size(64)\n\
+             fn main(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
+                 if (id.x >= arrayLength(&inp)) {{ return; }}\n\
+                 outp[id.x] = vec4<f32>(apply_adjustment(inp[id.x].xyz), 1.0);\n\
+             }}\n",
+            cut("// Rec. 709 weights", "// The mask tile lives"),
+            cut("fn apply_adjustment", "@fragment"),
+        )
+    }
+
+    fn palette() -> Vec<[u8; 3]> {
+        let steps = [0u8, 30, 77, 128, 180, 225, 255];
+        let mut out = Vec::new();
+        for r in steps {
+            for g in steps {
+                for b in steps {
+                    out.push([r, g, b]);
+                }
+            }
+        }
+        out
+    }
+
+    fn adjustments() -> Vec<A> {
+        let mut levels = [LevelsParams::default(); 4];
+        levels[0].in_black = 20;
+        levels[0].gamma = 1.3;
+        let mut per_channel = levels;
+        per_channel[2].out_white = 210;
+        let mut curves: [Vec<(f32, f32)>; 4] = std::array::from_fn(|_| identity_curve());
+        curves[0] = vec![(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)];
+        vec![
+            A::BrightnessContrast {
+                brightness: 20.0,
+                contrast: 15.0,
+            },
+            A::HueSaturation {
+                hue: 40.0,
+                saturation: 0.0,
+                lightness: 10.0,
+                colorize: None,
+                ranges: [[0.0; 3]; 6],
+            },
+            A::HueSaturation {
+                hue: 0.0,
+                saturation: -40.0,
+                lightness: 0.0,
+                colorize: None,
+                ranges: [[0.0; 3]; 6],
+            },
+            A::Levels { channels: levels },
+            A::Levels {
+                channels: per_channel,
+            },
+            A::Curves { channels: curves },
+            A::ColorBalance {
+                shadows: [10.0, 0.0, -10.0],
+                midtones: [0.0, 15.0, 0.0],
+                highlights: [-5.0, 0.0, 5.0],
+                preserve_luminosity: false,
+            },
+            A::ColorBalance {
+                shadows: [10.0, 0.0, -10.0],
+                midtones: [0.0, 15.0, 0.0],
+                highlights: [-5.0, 0.0, 5.0],
+                preserve_luminosity: true,
+            },
+            A::Vibrance {
+                vibrance: 40.0,
+                saturation: 10.0,
+            },
+            A::Exposure {
+                exposure: 0.5,
+                offset: 0.01,
+                gamma: 1.1,
+            },
+            A::Invert,
+            A::Threshold { value: 128 },
+            A::Posterize { levels: 4 },
+            A::Desaturate,
+            A::GradientMap {
+                stops: vec![(0.0, [20, 0, 80]), (1.0, [255, 220, 120])],
+                reverse: false,
+                dither: false,
+            },
+            A::BlackAndWhite {
+                r: 40.0,
+                y: 60.0,
+                g: 40.0,
+                c: 60.0,
+                b: 20.0,
+                m: 80.0,
+            },
+            A::PhotoFilter {
+                color: [236, 138, 0],
+                density: 0.25,
+                luminosity: false,
+            },
+            A::PhotoFilter {
+                color: [236, 138, 0],
+                density: 0.25,
+                luminosity: true,
+            },
+            A::ChannelMixer {
+                red: [0.8, 0.2, 0.0],
+                green: [0.1, 0.9, 0.0],
+                blue: [0.0, 0.3, 0.7],
+                monochrome: false,
+            },
+            A::ChannelMixer {
+                red: [0.4, 0.4, 0.2],
+                green: [0.0, 1.0, 0.0],
+                blue: [0.0, 0.0, 1.0],
+                monochrome: true,
+            },
+        ]
+    }
+
+    /// Every adjustment has a shader kind (none falls back to "no change").
+    #[test]
+    fn every_adjustment_has_a_shader_kind() {
+        for adj in adjustments() {
+            let (kind, _, _) = super::adjustment_to_gpu(&adj);
+            assert!((1..=16).contains(&kind), "{} has no kind", adj.name());
+        }
+    }
+
+    /// Vibrance leaves a grey grey (14/11: it turned red).
+    #[test]
+    fn vibrance_keeps_grey_grey() {
+        let adj = A::Vibrance {
+            vibrance: 80.0,
+            saturation: 30.0,
+        };
+        for v in [10u8, 128, 240] {
+            let (r, g, b, _) = adj.apply_pixel(v, v, v, 255);
+            assert_eq!((r, g, b), (v, v, v));
+        }
+    }
+
+    #[test]
+    fn the_preview_shader_matches_the_bake() {
+        use wgpu::util::DeviceExt;
+        let Some((device, queue)) = crate::vector::renderer::headless_device() else {
+            eprintln!("no adapter: skipped");
+            return;
+        };
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("adj_parity"),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("adj_parity"),
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let colours = palette();
+        let input: Vec<[f32; 4]> = colours
+            .iter()
+            .map(|c| {
+                [
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                    1.0,
+                ]
+            })
+            .collect();
+        let size = (input.len() * 16) as u64;
+        let inp = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&input),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let mut failures = Vec::new();
+        for adj in adjustments() {
+            let (kind, p, lut) = super::adjustment_to_gpu(&adj);
+            let mut data: super::CompositorUniformsData = bytemuck::Zeroable::zeroed();
+            data.adj_kind = kind;
+            data.adj_p = p;
+            data.adj_lut = lut;
+            let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::bytes_of(&data),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let out = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: inp.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: out.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups((input.len() as u32).div_ceil(64), 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(&out, 0, &readback, 0, size);
+            queue.submit([encoder.finish()]);
+            let slice = readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::wait_indefinitely()).ok();
+            let gpu: Vec<[f32; 4]> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
+            readback.unmap();
+            let mut worst = (0i32, [0u8; 3], [0u8; 3], [0u8; 3]);
+            for (c, g) in colours.iter().zip(&gpu) {
+                let (r, gg, b, _) = adj.apply_pixel(c[0], c[1], c[2], 255);
+                let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                let got = [q(g[0]), q(g[1]), q(g[2])];
+                let want = [r, gg, b];
+                let d = (0..3)
+                    .map(|i| (got[i] as i32 - want[i] as i32).abs())
+                    .max()
+                    .unwrap_or(0);
+                if d > worst.0 {
+                    worst = (d, *c, want, got);
+                }
+            }
+            if worst.0 > 2 {
+                failures.push(format!(
+                    "{} (kind {kind}): {:?} -> bake {:?}, shader {:?}",
+                    adj.name(),
+                    worst.1,
+                    worst.2,
+                    worst.3
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

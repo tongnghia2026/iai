@@ -10,7 +10,6 @@ pub enum FillMode {
 
 pub struct FillTool {
     pub tolerance: u8,
-    pub anti_alias: bool,
     pub contiguous: bool,
     pub sample_merged: bool,
     pub fill_mode: FillMode,
@@ -28,7 +27,6 @@ impl FillTool {
     pub fn new() -> Self {
         Self {
             tolerance: 32,
-            anti_alias: true,
             contiguous: true,
             sample_merged: false,
             fill_mode: FillMode::Foreground,
@@ -225,7 +223,11 @@ impl FillTool {
             if layer_idx >= canvas.layer_stack.layers.len() {
                 continue;
             }
-            if canvas.layer_stack.layers[layer_idx].locked {
+            // The Background's lock keeps it from moving, not from paint, as
+            // for every other tool (14/11: Fill refused it after Merge
+            // Visible, or after a crop added one).
+            let l = &canvas.layer_stack.layers[layer_idx];
+            if l.locked && !l.is_background {
                 continue;
             }
 
@@ -436,7 +438,9 @@ impl Tool for FillTool {
                 .layers
                 .iter()
                 .enumerate()
-                .filter(|(_, l)| l.selected && !l.locked && l.get_paint_tiles().is_some())
+                .filter(|(_, l)| {
+                    l.selected && (!l.locked || l.is_background) && l.get_paint_tiles().is_some()
+                })
                 .map(|(i, _)| i)
                 .collect();
             if selected.len() > 1 {
@@ -501,6 +505,23 @@ impl Tool for FillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A locked Background (after Merge Visible, or one a crop added) takes
+    /// the fill (14/11).
+    #[test]
+    fn fill_paints_a_locked_background() {
+        let mut canvas = Canvas::new(16, 16);
+        let idx = canvas.layer_stack.active_idx;
+        let l = &mut canvas.layer_stack.layers[idx];
+        l.is_background = true;
+        l.locked = true;
+        let fill = FillTool::new();
+        fill.flood_fill(&mut canvas, 8, 8, [10, 20, 30, 255], &[idx]);
+        assert_eq!(
+            canvas.layer_stack.layers[idx].tiles.get_pixel(8, 8),
+            (10, 20, 30, 255)
+        );
+    }
 
     #[test]
     fn channel_gate_fill_blends_luma_and_keeps_alpha() {

@@ -14,7 +14,7 @@ impl App {
         let canvas = &self.docs.active().canvas;
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
-        (layer.visible
+        (canvas.layer_stack.is_effectively_visible(idx)
             && !layer.locked
             && !layer.is_background
             && layer.paint_target == crate::core::layer::PaintTarget::Pixels

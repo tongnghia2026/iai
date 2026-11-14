@@ -923,7 +923,7 @@ fn smudge_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     if ui
         .add(
             egui::DragValue::new(&mut size)
-                .range(1.0..=5000.0)
+                .range(1.0..=crate::tools::smudge::MAX_SIZE)
                 .suffix("px")
                 .speed(0.5),
         )
@@ -1486,12 +1486,6 @@ fn fill_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     }
 
     ui.separator();
-    let mut anti_alias = data.tool.fill_anti_alias;
-    if ui.checkbox(&mut anti_alias, "Anti-alias").changed() {
-        actions.tool.set_fill_anti_alias = Some(anti_alias);
-    }
-
-    ui.separator();
     let mut all_layers = data.tool.fill_all_layers;
     if ui.checkbox(&mut all_layers, "All Layers").changed() {
         actions.tool.set_fill_all_layers = Some(all_layers);
@@ -1592,10 +1586,6 @@ fn gradient_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         let mut reverse = data.tool.gradient_reverse;
         if ui.checkbox(&mut reverse, "Reverse").changed() {
             actions.tool.set_gradient_reverse = Some(reverse);
-        }
-        let mut dither = data.tool.gradient_dither;
-        if ui.checkbox(&mut dither, "Dither").changed() {
-            actions.tool.set_gradient_dither = Some(dither);
         }
     }
 }

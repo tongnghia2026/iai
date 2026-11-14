@@ -695,7 +695,7 @@ impl App {
         }
 
         if let Some(s) = actions.tool.set_smudge_size.take() {
-            self.edit.tools.smudge_mut().size = s.clamp(1.0, 5000.0);
+            self.edit.tools.smudge_mut().size = s.clamp(1.0, crate::tools::smudge::MAX_SIZE);
             self.win.last_cursor_radius = 0;
             self.sync_cursor(event_loop);
         }
@@ -711,9 +711,8 @@ impl App {
         if let Some(i) = actions.tool.set_smudge_preset.take()
             && let Some(p) = crate::tools::brush::BRUSH_PRESETS.get(i)
         {
-            let t = self.edit.tools.smudge_mut();
-            t.hardness = p.hardness;
-            t.spacing = p.spacing;
+            // Smudge sets its own step along the stroke: a preset is a hardness.
+            self.edit.tools.smudge_mut().hardness = p.hardness;
         }
         if let Some(s) = actions.tool.set_dodge_size.take() {
             self.edit.tools.dodge_burn_mut().size = s.clamp(1.0, 5000.0);
@@ -943,9 +942,6 @@ impl App {
         if let Some(c) = actions.tool.set_fill_contiguous.take() {
             self.edit.tools.fill_mut().contiguous = c;
         }
-        if let Some(a) = actions.tool.set_fill_anti_alias.take() {
-            self.edit.tools.fill_mut().anti_alias = a;
-        }
         if let Some(m) = actions.tool.set_fill_all_layers.take() {
             self.edit.tools.fill_mut().sample_merged = m;
         }
@@ -974,9 +970,6 @@ impl App {
             } else {
                 self.edit.tools.gradient_mut().reverse = r;
             }
-        }
-        if let Some(d) = actions.tool.set_gradient_dither.take() {
-            self.edit.tools.gradient_mut().dither = d;
         }
         if let Some(stops) = actions.tool.set_gradient_stops.take()
             && (self.active_gradient_mode() != 2 || !self.vector_gradient_set_stops(stops.clone()))

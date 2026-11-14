@@ -613,11 +613,11 @@ impl Command for CanvasSize {
                 &format!("a size that keeps both sides at most {MAX_DIMENSION} pixels"),
             ));
         }
-        let done = if p.anchor == Anchor::TopLeft && fill.is_none() {
-            canvas.resize(p.width_px, p.height_px)
-        } else {
-            // The page cut out of (or reaching past) the old one where the
-            // picture stays.
+        // The page cut out of (or reaching past) the old one where the
+        // picture stays. Every anchor goes this way: the top-left one took a
+        // shortcut that cut each layer to its own corner, and a layer moved
+        // left or up lost what showed of it (14/11).
+        let done = {
             let (column, row) = p.anchor.fractions();
             let at = |new: u32, old: u32, share: f64| {
                 ((f64::from(old) - f64::from(new)) * share).ceil() as i32

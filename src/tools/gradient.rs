@@ -151,7 +151,6 @@ pub struct GradientTool {
     pub blend_mode: GradientBlendMode,
     pub opacity: f32,
     pub reverse: bool,
-    pub dither: bool,
     pub gradient: Gradient,
     pub start_x: f32,
     pub start_y: f32,
@@ -174,7 +173,6 @@ impl GradientTool {
             blend_mode: GradientBlendMode::Normal,
             opacity: 1.0,
             reverse: false,
-            dither: false,
             gradient: Gradient::foreground_to_background([0, 0, 0, 255], [255, 255, 255, 255]),
             start_x: 0.0,
             start_y: 0.0,
@@ -541,7 +539,9 @@ impl GradientTool {
         };
         layer.paint_target == PaintTarget::Pixels
             && matches!(layer.layer_type, LayerType::Vector(_))
-            && layer.visible
+            && canvas
+                .layer_stack
+                .is_effectively_visible(canvas.layer_stack.active_idx)
             && !layer.locked
             && !layer.is_background
     }

@@ -59,7 +59,7 @@ impl Exporter for PngExporter {
         if opts.embed_metadata {
             let dpi = canvas.metadata.resolution_ppi;
             if dpi > 0.0 {
-                let ppm = (dpi / 0.0254) as u32;
+                let ppm = (dpi / 0.0254).round() as u32;
                 info.pixel_dims = Some(png::PixelDimensions {
                     xppu: ppm,
                     yppu: ppm,

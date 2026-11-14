@@ -441,6 +441,10 @@ fn build_canvas_from_meta<R: Read + Seek>(
         layer.opacity = opacity;
         layer.visible = visible;
         layer.locked = locked;
+        // Keys added 14/11; an older file reads as before (unlocked alpha,
+        // a linked mask), and an older build skips them.
+        layer.lock_alpha = layer_info["lock_alpha"].as_bool().unwrap_or(false);
+        layer.mask_linked = layer_info["mask_linked"].as_bool().unwrap_or(true);
         layer.blend_mode = blend_mode;
         layer.offset = (offset_x, offset_y);
         layer.parent_id = layer_info["parent"].as_u64().map(|p| p as u32);
@@ -1136,6 +1140,8 @@ fn canvas_meta_json(canvas: &Canvas) -> serde_json::Value {
             "opacity": layer.opacity,
             "visible": layer.visible,
             "locked": layer.locked,
+            "lock_alpha": layer.lock_alpha,
+            "mask_linked": layer.mask_linked,
             "width": layer.width,
             "height": layer.height,
             "blend_mode": blend_mode_to_str(layer.blend_mode),
@@ -2672,6 +2678,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// "Lock transparent pixels" and an unlinked mask come back from a
+    /// saved file (14/11: both were lost).
+    #[test]
+    fn lock_alpha_and_mask_link_round_trip() {
+        let dir = tmp_dir("lock-alpha");
+        let path = dir.join("doc.iai");
+        let mut canvas = solid([10, 20, 30, 255], 8, 8);
+        let idx = canvas.layer_stack.active_idx;
+        let layer = &mut canvas.layer_stack.layers[idx];
+        layer.lock_alpha = true;
+        layer.add_mask(true);
+        layer.mask_linked = false;
+        IaiExporter
+            .export(&canvas, &path, &ExportOptions::default())
+            .expect("export");
+        let IaiLoad::Canvas(loaded) = load(&path).expect("load") else {
+            panic!("expected a plain canvas");
+        };
+        let layer = &loaded.layer_stack.layers[idx];
+        assert!(layer.lock_alpha);
+        assert!(!layer.mask_linked);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

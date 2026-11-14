@@ -517,9 +517,12 @@ impl AdjustmentType {
                 vibrance,
                 saturation,
             } => {
+                // Saturation grows in proportion to what is there, so a grey
+                // stays grey (an added amount turned it red, 14/11). The
+                // shaders' kind 6 mirrors this.
                 let (h, s, l) = rgb_to_hsl(rf, gf, bf);
-                let sat_boost = vibrance / 100.0 * (1.0 - s);
-                let ns = (s + sat_boost + saturation / 100.0).clamp(0.0, 1.0);
+                let k = 1.0 + vibrance / 100.0 * (1.0 - s) + saturation / 100.0;
+                let ns = (s * k).clamp(0.0, 1.0);
                 let (r2, g2, b2) = hsl_to_rgb(h, ns, l);
                 (r2, g2, b2)
             }

@@ -98,6 +98,9 @@ impl Selection {
     }
 
     pub fn invert(&mut self) {
+        // A moved selection is inverted where it shows, not where its mask
+        // was drawn (14/11: the strip it left uncovered came out wrong).
+        self.commit_offset();
         self.mask.par_iter_mut().for_each(|p| *p = 255 - *p);
         self.active = self.mask.par_iter().any(|&p| p > 0);
         self.bbox_dirty = true;
@@ -557,6 +560,46 @@ pub fn color_range_mask(
 mod tests {
     use super::*;
 
+    /// A selection moved then inverted is inverted where it shows (14/11).
+    #[test]
+    fn a_moved_selection_inverts_where_it_shows() {
+        let mut sel = Selection::new(20, 10);
+        sel.select_rect(0, 0, 5, 10);
+        sel.offset = (10, 0);
+        sel.invert();
+        assert!(!sel.is_selected(12, 5), "the moved box is now out");
+        assert!(sel.is_selected(2, 5), "where it was drawn is now in");
+        assert!(sel.is_selected(17, 5));
+    }
+
+    /// Adding a soft edge keeps it soft; subtracting one leaves a soft rest.
+    #[test]
+    fn soft_edges_add_and_subtract_softly() {
+        let mut sel = Selection::new(4, 1);
+        sel.apply_with_mode(vec![0, 100, 255, 0], SelectionMode::New);
+        sel.apply_with_mode(vec![128, 50, 0, 0], SelectionMode::Add);
+        assert_eq!(sel.mask, vec![128, 100, 255, 0]);
+        sel.apply_with_mode(vec![0, 0, 128, 0], SelectionMode::Subtract);
+        assert_eq!(sel.mask, vec![128, 100, 127, 0]);
+    }
+
+    /// A lasso round a 4×4 square picks those 16 pixels, not a column more.
+    #[test]
+    fn a_lasso_square_picks_its_own_pixels() {
+        let sel = Selection::new(10, 10);
+        let mask = sel.build_polygon_mask(&[(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)]);
+        let picked: Vec<(usize, usize)> = (0..100)
+            .filter(|i| mask[*i] > 0)
+            .map(|i| (i % 10, i / 10))
+            .collect();
+        assert_eq!(picked.len(), 16, "{picked:?}");
+        assert!(
+            picked
+                .iter()
+                .all(|&(x, y)| (2..6).contains(&x) && (2..6).contains(&y))
+        );
+    }
+
     #[test]
     fn a_snapshot_tells_an_unchanged_selection_from_a_changed_one() {
         let mut sel = Selection::new(40, 30);
@@ -789,21 +832,18 @@ impl Selection {
                 self.mask
                     .par_iter_mut()
                     .zip(new_mask.par_iter())
-                    .for_each(|(a, b)| {
-                        if *b > 0 {
-                            *a = 255;
-                        }
-                    });
+                    // Soft edges stay soft: the larger of the two
+                    // (14/11: an anti-aliased ellipse added went hard).
+                    .for_each(|(a, b)| *a = (*a).max(*b));
             }
             SelectionMode::Subtract => {
                 self.commit_offset();
                 self.mask
                     .par_iter_mut()
                     .zip(new_mask.par_iter())
+                    // What is left of the old, as `combine_with_mask` does.
                     .for_each(|(a, b)| {
-                        if *b > 0 {
-                            *a = 0;
-                        }
+                        *a = ((*a as u16 * (255 - *b as u16) + 127) / 255) as u8;
                     });
             }
             SelectionMode::Intersect => {
@@ -912,7 +952,7 @@ impl Selection {
         let h = self.height as i32;
 
         for y in 0..h {
-            let mut xs: Vec<i32> = Vec::new();
+            let mut xs: Vec<f32> = Vec::new();
             let n = points.len();
             for i in 0..n {
                 let (x1, y1) = points[i];
@@ -920,17 +960,19 @@ impl Selection {
                 let yf = y as f32 + 0.5;
                 if (y1 < yf && y2 >= yf) || (y2 < yf && y1 >= yf) {
                     let t = (yf - y1) / (y2 - y1);
-                    let xi = (x1 + t * (x2 - x1)) as i32;
-                    xs.push(xi);
+                    xs.push(x1 + t * (x2 - x1));
                 }
             }
-            xs.sort_unstable();
+            xs.sort_unstable_by(f32::total_cmp);
 
+            // A pixel is in when its centre is: x + 0.5 in [xa, xb). The old
+            // fill ran through the pixel the right edge falls in, one too
+            // many (14/11).
             let mut i = 0;
             while i + 1 < xs.len() {
-                let xa = xs[i].max(0);
-                let xb = xs[i + 1].min(w - 1);
-                for x in xa..=xb {
+                let xa = ((xs[i] - 0.5).ceil() as i32).max(0);
+                let xb = ((xs[i + 1] - 0.5).ceil() as i32).min(w);
+                for x in xa..xb {
                     mask[(y * w + x) as usize] = 255;
                 }
                 i += 2;
@@ -991,6 +1033,7 @@ impl Selection {
     /// Expand selection by `pixels` using BFS — O(N) regardless of radius.
     /// Replaces N-pass dilation (was O(N × radius), freezes for large radius).
     pub fn grow(&mut self, pixels: u32) {
+        self.commit_offset();
         if pixels == 0 || !self.active {
             return;
         }
@@ -1048,6 +1091,7 @@ impl Selection {
 
     /// Contract selection by `pixels` using BFS — O(N) regardless of radius.
     pub fn shrink(&mut self, pixels: u32) {
+        self.commit_offset();
         if pixels == 0 || !self.active {
             return;
         }
@@ -1121,6 +1165,7 @@ impl Selection {
     /// Soften selection edges with 3 passes of box blur (approximates gaussian).
     /// `radius` is the blur kernel half-size in pixels.
     pub fn feather(&mut self, radius: f32) {
+        self.commit_offset();
         if radius < 0.5 || !self.active {
             return;
         }
@@ -1139,6 +1184,7 @@ impl Selection {
     /// mask then re-threshold at 50% — removes small bumps and fills small notches
     /// symmetrically, so jagged edges become rounded.
     pub fn smooth(&mut self, radius: f32) {
+        self.commit_offset();
         if radius < 0.5 || !self.active {
             return;
         }
@@ -1160,6 +1206,7 @@ impl Selection {
     /// the mask grown by `width` px minus the mask shrunk by `width` px (≈ a `2·width`
     /// px band straddling the original edge).
     pub fn border(&mut self, width: u32) {
+        self.commit_offset();
         if width == 0 || !self.active {
             return;
         }

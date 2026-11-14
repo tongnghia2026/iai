@@ -193,6 +193,10 @@ pub struct PortraitSettings {
     /// [`skin_tone`]).
     pub brighten: f32,
     pub blemish: f32,
+    /// "Giữ nốt ruồi": "Xóa mụn" leaves moles as shot (an ID photo must keep
+    /// them). Layers saved before it existed read false, as they were made.
+    #[serde(default)]
+    pub keep_moles: bool,
     pub dark_circles: f32,
     pub eye_white: f32,
     pub iris: f32,
@@ -284,6 +288,7 @@ impl Default for PortraitSettings {
             shine: 20.0,
             brighten: 0.0,
             blemish: 60.0,
+            keep_moles: true,
             dark_circles: 30.0,
             eye_white: 25.0,
             iris: 15.0,
@@ -370,6 +375,7 @@ impl PortraitSettings {
         shine: 0.0,
         brighten: 0.0,
         blemish: 0.0,
+        keep_moles: false,
         dark_circles: 0.0,
         eye_white: 0.0,
         iris: 0.0,

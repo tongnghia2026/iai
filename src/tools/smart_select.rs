@@ -141,11 +141,14 @@ impl Tool for SmartSelectTool {
         self.started_new = self.drag_mode == SelectionMode::New;
         self.stroke_bounds = None;
 
-        self.snapshot_before = canvas.selection.mask.clone();
         self.undo_cmd = Some(SelectionCommand::capture_before(
             "Smart Select",
             &canvas.selection,
         ));
+        // A moved selection is added to / cut where it shows (14/11: its
+        // mask was read at the old place).
+        canvas.selection.commit_offset();
+        self.snapshot_before = canvas.selection.mask.clone();
 
         if self.drag_mode == SelectionMode::New {
             canvas.selection.deselect();

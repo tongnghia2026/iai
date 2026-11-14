@@ -215,8 +215,9 @@ impl<'a> ToolCtx<'a> {
     ) -> Option<SnapHit> {
         let threshold = threshold_px / self.zoom.max(1e-4);
         let mut paths = Vec::new();
-        for layer in &self.document.canvas.layer_stack.layers {
-            if !layer.visible || Some(layer.id) == exclude {
+        let stack = &self.document.canvas.layer_stack;
+        for (idx, layer) in stack.layers.iter().enumerate() {
+            if !stack.is_effectively_visible(idx) || Some(layer.id) == exclude {
                 continue;
             }
             match &layer.layer_type {

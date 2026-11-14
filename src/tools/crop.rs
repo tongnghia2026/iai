@@ -606,6 +606,17 @@ impl CropTool {
         }
     }
 
+    /// Put the box right way round (x0 < x1, y0 < y1). Swapping both
+    /// corners keeps the same rectangle, its centre and its rotation.
+    fn normalize_box(&mut self) {
+        if self.crop_x0 > self.crop_x1 {
+            std::mem::swap(&mut self.crop_x0, &mut self.crop_x1);
+        }
+        if self.crop_y0 > self.crop_y1 {
+            std::mem::swap(&mut self.crop_y0, &mut self.crop_y1);
+        }
+    }
+
     pub fn cancel(&mut self) {
         self.is_dragging = false;
         self.crop_x0 = 0.0;
@@ -1049,42 +1060,55 @@ impl Tool for CropTool {
                     let (center_x, center_y) = self.drag_start_center();
                     self.set_box_from_center(center_x, center_y, new_w, new_h);
                 } else {
+                    // The box grows the way the pointer went: dragged up or
+                    // left past its anchor it grew down-right, away from the
+                    // pointer (14/11).
+                    let sx = if self.crop_x1 >= self.crop_x0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    let sy = if self.crop_y1 >= self.crop_y0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     match self.active_handle {
                         CropHandle::Top | CropHandle::Bottom => {
                             let cx = (self.crop_x0 + self.crop_x1) * 0.5;
-                            self.crop_x0 = cx - new_w * 0.5;
-                            self.crop_x1 = self.crop_x0 + new_w;
+                            self.crop_x0 = cx - sx * new_w * 0.5;
+                            self.crop_x1 = self.crop_x0 + sx * new_w;
                             if self.active_handle == CropHandle::Top {
-                                self.crop_y0 = self.crop_y1 - new_h;
+                                self.crop_y0 = self.crop_y1 - sy * new_h;
                             } else {
-                                self.crop_y1 = self.crop_y0 + new_h;
+                                self.crop_y1 = self.crop_y0 + sy * new_h;
                             }
                         }
                         CropHandle::Left | CropHandle::Right => {
                             let cy = (self.crop_y0 + self.crop_y1) * 0.5;
-                            self.crop_y0 = cy - new_h * 0.5;
-                            self.crop_y1 = self.crop_y0 + new_h;
+                            self.crop_y0 = cy - sy * new_h * 0.5;
+                            self.crop_y1 = self.crop_y0 + sy * new_h;
                             if self.active_handle == CropHandle::Left {
-                                self.crop_x0 = self.crop_x1 - new_w;
+                                self.crop_x0 = self.crop_x1 - sx * new_w;
                             } else {
-                                self.crop_x1 = self.crop_x0 + new_w;
+                                self.crop_x1 = self.crop_x0 + sx * new_w;
                             }
                         }
                         CropHandle::TopLeft => {
-                            self.crop_x0 = self.crop_x1 - new_w;
-                            self.crop_y0 = self.crop_y1 - new_h;
+                            self.crop_x0 = self.crop_x1 - sx * new_w;
+                            self.crop_y0 = self.crop_y1 - sy * new_h;
                         }
                         CropHandle::TopRight => {
-                            self.crop_x1 = self.crop_x0 + new_w;
-                            self.crop_y0 = self.crop_y1 - new_h;
+                            self.crop_x1 = self.crop_x0 + sx * new_w;
+                            self.crop_y0 = self.crop_y1 - sy * new_h;
                         }
                         CropHandle::BottomLeft => {
-                            self.crop_x0 = self.crop_x1 - new_w;
-                            self.crop_y1 = self.crop_y0 + new_h;
+                            self.crop_x0 = self.crop_x1 - sx * new_w;
+                            self.crop_y1 = self.crop_y0 + sy * new_h;
                         }
                         CropHandle::BottomRight => {
-                            self.crop_x1 = self.crop_x0 + new_w;
-                            self.crop_y1 = self.crop_y0 + new_h;
+                            self.crop_x1 = self.crop_x0 + sx * new_w;
+                            self.crop_y1 = self.crop_y0 + sy * new_h;
                         }
                         _ => {}
                     }
@@ -1097,6 +1121,10 @@ impl Tool for CropTool {
 
     fn on_release(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         self.is_dragging = false;
+        // A box drawn or dragged inside out is put right way round: its
+        // handles are found from x0 < x1, y0 < y1, and a corner pressed on an
+        // inside-out box collapsed it to a small square (14/11).
+        self.normalize_box();
 
         if !self.press_had_selection {
             let dx = event.canvas_x - self.drag_start_x;
@@ -1142,6 +1170,55 @@ mod tests {
         let mut event = PointerEvent::new(x, y);
         event.alt = true;
         event
+    }
+
+    /// A box drawn from bottom-right to top-left, then pulled by a corner,
+    /// keeps its size (14/11: it collapsed to a small square).
+    #[test]
+    fn a_box_drawn_backwards_then_pulled_by_a_corner_keeps_its_size() {
+        let mut document = Document::new(DocumentId(1), 400, 300);
+        let mut crop = CropTool::new();
+        let start = PointerEvent::new(300.0, 250.0);
+        let end = PointerEvent::new(100.0, 50.0);
+        crop.on_press(start.clone(), &mut test_ctx(&mut document));
+        crop.on_drag(end.clone(), &start, &mut test_ctx(&mut document));
+        crop.on_release(end, &mut test_ctx(&mut document));
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (100.0, 50.0, 300.0, 250.0)
+        );
+        // Pull the bottom-right corner out by 20.
+        let press = PointerEvent::new(300.0, 250.0);
+        let pull = PointerEvent::new(320.0, 270.0);
+        crop.on_press(press.clone(), &mut test_ctx(&mut document));
+        assert_eq!(crop.active_handle, CropHandle::BottomRight);
+        crop.on_drag(pull.clone(), &press, &mut test_ctx(&mut document));
+        crop.on_release(pull, &mut test_ctx(&mut document));
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (100.0, 50.0, 320.0, 270.0)
+        );
+    }
+
+    /// With a fixed ratio, a box drawn up-left grows toward the pointer.
+    #[test]
+    fn a_ratio_box_drawn_up_left_grows_toward_the_pointer() {
+        let mut document = Document::new(DocumentId(1), 400, 300);
+        let mut crop = CropTool::new();
+        crop.mode = CropMode::Ratio;
+        crop.ratio_w = 1.0;
+        crop.ratio_h = 1.0;
+        let start = PointerEvent::new(200.0, 200.0);
+        let end = PointerEvent::new(120.0, 120.0);
+        crop.on_press(start.clone(), &mut test_ctx(&mut document));
+        crop.on_drag(end.clone(), &start, &mut test_ctx(&mut document));
+        assert!(
+            crop.crop_x1 < 200.0 && crop.crop_y1 < 200.0,
+            "it grew up-left"
+        );
+        crop.on_release(end, &mut test_ctx(&mut document));
+        assert_eq!((crop.crop_x1, crop.crop_y1), (200.0, 200.0));
+        assert!((crop.crop_x0 - 120.0).abs() < 0.01 && (crop.crop_y0 - 120.0).abs() < 0.01);
     }
 
     #[test]

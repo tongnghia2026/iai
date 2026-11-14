@@ -234,7 +234,7 @@ impl App {
         let idx = canvas.layer_stack.active_idx;
         let layer = canvas.layer_stack.layers.get(idx)?;
         if matches!(layer.layer_type, LayerType::Vector(_))
-            && layer.visible
+            && canvas.layer_stack.is_effectively_visible(idx)
             && !layer.locked
             && !layer.is_background
         {
@@ -270,9 +270,9 @@ impl App {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| {
+            .filter(|(i, l)| {
                 l.selected
-                    && l.visible
+                    && canvas.layer_stack.is_effectively_visible(*i)
                     && !l.locked
                     && !l.is_background
                     && matches!(l.layer_type, LayerType::Vector(VectorGeometry::Path(_)))
@@ -503,7 +503,7 @@ impl App {
         let canvas = &self.docs.active().canvas;
         let tol = (2.0 / self.edit.view.zoom.max(1e-4)).clamp(0.25, 8.0);
         for (idx, layer) in canvas.layer_stack.layers.iter().enumerate().rev() {
-            if !layer.visible {
+            if !canvas.layer_stack.is_effectively_visible(idx) {
                 continue;
             }
             let primitive_object;
@@ -587,18 +587,26 @@ impl App {
     pub fn selected_vector_bbox_hit(&self, cx: f32, cy: f32) -> bool {
         let canvas = &self.docs.active().canvas;
         let (x, y) = (cx as i32, cy as i32);
-        canvas.layer_stack.layers.iter().any(|layer| {
-            layer.selected
-                && layer.visible
-                && !layer.locked
-                && !layer.is_background
-                && matches!(layer.layer_type, LayerType::Vector(_))
-                && {
-                    let lx = x - layer.offset.0;
-                    let ly = y - layer.offset.1;
-                    lx >= 0 && ly >= 0 && (lx as u32) < layer.width && (ly as u32) < layer.height
-                }
-        })
+        canvas
+            .layer_stack
+            .layers
+            .iter()
+            .enumerate()
+            .any(|(idx, layer)| {
+                layer.selected
+                    && canvas.layer_stack.is_effectively_visible(idx)
+                    && !layer.locked
+                    && !layer.is_background
+                    && matches!(layer.layer_type, LayerType::Vector(_))
+                    && {
+                        let lx = x - layer.offset.0;
+                        let ly = y - layer.offset.1;
+                        lx >= 0
+                            && ly >= 0
+                            && (lx as u32) < layer.width
+                            && (ly as u32) < layer.height
+                    }
+            })
     }
 
     /// Begin an on-canvas Path transform gesture. `(cx, cy)` is the press point in

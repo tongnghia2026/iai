@@ -749,7 +749,7 @@ impl App {
             {
                 self.docs.active_mut().canvas.selection.offset.1 -= 1;
                 self.docs.active_mut().canvas.selection.mark_bbox_dirty();
-                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_move(
+                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_nudge(
                     &self.docs.active().canvas.selection,
                     0,
                     -1,
@@ -766,7 +766,7 @@ impl App {
             {
                 self.docs.active_mut().canvas.selection.offset.1 += 1;
                 self.docs.active_mut().canvas.selection.mark_bbox_dirty();
-                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_move(
+                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_nudge(
                     &self.docs.active().canvas.selection,
                     0,
                     1,
@@ -783,7 +783,7 @@ impl App {
             {
                 self.docs.active_mut().canvas.selection.offset.0 -= 1;
                 self.docs.active_mut().canvas.selection.mark_bbox_dirty();
-                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_move(
+                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_nudge(
                     &self.docs.active().canvas.selection,
                     -1,
                     0,
@@ -800,7 +800,7 @@ impl App {
             {
                 self.docs.active_mut().canvas.selection.offset.0 += 1;
                 self.docs.active_mut().canvas.selection.mark_bbox_dirty();
-                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_move(
+                let cmd = crate::core::command::TranslateSelectionCommand::from_applied_nudge(
                     &self.docs.active().canvas.selection,
                     1,
                     0,
@@ -1019,7 +1019,7 @@ impl App {
             }
             ToolId::Smudge => {
                 let tool = tools.smudge_mut();
-                tool.size = stepped(tool.size, 5000.0);
+                tool.size = stepped(tool.size, crate::tools::smudge::MAX_SIZE);
             }
             ToolId::Dodge | ToolId::Burn => {
                 let tool = tools.dodge_burn_mut();

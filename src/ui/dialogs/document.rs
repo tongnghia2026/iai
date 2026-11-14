@@ -619,7 +619,9 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
             ui.label(
                 egui::RichText::new(format!(
                     "New size: {} × {} px  |  Memory: {:.1} MB",
-                    new_w_px as u32, new_h_px as u32, size_mb
+                    new_w_px.round() as u32,
+                    new_h_px.round() as u32,
+                    size_mb
                 ))
                 .color(egui::Color32::GRAY)
                 .size(11.0),
@@ -651,8 +653,10 @@ pub(crate) fn resize_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
         // What the page gains on its Background takes the background colour,
         // as Photoshop's Canvas Size does.
         let mut args = serde_json::json!({
-            "widthPx": (new_w_px as u32).max(1),
-            "heightPx": (new_h_px as u32).max(1),
+            // Rounded: 9 cm at 300 DPI is 1062.99 px, which cut short
+            // to 1062 (14/11).
+            "widthPx": (new_w_px.round() as u32).max(1),
+            "heightPx": (new_h_px.round() as u32).max(1),
             "anchor": ANCHORS[anchor.min(8)],
         });
         if data.layers.layer_is_background.iter().any(|&b| b) {
@@ -691,6 +695,9 @@ fn forget_canvas_size_fields(ctx: &egui::Context) {
         d.remove::<f32>(egui::Id::new("res_w"));
         d.remove::<f32>(egui::Id::new("res_h"));
         d.remove::<usize>(egui::Id::new("res_anchor"));
+        // The resolution is the open picture's: one kept from the last
+        // picture made 10 cm the wrong number of pixels (14/11).
+        d.remove::<f32>(egui::Id::new("res_dpi"));
     });
 }
 

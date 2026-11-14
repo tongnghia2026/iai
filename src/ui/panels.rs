@@ -3363,7 +3363,7 @@ fn layer_item(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions, idx: us
             );
             ui.close();
         }
-        if ui.button("Stamp Visible  (Ctrl+Shift+E)").clicked() {
+        if ui.button("Merge Visible  (Ctrl+Shift+E)").clicked() {
             actions.run("layer.merge", serde_json::json!({"what": "visible"}));
             ui.close();
         }

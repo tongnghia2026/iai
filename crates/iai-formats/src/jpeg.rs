@@ -68,7 +68,7 @@ impl Exporter for JpegExporter {
         if opts.embed_metadata {
             let dpi = canvas.metadata.resolution_ppi;
             if dpi > 0.0 {
-                patch_jfif_dpi(&mut buf, dpi as u16);
+                patch_jfif_dpi(&mut buf, dpi.round().clamp(1.0, 65535.0) as u16);
             }
         }
 

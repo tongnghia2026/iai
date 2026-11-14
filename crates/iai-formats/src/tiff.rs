@@ -188,7 +188,7 @@ impl Exporter for TiffExporter {
                 .new_image::<tiff::encoder::colortype::RGBA16>(canvas.width, canvas.height)
                 .map_err(|e| e.to_string())?;
             if dpi > 0.0 {
-                let (u, r) = res(tiff::tags::ResolutionUnit::Inch, dpi as u32);
+                let (u, r) = res(tiff::tags::ResolutionUnit::Inch, dpi.round() as u32);
                 img.resolution(u, r);
             }
             if !icc.is_empty() {
@@ -210,7 +210,7 @@ impl Exporter for TiffExporter {
             .new_image::<tiff::encoder::colortype::RGBA8>(canvas.width, canvas.height)
             .map_err(|e| e.to_string())?;
         if dpi > 0.0 {
-            let (u, r) = res(tiff::tags::ResolutionUnit::Inch, dpi as u32);
+            let (u, r) = res(tiff::tags::ResolutionUnit::Inch, dpi.round() as u32);
             img.resolution(u, r);
         }
         if !icc.is_empty() {
