@@ -1799,6 +1799,10 @@ fn filter_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.dialogs.open_filter_dialog = Some(FilterType::ReduceNoise { strength: 50.0 });
         ui.close();
     }
+    if ui.button("Skin Smoothing...").clicked() {
+        actions.dialogs.open_filter_dialog = Some(crate::ui::dialogs::SKIN_SMOOTHING_DEFAULT);
+        ui.close();
+    }
     if ui.button("Pixelate...").clicked() {
         actions.dialogs.open_filter_dialog = Some(FilterType::Pixelate { cell: 8.0 });
         ui.close();

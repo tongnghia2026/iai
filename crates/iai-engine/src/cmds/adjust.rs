@@ -698,6 +698,27 @@ pub enum Filter {
         #[schemars(range(min = 0.0, max = 100.0))]
         strength: f32,
     },
+    /// Soften skin-coloured areas, keeping edges: `amount` 0 to 100, `radius`
+    /// 1 to 50 pixels, `detail` (texture kept) 0 to 100.
+    SkinSmoothing {
+        #[serde(default = "fifty")]
+        #[schemars(range(min = 0.0, max = 100.0))]
+        amount: f32,
+        #[serde(default = "eight")]
+        #[schemars(range(min = 1.0, max = 50.0))]
+        radius: f32,
+        #[serde(default = "thirty")]
+        #[schemars(range(min = 0.0, max = 100.0))]
+        detail: f32,
+    },
+}
+
+fn eight() -> f32 {
+    8.0
+}
+
+fn thirty() -> f32 {
+    30.0
 }
 
 fn two() -> f32 {
@@ -734,6 +755,15 @@ impl Filter {
             Filter::ReduceNoise { strength } => FilterType::ReduceNoise {
                 strength: strength.clamp(0.0, 100.0),
             },
+            Filter::SkinSmoothing {
+                amount,
+                radius,
+                detail,
+            } => FilterType::SkinSmoothing {
+                amount: amount.clamp(0.0, 100.0),
+                radius: radius.clamp(1.0, 50.0),
+                detail: detail.clamp(0.0, 100.0),
+            },
         }
     }
 }
@@ -755,7 +785,7 @@ static FILTER: CommandMeta = CommandMeta {
     label_vi: "Bộ lọc",
     label_en: "Filter",
     doc: "Run a filter of the Filter menu on a layer: gaussian_blur, sharpen, high_pass, \
-          add_noise, pixelate, reduce_noise (`filter.kind`). Only inside the selection when \
+          add_noise, pixelate, reduce_noise, skin_smoothing (`filter.kind`). Only inside the selection when \
           there is one. One undo step.",
     effects: &[Effect::Edit],
     featured: true,

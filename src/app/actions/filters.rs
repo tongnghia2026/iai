@@ -69,6 +69,15 @@ fn scale_filter_for_proxy(filter: FilterType, scale: f32) -> FilterType {
         FilterType::Pixelate { cell } => FilterType::Pixelate {
             cell: (cell / scale).max(1.0),
         },
+        FilterType::SkinSmoothing {
+            amount,
+            radius,
+            detail,
+        } => FilterType::SkinSmoothing {
+            amount,
+            radius: (radius / scale).max(1.0),
+            detail,
+        },
         other => other,
     }
 }
@@ -80,6 +89,7 @@ fn filter_canvas_preview_prefers_cpu(filter: FilterType) -> bool {
             | FilterType::Sharpen { .. }
             | FilterType::HighPass { .. }
             | FilterType::ReduceNoise { .. }
+            | FilterType::SkinSmoothing { .. }
     )
 }
 impl App {

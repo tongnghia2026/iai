@@ -780,6 +780,12 @@ fn filter_to_gpu(filter: &iai_imaging::filters::FilterType) -> (u32, [f32; 12]) 
             p[0] = *strength;
             35
         }
+        // The app previews Skin Smoothing on the CPU; should it ever reach the
+        // shader, the Reduce Noise approximation is the closest look.
+        F::SkinSmoothing { amount, .. } => {
+            p[0] = *amount;
+            35
+        }
     };
     (kind, p)
 }

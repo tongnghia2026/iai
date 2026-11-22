@@ -2,12 +2,33 @@ use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilterType {
-    GaussianBlur { radius: f32 },
-    Sharpen { amount: f32, radius: f32 },
-    HighPass { radius: f32 },
-    AddNoise { amount: f32, monochromatic: bool },
-    Pixelate { cell: f32 },
-    ReduceNoise { strength: f32 },
+    GaussianBlur {
+        radius: f32,
+    },
+    Sharpen {
+        amount: f32,
+        radius: f32,
+    },
+    HighPass {
+        radius: f32,
+    },
+    AddNoise {
+        amount: f32,
+        monochromatic: bool,
+    },
+    Pixelate {
+        cell: f32,
+    },
+    ReduceNoise {
+        strength: f32,
+    },
+    /// Edge-aware smoothing of skin-coloured areas (see [`crate::skin_smoothing`]):
+    /// `amount` and `detail` 0 to 100, `radius` in pixels.
+    SkinSmoothing {
+        amount: f32,
+        radius: f32,
+        detail: f32,
+    },
 }
 
 impl FilterType {
@@ -19,6 +40,7 @@ impl FilterType {
             FilterType::AddNoise { .. } => "Add Noise",
             FilterType::Pixelate { .. } => "Pixelate",
             FilterType::ReduceNoise { .. } => "Reduce Noise",
+            FilterType::SkinSmoothing { .. } => "Skin Smoothing",
         }
     }
 
@@ -56,6 +78,17 @@ impl FilterType {
             FilterType::ReduceNoise { strength } => {
                 if *strength > 0.1 {
                     *pixels = reduce_noise(pixels, w, h, *strength);
+                }
+            }
+            FilterType::SkinSmoothing {
+                amount,
+                radius,
+                detail,
+            } => {
+                if *amount > 0.1 && *radius > 0.5 {
+                    *pixels = crate::skin_smoothing::skin_smoothing(
+                        pixels, w, h, *amount, *radius, *detail,
+                    );
                 }
             }
         }
@@ -97,6 +130,17 @@ impl FilterType {
             FilterType::ReduceNoise { strength } => {
                 if *strength > 0.1 {
                     *pixels = reduce_noise16(pixels, w, h, *strength);
+                }
+            }
+            FilterType::SkinSmoothing {
+                amount,
+                radius,
+                detail,
+            } => {
+                if *amount > 0.1 && *radius > 0.5 {
+                    *pixels = crate::skin_smoothing::skin_smoothing16(
+                        pixels, w, h, *amount, *radius, *detail,
+                    );
                 }
             }
         }
@@ -223,7 +267,13 @@ fn box_blur_v(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize) {
 /// entry points. `buf` holds premultiplied RGBA in [0,1] and is blurred in
 /// place (three box passes approximate a Gaussian). `tmp` is scratch of the
 /// same length.
-fn gaussian_blur_premul(buf: &mut [f32], tmp: &mut [f32], wi: usize, hi: usize, sigma: f32) {
+pub(crate) fn gaussian_blur_premul(
+    buf: &mut [f32],
+    tmp: &mut [f32],
+    wi: usize,
+    hi: usize,
+    sigma: f32,
+) {
     for bw in boxes_for_gauss(sigma, 3) {
         let r = bw.saturating_sub(1) / 2;
         if r == 0 {

@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// What Filter ▸ Skin Smoothing opens with.
+pub(crate) const SKIN_SMOOTHING_DEFAULT: FilterType = FilterType::SkinSmoothing {
+    amount: 50.0,
+    radius: 8.0,
+    detail: 30.0,
+};
+
 pub(crate) fn default_filter_like(f: &FilterType) -> FilterType {
     match f {
         FilterType::GaussianBlur { .. } => FilterType::GaussianBlur { radius: 2.0 },
@@ -16,6 +23,7 @@ pub(crate) fn default_filter_like(f: &FilterType) -> FilterType {
         },
         FilterType::Pixelate { .. } => FilterType::Pixelate { cell: 8.0 },
         FilterType::ReduceNoise { .. } => FilterType::ReduceNoise { strength: 50.0 },
+        FilterType::SkinSmoothing { .. } => SKIN_SMOOTHING_DEFAULT,
     }
 }
 
@@ -239,6 +247,25 @@ pub(crate) fn filter_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                         0.0..=100.0,
                     );
                     debounced(&r, &mut value_changed, &mut commit_preview);
+                }
+                FilterType::SkinSmoothing {
+                    amount,
+                    radius,
+                    detail,
+                } => {
+                    let sliders = [
+                        ("Amount", amount, 0.0..=100.0),
+                        ("Radius", radius, 1.0..=50.0),
+                        ("Detail", detail, 0.0..=100.0),
+                    ];
+                    for (i, (label, value, range)) in sliders.into_iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(2.0);
+                        }
+                        let r =
+                            crate::ui::widgets::dev_slider_neutral_resp(ui, label, value, range);
+                        debounced(&r, &mut value_changed, &mut commit_preview);
+                    }
                 }
             }
 
@@ -621,6 +648,45 @@ pub(crate) fn filter_controls_ps_ui(
             value_changed,
             commit_preview,
         ),
+        FilterType::SkinSmoothing {
+            amount,
+            radius,
+            detail,
+        } => {
+            filter_value_ps_control(
+                ui,
+                "Amount:",
+                amount,
+                0.0..=100.0,
+                0.5,
+                "%",
+                1,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Radius:",
+                radius,
+                1.0..=50.0,
+                0.1,
+                "Pixels",
+                1,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Detail:",
+                detail,
+                0.0..=100.0,
+                0.5,
+                "%",
+                1,
+                value_changed,
+                commit_preview,
+            );
+        }
     }
 }
 
