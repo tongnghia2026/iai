@@ -1025,7 +1025,7 @@ const TABLE: &[(Command, KeyChord, CommandGroup, &str)] = &[
         Command::Warp,
         KeyChord::ctrl_shift(KeyName::X),
         CommandGroup::Image,
-        "Warp",
+        "Liquify",
     ),
     (
         Command::RefineSelection,

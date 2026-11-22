@@ -22,7 +22,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let mut cancel = false;
     let mut restore = false;
 
-    egui::Window::new("Warp")
+    egui::Window::new("Liquify")
         .id(egui::Id::new("warp_dialog"))
         .order(crate::ui::dialogs::DIALOG_ORDER)
         .open(&mut open)

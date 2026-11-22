@@ -2632,7 +2632,10 @@ impl App {
         if self.edit.transform_state.is_some() || self.edit.pending_transform_commit.is_some() {
             return Some("Free Transform");
         }
-        if self.edit.warp_state.is_some() || self.edit.grid_warp.is_some() {
+        if self.edit.warp_state.is_some() {
+            return Some("Liquify");
+        }
+        if self.edit.grid_warp.is_some() {
             return Some("Warp");
         }
         if self.edit.show_refine_panel || self.shell.ui.show_refine_color_dialog {

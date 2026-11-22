@@ -1765,7 +1765,10 @@ fn select_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
 fn filter_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
     use crate::core::filters::FilterType;
     if ui
-        .add(menu_item("Warp...", &data.keymap.label_for(Command::Warp)))
+        .add(menu_item(
+            "Liquify...",
+            &data.keymap.label_for(Command::Warp),
+        ))
         .clicked()
     {
         actions.dialogs.open_warp_dialog = true;

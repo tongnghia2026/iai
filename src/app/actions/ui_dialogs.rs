@@ -174,12 +174,12 @@ impl App {
         }
         if actions.dialogs.open_warp_dialog {
             if self.docs.active().canvas.is_cmyk() {
-                self.shell.status_msg = "Warp chưa dùng được ở chế độ CMYK".to_string();
+                self.shell.status_msg = "Liquify chưa dùng được ở chế độ CMYK".to_string();
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
             } else if !self.begin_warp() {
-                self.shell.status_msg = "Warp requires an unlocked raster layer".to_string();
+                self.shell.status_msg = "Liquify requires an unlocked raster layer".to_string();
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }

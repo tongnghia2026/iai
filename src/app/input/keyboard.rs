@@ -1762,7 +1762,7 @@ impl App {
             }
             Command::Warp if !repeat => {
                 if !self.begin_warp() {
-                    self.shell.status_msg = "Warp requires an unlocked raster layer".to_string();
+                    self.shell.status_msg = "Liquify requires an unlocked raster layer".to_string();
                 }
                 self.sync_cursor(event_loop);
                 self.redraw_main();

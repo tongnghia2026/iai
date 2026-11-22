@@ -1,4 +1,4 @@
-//! Warp modal session (Filter ▸ Warp… / Ctrl+Shift+X).
+//! Warp modal session (Filter ▸ Liquify… / Ctrl+Shift+X).
 //!
 //! Modal like Free Transform: while `warp_state` is `Some`, canvas pointer
 //! input warps the active layer through an accumulated displacement mesh
@@ -77,7 +77,7 @@ impl App {
         self.edit.warp_state = Some(state);
         self.edit.input.warp_resizing = false;
         self.shell.ui.show_warp_dialog = true;
-        self.shell.status_msg = "Warp: drag to warp, Enter to apply, Esc to cancel".to_string();
+        self.shell.status_msg = "Liquify: drag to warp, Enter to apply, Esc to cancel".to_string();
         if let Some(w) = &self.win.window {
             w.request_redraw();
         }
@@ -192,7 +192,7 @@ impl App {
             return false;
         };
         let Some(prev_mesh) = state.undo_stack.pop_back() else {
-            self.shell.status_msg = "Warp: nothing to undo".to_string();
+            self.shell.status_msg = "Liquify: nothing to undo".to_string();
             if let Some(w) = &self.win.window {
                 w.request_redraw();
             }
@@ -215,7 +215,7 @@ impl App {
             lh as u32,
         );
         self.warp_push_preview();
-        self.shell.status_msg = "Warp: undid one stroke".to_string();
+        self.shell.status_msg = "Liquify: undid one stroke".to_string();
         true
     }
 
@@ -448,7 +448,7 @@ impl App {
             self.docs.documents[doc_idx]
                 .canvas
                 .restore_layer_tiles(state.layer_id, state.original_tiles);
-            self.shell.status_msg = "No Warp changes applied".to_string();
+            self.shell.status_msg = "No Liquify changes applied".to_string();
             self.apply_canvas_event(CanvasEvent::LayerPixelsChanged);
             return;
         }
@@ -459,9 +459,9 @@ impl App {
         );
         let committed = self.docs.documents[doc_idx]
             .canvas
-            .commit_layer_tiles_change(state.layer_id, state.original_tiles, after, "Warp");
+            .commit_layer_tiles_change(state.layer_id, state.original_tiles, after, "Liquify");
         if committed {
-            self.shell.status_msg = "Applied Warp".to_string();
+            self.shell.status_msg = "Applied Liquify".to_string();
         }
         self.apply_canvas_event(CanvasEvent::LayerStructureChanged);
     }
