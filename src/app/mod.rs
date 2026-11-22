@@ -45,6 +45,7 @@ pub mod path_display;
 pub mod path_gradient;
 pub mod path_style;
 pub mod pen_ops;
+pub mod signature_ops;
 #[cfg(feature = "pro")]
 #[rustfmt::skip]
 pub mod portrait_brush;

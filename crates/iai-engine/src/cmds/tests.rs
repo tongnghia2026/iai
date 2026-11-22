@@ -1780,6 +1780,68 @@ fn a_picture_is_placed_centred_in_its_box() {
 }
 
 #[test]
+fn a_signature_on_paper_is_placed_as_its_ink_alone() {
+    let dir = TempDir::new("signature");
+    // Off-white paper with a blue stroke across it.
+    let scan = dir.path("chu_ky.png");
+    let mut paper = image::RgbImage::from_pixel(400, 200, image::Rgb([246, 244, 238]));
+    for y in 95..105 {
+        for x in 50..350 {
+            paper.put_pixel(x, y, image::Rgb([25, 45, 160]));
+        }
+    }
+    paper.save(&scan).unwrap();
+    let blank = dir.path("trang.png");
+    image::RgbImage::from_pixel(100, 100, image::Rgb([250, 250, 250]))
+        .save(&blank)
+        .unwrap();
+
+    let mut t = Setup::new();
+    t.run(
+        "file.new",
+        json!({"widthPx": 1000, "heightPx": 800, "background": "#FF0000"}),
+    );
+    let placed = t.run("layer.place_signature", json!({"path": scan}));
+    let id = placed["layer"].clone();
+    let info = t.inspect();
+    let layer = info["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == id)
+        .unwrap()
+        .clone();
+    let b = &layer["bounds"];
+    let (x, y, w, h) = (
+        b["x"].as_i64().unwrap(),
+        b["y"].as_i64().unwrap(),
+        b["w"].as_i64().unwrap(),
+        b["h"].as_i64().unwrap(),
+    );
+    // Cut down to the stroke, three tenths of the page wide, lower right.
+    assert_eq!(w, 300, "{b}");
+    assert!(h < 20, "{b}");
+    assert!(x + w <= 1000 && x > 600, "{b}");
+    assert!(y > 600 && y + h <= 800, "{b}");
+    // The stroke is blue over the red page; beside it the page shows
+    // through where the paper was.
+    let stroke = t.mean(json!({"x": x + 100, "y": y + h / 2, "w": 100, "h": 1}));
+    let channel = |i: usize| u8::from_str_radix(&stroke[1 + 2 * i..3 + 2 * i], 16).unwrap();
+    assert!(channel(2) > channel(0) + 80, "blue ink: {stroke}");
+    let beside = t.mean(json!({"x": x + 100, "y": y - 20, "w": 100, "h": 10}));
+    assert_eq!(beside, "#FF0000");
+    // One undo step takes it off again.
+    t.run("edit.undo", json!({}));
+    assert_eq!(t.inspect()["layers"].as_array().unwrap().len(), 1);
+
+    // A blank sheet holds no signature.
+    let e = t
+        .try_run("layer.place_signature", json!({"path": blank}))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadParams);
+}
+
+#[test]
 fn everyday_edits_fill_clear_edge_duplicate_merge_flatten_and_close() {
     let mut t = Setup::new();
     let made = t.run("file.new", json!({"widthPx": 60, "heightPx": 40}));

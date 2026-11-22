@@ -270,6 +270,7 @@ fn an_atomic_batch_and_a_job_behave_over_mcp() {
             "layer.move",
             "layer.new",
             "layer.place",
+            "layer.place_signature",
             "layer.rasterize",
             "layer.set",
             "layer.step_copy",

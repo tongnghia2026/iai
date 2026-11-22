@@ -1781,6 +1781,9 @@ impl App {
                     file_io::FileDialogResult::PickedModelFile(path) => {
                         self.install_model_file(path);
                     }
+                    file_io::FileDialogResult::PickedSignature(path) => {
+                        self.place_signature(path);
+                    }
                     #[cfg(feature = "pro")]
                     file_io::FileDialogResult::PickedForForms(pick, paths) => {
                         self.forms_picked(pick, paths);

@@ -50,6 +50,7 @@ pub fn register_core(r: &mut Registry) {
     r.register(layer::MoveLayer);
     r.register(layer::SetLayer);
     r.register(layer::PlaceImage);
+    r.register(layer::PlaceSignature);
     r.register(layer::LayerViaCopy);
     r.register(layer::LayerMask);
     r.register(layer::TransformLayer);
