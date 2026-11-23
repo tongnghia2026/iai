@@ -315,3 +315,37 @@ fn spacing_never_drops_under_a_pixel() {
     };
     assert_eq!(s.dab_spacing(), 1.0);
 }
+
+#[test]
+fn scatter_throws_dabs_off_the_path_and_undoes_as_one_stroke() {
+    let (mut doc, idx) = doc_with_layer(200, 120, [0, 0, 0, 0]);
+    let mut tools = brush(8.0, 1.0);
+    tools.brush_mut().dynamics.scatter = 4.0;
+    tools.brush_mut().dynamics.size_jitter = 0.5;
+    stroke(&mut tools, &mut doc, &[ev(20.0, 60.0), ev(180.0, 60.0)]);
+    // A dab of 8 px on the path's line covers y 56..64: paint farther out
+    // came from scatter, on both sides.
+    let painted = |doc: &Document, ys: std::ops::Range<u32>| {
+        ys.flat_map(|y| (0..200).map(move |x| (x, y)))
+            .any(|(x, y)| px(doc, idx, x, y).3 > 0)
+    };
+    assert!(painted(&doc, 0..52), "dabs land above the path");
+    assert!(painted(&doc, 68..120), "dabs land below the path");
+    doc.canvas.undo();
+    assert!(
+        !painted(&doc, 0..120),
+        "one undo takes the whole stroke away"
+    );
+}
+
+#[test]
+fn without_dynamics_the_stroke_stays_on_its_path() {
+    let (mut doc, idx) = doc_with_layer(200, 120, [0, 0, 0, 0]);
+    let mut tools = brush(8.0, 1.0);
+    stroke(&mut tools, &mut doc, &[ev(20.0, 60.0), ev(180.0, 60.0)]);
+    for x in (0..200).step_by(7) {
+        assert_eq!(px(&doc, idx, x, 40).3, 0);
+        assert_eq!(px(&doc, idx, x, 80).3, 0);
+    }
+    assert_eq!(px(&doc, idx, 100, 60).3, 255);
+}

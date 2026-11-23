@@ -2,6 +2,7 @@ pub mod arrow;
 pub mod brush;
 #[cfg(test)]
 mod brush_audit_tests;
+pub mod brush_dynamics;
 #[cfg(test)]
 pub(crate) mod brush_parity;
 pub mod clone_tool;
@@ -422,8 +423,12 @@ impl ToolManager {
                 P::Flow(v) => (e.flow, e.preset_idx) = (v.clamp(0.0, 1.0), custom),
                 P::Spacing(v) => (e.spacing, e.preset_idx) = (v.clamp(0.01, 2.0), custom),
                 P::Smoothing(v) => e.smoothing = v.clamp(0.0, 1.0),
-                // The Eraser has no paint mode nor airbrush of its own.
-                P::Mode(_) | P::Airbrush(_) => {}
+                // The Eraser has no paint mode, airbrush nor dynamics.
+                P::Mode(_)
+                | P::Airbrush(_)
+                | P::Scatter(_)
+                | P::SizeJitter(_)
+                | P::FlowJitter(_) => {}
             }
             return;
         }
@@ -438,7 +443,11 @@ impl ToolManager {
             P::Smoothing(v) => s.smoothing = v.clamp(0.0, 1.0),
             P::Mode(m) => s.mode = m,
             P::Airbrush(on) => b.airbrush = on,
+            P::Scatter(v) => b.dynamics.scatter = v,
+            P::SizeJitter(v) => b.dynamics.size_jitter = v,
+            P::FlowJitter(v) => b.dynamics.flow_jitter = v,
         }
+        b.dynamics = b.dynamics.sanitized();
     }
 
     pub fn cursor_size(&self) -> f32 {

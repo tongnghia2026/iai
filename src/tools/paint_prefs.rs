@@ -5,6 +5,7 @@
 
 use super::ToolManager;
 use super::brush::{BRUSH_PRESETS, BrushMode, MAX_TIP_SIZE, PRESET_CUSTOM};
+use super::brush_dynamics::BrushDynamics;
 use super::dodge_burn::{DodgeBurnTool, ToneRange};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,34 @@ impl TipPrefs {
             smoothing: share(self.smoothing, 0.0, 1.0, 0.0),
             preset: self.preset.filter(|&i| i < BRUSH_PRESETS.len()),
         }
+    }
+}
+
+/// The Brush's dynamics, as saved.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DynamicsPrefs {
+    pub scatter: f32,
+    pub size_jitter: f32,
+    pub flow_jitter: f32,
+}
+
+impl DynamicsPrefs {
+    fn of(d: BrushDynamics) -> Self {
+        Self {
+            scatter: d.scatter,
+            size_jitter: d.size_jitter,
+            flow_jitter: d.flow_jitter,
+        }
+    }
+
+    fn dynamics(&self) -> BrushDynamics {
+        BrushDynamics {
+            scatter: self.scatter,
+            size_jitter: self.size_jitter,
+            flow_jitter: self.flow_jitter,
+        }
+        .sanitized()
     }
 }
 
@@ -110,6 +139,8 @@ pub struct PaintPrefs {
     /// `BrushMode::name()`.
     pub brush_mode: String,
     pub airbrush: bool,
+    /// The Brush's scatter and jitter (absent from older files: off).
+    pub brush_dynamics: DynamicsPrefs,
     pub eraser: TipPrefs,
     pub dodge: ToneToolPrefs,
     pub burn: ToneToolPrefs,
@@ -133,6 +164,7 @@ impl PaintPrefs {
             },
             brush_mode: b.mode.name().to_string(),
             airbrush: tools.brush().airbrush,
+            brush_dynamics: DynamicsPrefs::of(tools.brush().dynamics),
             eraser: TipPrefs {
                 size: e.size,
                 hardness: e.hardness,
@@ -160,6 +192,7 @@ impl PaintPrefs {
         brush.settings.mode = BrushMode::from_name(&self.brush_mode).unwrap_or_default();
         brush.preset_idx = b.preset.unwrap_or(PRESET_CUSTOM);
         brush.airbrush = self.airbrush;
+        brush.dynamics = self.brush_dynamics.dynamics();
         let e = self.eraser.sanitized();
         let eraser = tools.eraser_mut();
         eraser.size = e.size;
@@ -204,6 +237,8 @@ mod tests {
             b.settings.mode = BrushMode::Blend(crate::core::blend::BlendMode::Multiply);
             b.airbrush = true;
             b.preset_idx = 1;
+            b.dynamics.scatter = 1.5;
+            b.dynamics.flow_jitter = 0.3;
         }
         tools.eraser_mut().size = 77.0;
         tools.burn.exposure = 0.12;
@@ -216,6 +251,8 @@ mod tests {
         back.apply(&mut fresh);
         assert_eq!(PaintPrefs::of(&fresh), saved);
         assert_eq!(fresh.brush().settings.mode.name(), "Multiply");
+        assert_eq!(fresh.brush().dynamics.scatter, 1.5);
+        assert_eq!(fresh.brush().dynamics.flow_jitter, 0.3);
         assert_eq!(fresh.burn.range, ToneRange::Highlights);
         assert!(!fresh.dodge.protect_tones && fresh.burn.protect_tones);
     }
@@ -225,6 +262,7 @@ mod tests {
         let json = serde_json::json!({
             "brush": { "size": 1.0e9, "hardness": -3.0, "preset": 99 },
             "brush_mode": "Sparkly",
+            "brush_dynamics": { "scatter": 99.0, "size_jitter": -1.0 },
         });
         let prefs: PaintPrefs = serde_json::from_value(json).unwrap();
         let mut tools = ToolManager::new();
@@ -234,5 +272,10 @@ mod tests {
         assert_eq!(b.settings.hardness, 0.0);
         assert_eq!(b.preset_idx, PRESET_CUSTOM);
         assert_eq!(b.settings.mode, BrushMode::Normal);
+        assert_eq!(
+            b.dynamics.scatter,
+            crate::tools::brush_dynamics::MAX_SCATTER
+        );
+        assert_eq!(b.dynamics.size_jitter, 0.0);
     }
 }

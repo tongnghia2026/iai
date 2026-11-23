@@ -1,3 +1,4 @@
+use super::brush_dynamics::{BrushDynamics, DabRng};
 use super::{PointerEvent, Tool, ToolCtx, ToolResponse};
 use crate::core::blend::{BlendMode, blend_pixel};
 use crate::core::canvas::Canvas;
@@ -622,6 +623,12 @@ pub struct BrushTool {
     /// When the airbrush last laid paint, and the part of a dab it owes.
     air_clock: Option<std::time::Instant>,
     air_debt: f32,
+    /// Scatter and jitter (the options bar's Dynamics).
+    pub dynamics: BrushDynamics,
+    /// Draws the dynamics' random numbers, seeded per stroke.
+    rng: DabRng,
+    /// Strokes painted, mixed into each stroke's seed.
+    strokes: u64,
 }
 
 impl Default for BrushTool {
@@ -642,6 +649,9 @@ impl BrushTool {
             airbrush: false,
             air_clock: None,
             air_debt: 0.0,
+            dynamics: BrushDynamics::default(),
+            rng: DabRng::new(0),
+            strokes: 0,
         }
     }
 
@@ -1688,19 +1698,29 @@ impl Tool for BrushTool {
         self.smoother.begin(cx, cy);
         self.air_clock = Some(std::time::Instant::now());
         self.air_debt = 0.0;
+        // Each stroke scatters its own way.
+        self.strokes = self.strokes.wrapping_add(1);
+        let place = (u64::from(sx.to_bits()) << 32) | u64::from(sy.to_bits());
+        self.rng = DabRng::new(place ^ self.strokes.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let alpha_plane = matches!(
             ctx.canvas().channels.view,
             crate::core::channels::ChannelView::Alpha(_)
         );
         if alpha_plane {
             self.stroke = None;
-            Self::paint_cpu_dab(&self.settings, ctx.canvas_mut(), sx, sy);
+            let (px, py, s) = self
+                .dynamics
+                .vary(&self.settings, &mut self.rng, sx, sy, None);
+            Self::paint_cpu_dab(&s, ctx.canvas_mut(), px, py);
             self.stroke_residual = self.settings.dab_spacing();
         } else {
             self.stroke = StrokeBuffer::begin(ctx.canvas());
         }
         if let Some(stroke) = self.stroke.as_mut() {
-            Self::paint_cpu_dab_stroked(&self.settings, ctx.canvas_mut(), sx, sy, stroke);
+            let (px, py, s) = self
+                .dynamics
+                .vary(&self.settings, &mut self.rng, sx, sy, None);
+            Self::paint_cpu_dab_stroked(&s, ctx.canvas_mut(), px, py, stroke);
             stroke.residual = self.settings.dab_spacing();
         }
         if line_from.is_some() {
@@ -1744,7 +1764,10 @@ impl Tool for BrushTool {
             if let Some(stroke) = self.stroke.as_mut() {
                 // A stalled frame does not dump a burst of paint.
                 for _ in 0..(due as u32).min(8) {
-                    Self::paint_cpu_dab_stroked(&self.settings, ctx.canvas_mut(), x, y, stroke);
+                    let (px, py, s) = self
+                        .dynamics
+                        .vary(&self.settings, &mut self.rng, x, y, None);
+                    Self::paint_cpu_dab_stroked(&s, ctx.canvas_mut(), px, py, stroke);
                 }
             }
         }
@@ -1773,29 +1796,33 @@ impl BrushTool {
     /// Paint the stroke from `(x0, y0)` to `(x1, y1)` on whatever this
     /// stroke targets.
     fn paint_segment(&mut self, ctx: &mut ToolCtx, x0: f32, y0: f32, x1: f32, y1: f32) {
-        if let Some(stroke) = self.stroke.as_mut() {
-            Self::paint_cpu_stroke_segment_stroked(
-                &self.settings,
-                ctx.canvas_mut(),
-                x0,
-                y0,
-                x1,
-                y1,
-                stroke,
-            );
-        } else if matches!(
+        let alpha_plane = matches!(
             ctx.canvas().channels.view,
             crate::core::channels::ChannelView::Alpha(_)
-        ) {
-            Self::paint_cpu_stroke_segment(
-                &self.settings,
-                ctx.canvas_mut(),
-                x0,
-                y0,
-                x1,
-                y1,
-                &mut self.stroke_residual,
-            );
+        );
+        let Self {
+            settings,
+            dynamics,
+            rng,
+            stroke,
+            stroke_residual,
+            ..
+        } = self;
+        let spacing = settings.dab_spacing();
+        let dir = Some((x1 - x0, y1 - y0));
+        let canvas = ctx.canvas_mut();
+        if let Some(stroke) = stroke.as_mut() {
+            let mut residual = stroke.residual;
+            Self::walk_dabs(spacing, x0, y0, x1, y1, &mut residual, |x, y| {
+                let (px, py, s) = dynamics.vary(settings, rng, x, y, dir);
+                Self::paint_cpu_dab_stroked(&s, canvas, px, py, stroke);
+            });
+            stroke.residual = residual;
+        } else if alpha_plane {
+            Self::walk_dabs(spacing, x0, y0, x1, y1, stroke_residual, |x, y| {
+                let (px, py, s) = dynamics.vary(settings, rng, x, y, dir);
+                Self::paint_cpu_dab(&s, canvas, px, py);
+            });
         }
     }
 }

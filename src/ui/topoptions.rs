@@ -697,7 +697,79 @@ fn brush_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         {
             actions.tool.brush.push(BrushParam::Airbrush(!on));
         }
+        ui.separator();
+        brush_dynamics_menu(ui, data, actions);
     }
+}
+
+/// The Brush's dynamics (Photoshop's Scattering and jitter) in a popup that
+/// stays open while its values are dragged.
+fn brush_dynamics_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    let d = data.tool.brush_dynamics;
+    let button = egui::Button::new("Dynamics").selected(!d.is_off());
+    let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let (response, _) = MenuButton::from_button(button).config(config).ui(ui, |ui| {
+        egui::Grid::new("brush_dynamics")
+            .num_columns(2)
+            .show(ui, |ui| {
+                let max_scatter = crate::tools::brush_dynamics::MAX_SCATTER * 100.0;
+                let fields = [
+                    (
+                        "Scatter:",
+                        d.scatter,
+                        max_scatter,
+                        "How far dabs land off the stroke, in % of the size",
+                    ),
+                    (
+                        "Size Jitter:",
+                        d.size_jitter,
+                        100.0,
+                        "How much smaller a dab may come out",
+                    ),
+                    (
+                        "Flow Jitter:",
+                        d.flow_jitter,
+                        100.0,
+                        "How much less paint a dab may lay",
+                    ),
+                ];
+                for (i, (label, value, max, tip)) in fields.into_iter().enumerate() {
+                    ui.label(label).on_hover_text(tip);
+                    let mut v = value * 100.0;
+                    let changed = ui
+                        .add(
+                            egui::Slider::new(&mut v, 0.0..=max)
+                                .suffix("%")
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text(tip)
+                        .changed();
+                    if changed {
+                        let v = v / 100.0;
+                        actions.tool.brush.push(match i {
+                            0 => BrushParam::Scatter(v),
+                            1 => BrushParam::SizeJitter(v),
+                            _ => BrushParam::FlowJitter(v),
+                        });
+                    }
+                    ui.end_row();
+                }
+            });
+        if ui
+            .add_enabled(!d.is_off(), egui::Button::new("Reset"))
+            .clicked()
+        {
+            for p in [
+                BrushParam::Scatter(0.0),
+                BrushParam::SizeJitter(0.0),
+                BrushParam::FlowJitter(0.0),
+            ] {
+                actions.tool.brush.push(p);
+            }
+        }
+    });
+    response.on_hover_text("Scatter dabs and vary their size and paint");
 }
 
 /// The Brush's / Pencil's paint mode (Photoshop's Mode).

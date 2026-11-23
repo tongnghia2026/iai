@@ -1267,6 +1267,7 @@ impl App {
             brush_preset_idx,
             brush_mode: self.edit.tools.brush().settings.mode,
             brush_airbrush: self.edit.tools.brush().airbrush,
+            brush_dynamics: self.edit.tools.brush().dynamics,
             brush_popup_pos: self.edit.brush_popup_pos,
             brush_color: self.edit.tools.brush().settings.color,
             brush_ink: self.ink_split_of(self.edit.tools.brush().settings.color),
