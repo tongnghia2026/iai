@@ -69,6 +69,24 @@ fn scale_filter_for_proxy(filter: FilterType, scale: f32) -> FilterType {
         FilterType::Pixelate { cell } => FilterType::Pixelate {
             cell: (cell / scale).max(1.0),
         },
+        FilterType::OuterGlow {
+            size,
+            opacity,
+            color,
+        } => FilterType::OuterGlow {
+            size: size / scale,
+            opacity,
+            color,
+        },
+        FilterType::InnerGlow {
+            size,
+            opacity,
+            color,
+        } => FilterType::InnerGlow {
+            size: size / scale,
+            opacity,
+            color,
+        },
         other => other,
     }
 }
@@ -80,6 +98,10 @@ fn filter_canvas_preview_prefers_cpu(filter: FilterType) -> bool {
             | FilterType::Sharpen { .. }
             | FilterType::HighPass { .. }
             | FilterType::ReduceNoise { .. }
+            | FilterType::LensFlare { .. }
+            | FilterType::LightingEffects { .. }
+            | FilterType::OuterGlow { .. }
+            | FilterType::InnerGlow { .. }
     )
 }
 impl App {

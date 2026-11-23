@@ -16,6 +16,10 @@ pub(crate) fn default_filter_like(f: &FilterType) -> FilterType {
         },
         FilterType::Pixelate { .. } => FilterType::Pixelate { cell: 8.0 },
         FilterType::ReduceNoise { .. } => FilterType::ReduceNoise { strength: 50.0 },
+        FilterType::LensFlare { .. } => FilterType::LENS_FLARE,
+        FilterType::LightingEffects { .. } => FilterType::LIGHTING_EFFECTS,
+        FilterType::OuterGlow { .. } => FilterType::OUTER_GLOW,
+        FilterType::InnerGlow { .. } => FilterType::INNER_GLOW,
     }
 }
 
@@ -239,6 +243,10 @@ pub(crate) fn filter_dialog(ctx: &egui::Context, data: &UiData, actions: &mut Ui
                         0.0..=100.0,
                     );
                     debounced(&r, &mut value_changed, &mut commit_preview);
+                }
+                // The light filters keep one set of controls for both dialogs.
+                other => {
+                    filter_controls_ps_ui(ui, other, &mut value_changed, &mut commit_preview);
                 }
             }
 
@@ -621,7 +629,157 @@ pub(crate) fn filter_controls_ps_ui(
             value_changed,
             commit_preview,
         ),
+        FilterType::LensFlare { x, y, brightness } => {
+            filter_value_ps_control(
+                ui,
+                "Center X:",
+                x,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Center Y:",
+                y,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Brightness:",
+                brightness,
+                10.0..=300.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+        }
+        FilterType::LightingEffects {
+            x,
+            y,
+            radius,
+            intensity,
+            ambient,
+            color,
+        } => {
+            filter_value_ps_control(
+                ui,
+                "Center X:",
+                x,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Center Y:",
+                y,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Radius:",
+                radius,
+                5.0..=150.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Intensity:",
+                intensity,
+                0.0..=200.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Ambience:",
+                ambient,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_color_control(ui, color, value_changed, commit_preview);
+        }
+        FilterType::OuterGlow {
+            size,
+            opacity,
+            color,
+        }
+        | FilterType::InnerGlow {
+            size,
+            opacity,
+            color,
+        } => {
+            filter_value_ps_control(
+                ui,
+                "Size:",
+                size,
+                1.0..=250.0,
+                0.5,
+                "Pixels",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_value_ps_control(
+                ui,
+                "Opacity:",
+                opacity,
+                0.0..=100.0,
+                0.5,
+                "%",
+                0,
+                value_changed,
+                commit_preview,
+            );
+            filter_color_control(ui, color, value_changed, commit_preview);
+        }
     }
+}
+
+/// The light's or glow's colour, with a swatch that opens a picker.
+fn filter_color_control(
+    ui: &mut egui::Ui,
+    color: &mut [u8; 3],
+    value_changed: &mut bool,
+    commit_preview: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Color:");
+        if ui.color_edit_button_srgb(color).changed() {
+            *value_changed = true;
+            *commit_preview = true;
+        }
+    });
 }
 
 pub(crate) fn filter_value_ps_control(

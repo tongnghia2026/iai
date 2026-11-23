@@ -2,15 +2,82 @@ use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilterType {
-    GaussianBlur { radius: f32 },
-    Sharpen { amount: f32, radius: f32 },
-    HighPass { radius: f32 },
-    AddNoise { amount: f32, monochromatic: bool },
-    Pixelate { cell: f32 },
-    ReduceNoise { strength: f32 },
+    GaussianBlur {
+        radius: f32,
+    },
+    Sharpen {
+        amount: f32,
+        radius: f32,
+    },
+    HighPass {
+        radius: f32,
+    },
+    AddNoise {
+        amount: f32,
+        monochromatic: bool,
+    },
+    Pixelate {
+        cell: f32,
+    },
+    ReduceNoise {
+        strength: f32,
+    },
+    /// The sun at `x`, `y` (% of the width / height), `brightness` %.
+    LensFlare {
+        x: f32,
+        y: f32,
+        brightness: f32,
+    },
+    /// A light at `x`, `y` (% of the width / height) reaching `radius` % of
+    /// the diagonal; `intensity` and `ambient` in %.
+    LightingEffects {
+        x: f32,
+        y: f32,
+        radius: f32,
+        intensity: f32,
+        ambient: f32,
+        color: [u8; 3],
+    },
+    /// Glow of `size` px round the content, under it; `opacity` %.
+    OuterGlow {
+        size: f32,
+        opacity: f32,
+        color: [u8; 3],
+    },
+    /// Glow of `size` px in from the content's edges; `opacity` %.
+    InnerGlow {
+        size: f32,
+        opacity: f32,
+        color: [u8; 3],
+    },
 }
 
 impl FilterType {
+    /// The light filters as the Filter menu opens them.
+    pub const LENS_FLARE: FilterType = FilterType::LensFlare {
+        x: 30.0,
+        y: 30.0,
+        brightness: 100.0,
+    };
+    pub const LIGHTING_EFFECTS: FilterType = FilterType::LightingEffects {
+        x: 50.0,
+        y: 40.0,
+        radius: 50.0,
+        intensity: 100.0,
+        ambient: 25.0,
+        color: [255, 255, 255],
+    };
+    pub const OUTER_GLOW: FilterType = FilterType::OuterGlow {
+        size: 60.0,
+        opacity: 75.0,
+        color: [255, 255, 190],
+    };
+    pub const INNER_GLOW: FilterType = FilterType::InnerGlow {
+        size: 25.0,
+        opacity: 75.0,
+        color: [255, 255, 190],
+    };
+
     pub fn name(&self) -> &'static str {
         match self {
             FilterType::GaussianBlur { .. } => "Gaussian Blur",
@@ -19,6 +86,10 @@ impl FilterType {
             FilterType::AddNoise { .. } => "Add Noise",
             FilterType::Pixelate { .. } => "Pixelate",
             FilterType::ReduceNoise { .. } => "Reduce Noise",
+            FilterType::LensFlare { .. } => "Lens Flare",
+            FilterType::LightingEffects { .. } => "Lighting Effects",
+            FilterType::OuterGlow { .. } => "Outer Glow",
+            FilterType::InnerGlow { .. } => "Inner Glow",
         }
     }
 
@@ -56,6 +127,16 @@ impl FilterType {
             FilterType::ReduceNoise { strength } => {
                 if *strength > 0.1 {
                     *pixels = reduce_noise(pixels, w, h, *strength);
+                }
+            }
+            FilterType::LensFlare { .. }
+            | FilterType::LightingEffects { .. }
+            | FilterType::OuterGlow { .. }
+            | FilterType::InnerGlow { .. } => {
+                let mut f: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+                self.light(&mut f, w, h);
+                for (d, v) in pixels.iter_mut().zip(f) {
+                    *d = (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -99,6 +180,59 @@ impl FilterType {
                     *pixels = reduce_noise16(pixels, w, h, *strength);
                 }
             }
+            FilterType::LensFlare { .. }
+            | FilterType::LightingEffects { .. }
+            | FilterType::OuterGlow { .. }
+            | FilterType::InnerGlow { .. } => {
+                let mut f: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 65535.0).collect();
+                self.light(&mut f, w, h);
+                for (d, v) in pixels.iter_mut().zip(f) {
+                    *d = (v * 65535.0 + 0.5).clamp(0.0, 65535.0) as u16;
+                }
+            }
+        }
+    }
+
+    /// The light filters on straight RGBA as 0..1 floats (see
+    /// [`crate::light`]); the other filters leave them alone.
+    fn light(&self, px: &mut [f32], w: u32, h: u32) {
+        use crate::light;
+        let (wf, hf) = (w as f32, h as f32);
+        let rgb = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
+        match *self {
+            FilterType::LensFlare { x, y, brightness } => {
+                let (cx, cy) = (x / 100.0 * wf, y / 100.0 * hf);
+                light::lens_flare(px, w, h, cx, cy, brightness / 100.0);
+            }
+            FilterType::LightingEffects {
+                x,
+                y,
+                radius,
+                intensity,
+                ambient,
+                color,
+            } => {
+                let diag = (wf * wf + hf * hf).sqrt();
+                let lamp = light::Light {
+                    centre: (x / 100.0 * wf, y / 100.0 * hf),
+                    radius: radius / 100.0 * diag,
+                    intensity: intensity / 100.0,
+                    ambient: ambient / 100.0,
+                    color: rgb(color),
+                };
+                light::lighting(px, w, &lamp);
+            }
+            FilterType::OuterGlow {
+                size,
+                opacity,
+                color,
+            } => light::outer_glow(px, w, h, size, opacity / 100.0, rgb(color)),
+            FilterType::InnerGlow {
+                size,
+                opacity,
+                color,
+            } => light::inner_glow(px, w, h, size, opacity / 100.0, rgb(color)),
+            _ => {}
         }
     }
 }
@@ -970,6 +1104,42 @@ mod tests {
         assert!(out[hi] < 90);
         for px in out.chunks(4) {
             assert_eq!(px[3], 200);
+        }
+    }
+}
+
+#[cfg(test)]
+mod light_filter_tests {
+    use super::FilterType;
+
+    #[test]
+    fn the_light_filters_paint_alike_at_8_and_16_bits() {
+        let (w, h) = (48u32, 32u32);
+        for f in [
+            FilterType::LENS_FLARE,
+            FilterType::LIGHTING_EFFECTS,
+            FilterType::OUTER_GLOW,
+            FilterType::INNER_GLOW,
+        ] {
+            // Half transparent, half a mid grey, so the glows have an edge.
+            let mut p8: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    if i % w < w / 2 {
+                        [128, 128, 128, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect();
+            let mut p16: Vec<u16> = p8.iter().map(|&v| u16::from(v) * 257).collect();
+            let before = p8.clone();
+            f.apply(&mut p8, w, h);
+            f.apply16(&mut p16, w, h);
+            assert_ne!(p8, before, "{} changes the picture", f.name());
+            for (a, b) in p8.iter().zip(&p16) {
+                let b8 = (f32::from(*b) / 257.0).round();
+                assert!((f32::from(*a) - b8).abs() <= 1.0, "{}", f.name());
+            }
         }
     }
 }

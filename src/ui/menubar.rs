@@ -1803,6 +1803,18 @@ fn filter_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.dialogs.open_filter_dialog = Some(FilterType::Pixelate { cell: 8.0 });
         ui.close();
     }
+    ui.separator();
+    for (label, filter) in [
+        ("Lens Flare...", FilterType::LENS_FLARE),
+        ("Lighting Effects...", FilterType::LIGHTING_EFFECTS),
+        ("Outer Glow...", FilterType::OUTER_GLOW),
+        ("Inner Glow...", FilterType::INNER_GLOW),
+    ] {
+        if ui.button(label).clicked() {
+            actions.dialogs.open_filter_dialog = Some(filter);
+            ui.close();
+        }
+    }
 }
 
 fn view_menu(

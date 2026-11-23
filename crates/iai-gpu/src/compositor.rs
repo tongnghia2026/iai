@@ -780,6 +780,11 @@ fn filter_to_gpu(filter: &iai_imaging::filters::FilterType) -> (u32, [f32; 12]) 
             p[0] = *strength;
             35
         }
+        // No shader for the light filters: the app previews them on the CPU.
+        F::LensFlare { .. }
+        | F::LightingEffects { .. }
+        | F::OuterGlow { .. }
+        | F::InnerGlow { .. } => 0,
     };
     (kind, p)
 }

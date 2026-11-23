@@ -9,6 +9,7 @@ pub mod card_find;
 pub mod filters;
 pub mod grid_warp;
 pub mod levels;
+pub mod light;
 pub mod orb;
 pub mod output_sharpen;
 pub mod quick_select;
