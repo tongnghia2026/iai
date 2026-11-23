@@ -223,6 +223,8 @@ pub struct ToolViewModel {
     pub brush_mode: crate::tools::brush::BrushMode,
     /// The Brush's airbrush toggle.
     pub brush_airbrush: bool,
+    /// The Brush's scatter and jitter.
+    pub brush_dynamics: crate::tools::brush_dynamics::BrushDynamics,
     /// Screen-space position of the right-click brush popup, None when closed.
     pub brush_popup_pos: Option<(f32, f32)>,
     pub brush_color: [u8; 4],
@@ -1442,6 +1444,7 @@ impl Default for UiData {
                 brush_preset_idx: usize::MAX,
                 brush_mode: crate::tools::brush::BrushMode::Normal,
                 brush_airbrush: false,
+                brush_dynamics: crate::tools::brush_dynamics::BrushDynamics::default(),
                 brush_popup_pos: None,
                 brush_color: [0, 0, 0, 255],
                 brush_ink: None,

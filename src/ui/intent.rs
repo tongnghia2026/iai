@@ -246,6 +246,12 @@ pub enum BrushParam {
     Smoothing(f32),
     Mode(crate::tools::brush::BrushMode),
     Airbrush(bool),
+    /// The Brush's dynamics: Scatter in tip diameters, the jitters 0..1.
+    Scatter(f32),
+    SizeJitter(f32),
+    FlowJitter(f32),
+    /// The Brush's glow, 0..1.
+    Glow(f32),
 }
 
 /// Tool selection, options-bar edits, transform/crop/text session commands.

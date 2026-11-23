@@ -315,3 +315,53 @@ fn spacing_never_drops_under_a_pixel() {
     };
     assert_eq!(s.dab_spacing(), 1.0);
 }
+
+#[test]
+fn scatter_throws_dabs_off_the_path_and_undoes_as_one_stroke() {
+    let (mut doc, idx) = doc_with_layer(200, 120, [0, 0, 0, 0]);
+    let mut tools = brush(8.0, 1.0);
+    tools.brush_mut().dynamics.scatter = 4.0;
+    tools.brush_mut().dynamics.size_jitter = 0.5;
+    stroke(&mut tools, &mut doc, &[ev(20.0, 60.0), ev(180.0, 60.0)]);
+    // A dab of 8 px on the path's line covers y 56..64: paint farther out
+    // came from scatter, on both sides.
+    let painted = |doc: &Document, ys: std::ops::Range<u32>| {
+        ys.flat_map(|y| (0..200).map(move |x| (x, y)))
+            .any(|(x, y)| px(doc, idx, x, y).3 > 0)
+    };
+    assert!(painted(&doc, 0..52), "dabs land above the path");
+    assert!(painted(&doc, 68..120), "dabs land below the path");
+    doc.canvas.undo();
+    assert!(
+        !painted(&doc, 0..120),
+        "one undo takes the whole stroke away"
+    );
+}
+
+#[test]
+fn without_dynamics_the_stroke_stays_on_its_path() {
+    let (mut doc, idx) = doc_with_layer(200, 120, [0, 0, 0, 0]);
+    let mut tools = brush(8.0, 1.0);
+    stroke(&mut tools, &mut doc, &[ev(20.0, 60.0), ev(180.0, 60.0)]);
+    for x in (0..200).step_by(7) {
+        assert_eq!(px(&doc, idx, x, 40).3, 0);
+        assert_eq!(px(&doc, idx, x, 80).3, 0);
+    }
+    assert_eq!(px(&doc, idx, 100, 60).3, 255);
+}
+
+#[test]
+fn glow_paints_a_faint_halo_round_the_stroke_and_undoes_with_it() {
+    let (mut doc, idx) = doc_with_layer(160, 100, [0, 0, 0, 0]);
+    let mut tools = brush(10.0, 1.0);
+    tools.brush_mut().dynamics.glow = 1.0;
+    stroke(&mut tools, &mut doc, &[ev(30.0, 50.0), ev(130.0, 50.0)]);
+    let core = px(&doc, idx, 80, 50).3;
+    // The 10 px dab reaches y 45..55; the glow (50 px) reaches past it.
+    let halo = px(&doc, idx, 80, 60).3;
+    assert_eq!(core, 255, "the stroke itself is painted as ever");
+    assert!(halo > 0 && halo < 200, "a faint glow beside it: {halo}");
+    assert_eq!(px(&doc, idx, 80, 92).3, 0, "nothing past the glow");
+    doc.canvas.undo();
+    assert_eq!(px(&doc, idx, 80, 60).3, 0, "one undo takes the glow too");
+}
