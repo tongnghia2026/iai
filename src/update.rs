@@ -3,6 +3,11 @@
 //! that build, checks every file against the SHA-256 published with it, and
 //! puts it in this exe's place as the app closes.
 //!
+//! On Windows it is `iai.exe` and the files beside it. On a Mac it is the
+//! `iai` inside `iAi.app` (and `libiai_raw.dylib` beside it): the bundle is
+//! signed again (ad hoc) once they are in, so that macOS still opens it.
+//! `update.json` names the files of both; each system takes its own.
+//!
 //! A build is known by the last commit that touched its code (`build.rs`).
 //! `.github/workflows/release.yml` publishes one for every push of code:
 //! `update.json` (a [`Release`]) and, beside it, the files it names.
@@ -20,11 +25,38 @@ use serde::{Deserialize, Serialize};
 /// made at startup off.
 const FEED_URL: &str = "https://github.com/tongnghia2026/iai/releases/latest/download/update.json";
 
-/// The files a release may replace, by the names they are installed under.
-const EXE_NAME: &str = "iai.exe";
-/// The library the exe loads its RAW decoders from (`formats::raw_library`).
-const RAW_NAME: &str = "iai_raw.dll";
-const PDB_NAME: &str = "iai.pdb";
+/// The files of one system a release may replace, by the names they are
+/// installed under (and published under in `update.json`).
+#[derive(Clone, Copy, Debug)]
+struct Names {
+    exe: &'static str,
+    /// The library the exe loads its RAW decoders from (`formats::raw_library`).
+    library: &'static str,
+    /// Symbols for the flight recorder; a Mac release has none.
+    symbols: &'static str,
+}
+
+const WINDOWS: Names = Names {
+    exe: "iai.exe",
+    library: "iai_raw.dll",
+    symbols: "iai.pdb",
+};
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAC: Names = Names {
+    exe: "iai",
+    library: "libiai_raw.dylib",
+    symbols: "iai.pdb",
+};
+
+/// This system's. Tests run the shared logic with the Windows names on every
+/// system, so that they read the same everywhere; the Mac's have their own.
+const ON_MAC: bool = cfg!(all(target_os = "macos", not(test)));
+const HERE: Names = if ON_MAC { MAC } else { WINDOWS };
+
+const EXE_NAME: &str = HERE.exe;
+const RAW_NAME: &str = HERE.library;
+const PDB_NAME: &str = HERE.symbols;
 
 /// The check at startup waits for the window to be up.
 const STARTUP_DELAY: Duration = Duration::from_secs(3);
@@ -154,7 +186,12 @@ impl Release {
 
     /// The files this app installs, the exe first.
     fn wanted(&self) -> impl Iterator<Item = &ReleaseFile> {
-        [EXE_NAME, RAW_NAME, PDB_NAME]
+        self.wanted_by(HERE)
+    }
+
+    /// The files a system of `names` installs, the exe first.
+    fn wanted_by(&self, names: Names) -> impl Iterator<Item = &ReleaseFile> {
+        [names.exe, names.library, names.symbols]
             .into_iter()
             .filter_map(|name| self.files.iter().find(|file| file.name == name))
     }
@@ -254,8 +291,8 @@ pub fn check_at_startup() {
 /// Ask, off this thread, whether a newer build is published. `asked` is the
 /// user asking: then "none" and "could not ask" are answers too.
 pub fn check(asked: bool) {
-    // Releases hold the Windows build only.
-    if !cfg!(windows) {
+    // Releases hold builds for Windows and the Mac only.
+    if !cfg!(any(windows, target_os = "macos")) {
         if asked {
             set_status(Status::CheckFailed(
                 "Tự cập nhật hiện chỉ có trên Windows.".to_owned(),
@@ -392,9 +429,22 @@ fn fetch_release(feed: &str) -> Result<Option<Release>, String> {
     let release: Release =
         serde_json::from_str(&text).map_err(|e| odd_server("reading update.json", &e))?;
     if release.wanted().next().map(|file| file.name.as_str()) != Some(EXE_NAME) {
-        return Err(odd_server("reading update.json", &"it names no iai.exe"));
+        return without_exe(ON_MAC);
     }
     Ok(Some(release))
+}
+
+/// What a release that names no exe for this system is. Releases made
+/// before there was a Mac build in them have no file for a Mac: nothing is
+/// published for it yet. On Windows the exe is always there: the server is
+/// wrong.
+fn without_exe(on_mac: bool) -> Result<Option<Release>, String> {
+    if on_mac {
+        crate::diag::note("update", "the published build has no Mac files");
+        Ok(None)
+    } else {
+        Err(odd_server("reading update.json", &"it names no iai.exe"))
+    }
 }
 
 /// The address of `asset`, which lies beside the feed. An asset is a bare
@@ -523,6 +573,10 @@ fn fetch_files(
         let report = || progress((done.load(Ordering::Relaxed) as f32 / total as f32).min(1.0));
         match fetch_one(&client, &url, file, &waiting, &done, &report) {
             Ok(()) if name == EXE_NAME => {
+                if let Err(why) = make_runnable(&waiting) {
+                    let _ = std::fs::remove_file(&waiting);
+                    return Err(format!("Không ghi được file: {why}"));
+                }
                 staged = Some(Staged {
                     exe: (waiting, target),
                     library: None,
@@ -550,6 +604,20 @@ fn fetch_files(
         }
     }
     staged.ok_or_else(|| odd_server("reading update.json", &"it names no iai.exe"))
+}
+
+/// Let the downloaded exe run: on a Mac (and any Unix) a file is made
+/// without the right to run it, and an app whose program lacks it does not
+/// start. Windows has no such right.
+fn make_runnable(exe: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    let _ = exe;
+    Ok(())
 }
 
 /// One file of a release, unpacked to `waiting` once it is the file its
@@ -695,8 +763,11 @@ pub fn apply_on_exit() -> Option<PathBuf> {
         let mut shared = shared();
         (shared.staged.take()?, shared.relaunch)
     };
-    match swap(&staged, std::process::id()) {
+    let pid = std::process::id();
+    match swap(&staged, pid) {
         Ok(()) => {
+            #[cfg(target_os = "macos")]
+            settle_bundle(&staged, pid);
             crate::diag::note("update", "installed; the next start runs it");
             relaunch.then(|| staged.exe.1.clone())
         }
@@ -709,7 +780,59 @@ pub fn apply_on_exit() -> Option<PathBuf> {
 
 /// Start the app again. Call last, from `main`.
 pub fn relaunch(exe: &Path) {
+    // A Mac app is opened as the bundle it is, so that it comes up as one.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = bundle_of(exe) {
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg("-n")
+            .arg(bundle)
+            .spawn();
+        return;
+    }
     let _ = std::process::Command::new(exe).spawn();
+}
+
+/// The `.app` an exe is the program of (`X.app/Contents/MacOS/exe`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn bundle_of(exe: &Path) -> Option<&Path> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let is = |path: &Path, name: &str| path.file_name().is_some_and(|n| n == name);
+    let app = bundle
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
+    (is(macos, "MacOS") && is(contents, "Contents") && app).then_some(bundle)
+}
+
+/// On a Mac, once the new files are in: the ones that made way go at once (a
+/// file in use may be deleted there, and a stray one would spoil the
+/// signature), then the bundle is signed again, ad hoc as it was published,
+/// so that macOS opens it with its new program.
+#[cfg(target_os = "macos")]
+fn settle_bundle(staged: &Staged, pid: u32) {
+    let _ = std::fs::remove_file(old_name(&staged.exe.1, pid));
+    if let Some((_, library)) = &staged.library {
+        let _ = std::fs::remove_file(old_name(library, pid));
+    }
+    let Some(bundle) = bundle_of(&staged.exe.1) else {
+        return;
+    };
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(bundle)
+        .output();
+    match signed {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => crate::diag::note(
+            "update",
+            &format!(
+                "the app was not signed again: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ),
+        Err(why) => crate::diag::note("update", &format!("codesign did not run: {why}")),
+    }
 }
 
 /// Tidy up after an update. Call as the app starts, before the flight
@@ -978,6 +1101,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn each_system_takes_its_own_files_from_a_release_of_both() {
+        let file = |name: &str| {
+            format!(r#"{{"name":"{name}","asset":"{name}.gz","bytes":1,"sha256":"00"}}"#)
+        };
+        let all = [
+            "iai.exe",
+            "iai_raw.dll",
+            "iai.pdb",
+            "iai",
+            "libiai_raw.dylib",
+        ];
+        let json = format!(
+            r#"{{"commit":"abc123","time":1,"files":[{}]}}"#,
+            all.map(file).join(",")
+        );
+        let release: Release = serde_json::from_str(&json).unwrap();
+        let names = |names| {
+            release
+                .wanted_by(names)
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(WINDOWS), ["iai.exe", "iai_raw.dll", "iai.pdb"]);
+        // A Mac release has no symbols: the Mac takes the program and its
+        // library, and nothing of Windows.
+        let mac = format!(
+            r#"{{"commit":"abc123","time":1,"files":[{}]}}"#,
+            ["iai.exe", "iai_raw.dll", "iai", "libiai_raw.dylib"]
+                .map(file)
+                .join(",")
+        );
+        let mac: Release = serde_json::from_str(&mac).unwrap();
+        let taken: Vec<&str> = mac.wanted_by(MAC).map(|f| f.name.as_str()).collect();
+        assert_eq!(taken, ["iai", "libiai_raw.dylib"]);
+    }
+
+    #[test]
+    fn a_release_with_no_exe_is_nothing_yet_on_a_mac_and_wrong_on_windows() {
+        assert_eq!(without_exe(true), Ok(None));
+        let error = without_exe(false).unwrap_err();
+        assert!(error.contains("Máy chủ cập nhật"), "{error}");
+    }
+
+    #[test]
+    fn a_mac_app_is_found_around_its_program() {
+        let exe = Path::new("/Applications/iAi.app/Contents/MacOS/iai");
+        assert_eq!(bundle_of(exe), Some(Path::new("/Applications/iAi.app")));
+        for loose in [
+            "/Users/a/iai-pro/target/release/iai",
+            "/Applications/iAi/Contents/MacOS/iai",
+            "/Applications/iAi.app/Contents/Resources/iai",
+            "iai",
+        ] {
+            assert_eq!(bundle_of(Path::new(loose)), None, "{loose}");
+        }
+    }
+
+    #[test]
     fn a_release_reads_and_only_a_newer_one_is_offered() {
         let (json, packed, _) = published(b"new exe", b"new symbols", 2_000);
         let release: Release = serde_json::from_str(&json).unwrap();
@@ -1052,6 +1233,16 @@ pub(crate) mod tests {
             seen.lock().unwrap().push(done)
         })
         .unwrap();
+        // The new exe may run (a Mac starts no program without that right).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&staged.exe.0)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        }
 
         // Both wait under names of their own; what runs is untouched.
         let pid = std::process::id();

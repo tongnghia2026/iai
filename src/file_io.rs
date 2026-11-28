@@ -94,6 +94,8 @@ pub enum FileDialogResult {
     PickedSponsorLogo(PathBuf),
     /// A model file (or a `.zip` of them) to install ("Model AI").
     PickedModelFile(PathBuf),
+    /// The photo or scan of a signature for Layer ▸ Insert Signature.
+    PickedSignature(PathBuf),
     /// What «Điền giấy tờ theo mẫu» asked for: its folder of templates, or
     /// a person's ID card photos.
     #[cfg(feature = "pro")]

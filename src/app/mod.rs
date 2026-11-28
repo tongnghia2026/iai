@@ -60,6 +60,7 @@ pub mod render;
 pub mod scan_cleanup_ops;
 mod selection_feedback;
 pub mod shape_ops;
+pub mod signature_ops;
 pub mod state;
 pub mod text_ops;
 pub mod text_path_drag;

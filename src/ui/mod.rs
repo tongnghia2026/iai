@@ -1290,6 +1290,7 @@ pub(crate) fn frame(ctx: &mut egui::Ui, data: &UiData, out: &mut UiActions) {
         draw_delete_preset_dialog(ctx, data, &mut actions);
         draw_crop_idle_border(ctx, data, canvas_viewport);
         draw_crop_overlay(ctx, data, canvas_viewport);
+        draw_crop_straighten_line(ctx, data, canvas_viewport);
         draw_doubtful_cards(ctx, data, canvas_viewport);
 
         // Selected Develop local-mask outline (screen space — see
@@ -2712,8 +2713,64 @@ fn draw_crop_idle_border(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egu
                 egui::Stroke::new(1.25_f32, egui::Color32::WHITE),
                 egui::StrokeKind::Inside,
             );
+            // Free crop starts with the whole picture: show its handles, as
+            // they can be dragged straight away.
+            if data.tool.crop_mode == 0 {
+                let fill = egui::Color32::from_rgba_unmultiplied(245, 245, 245, 245);
+                let border = egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(25, 25, 25, 230),
+                );
+                let (l, r, t, b) = (
+                    canvas_rect.left(),
+                    canvas_rect.right(),
+                    canvas_rect.top(),
+                    canvas_rect.bottom(),
+                );
+                let (mx, my) = (canvas_rect.center().x, canvas_rect.center().y);
+                let corners = [(l, t), (r, t), (l, b), (r, b)].map(|(x, y)| (x, y, 9.0));
+                let edges = [(mx, t), (mx, b), (l, my), (r, my)].map(|(x, y)| (x, y, 7.0));
+                for (x, y, size) in corners.into_iter().chain(edges) {
+                    let h = egui::Rect::from_center_size(egui::pos2(x, y), egui::vec2(size, size));
+                    painter.rect_filled(h, 1.0, fill);
+                    painter.rect_stroke(h, 1.0, border, egui::StrokeKind::Outside);
+                }
+            }
         }
     }
+}
+
+/// The Crop's Straighten line while it is drawn, with its lean in degrees.
+fn draw_crop_straighten_line(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
+    let Some([x0, y0, x1, y1]) = data.tool.crop_straighten_line else {
+        return;
+    };
+    if data.tool.active_tool != ToolId::Crop {
+        return;
+    }
+    let zoom = data.doc.zoom;
+    let to_screen =
+        |x: f32, y: f32| egui::pos2(x * zoom + data.doc.offset_x, y * zoom + data.doc.offset_y);
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            CANVAS_TOOL_OVERLAY_ORDER,
+            egui::Id::new("crop_straighten_line"),
+        ))
+        .with_clip_rect(canvas_viewport);
+    let (a, b) = (to_screen(x0, y0), to_screen(x1, y1));
+    painter.line_segment(
+        [a, b],
+        egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(150)),
+    );
+    painter.line_segment([a, b], egui::Stroke::new(1.25_f32, egui::Color32::WHITE));
+    let deg = (y1 - y0).atan2(x1 - x0).to_degrees();
+    painter.text(
+        b + egui::vec2(12.0, 12.0),
+        egui::Align2::LEFT_TOP,
+        format!("{deg:.1}°"),
+        egui::FontId::proportional(12.0),
+        egui::Color32::WHITE,
+    );
 }
 
 fn draw_crop_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::Rect) {
@@ -2819,7 +2876,13 @@ fn draw_crop_overlay(ctx: &mut egui::Ui, data: &UiData, canvas_viewport: egui::R
             1.35_f32,
             egui::Color32::from_rgba_unmultiplied(255, 255, 255, 112),
         );
-        match data.tool.crop_overlay {
+        // As Photoshop's: the guides show while the frame is dragged.
+        let overlay = if data.tool.crop_dragging {
+            data.tool.crop_overlay
+        } else {
+            0
+        };
+        match overlay {
             1 => {
                 for i in 1..3 {
                     let t = i as f32 / 3.0;

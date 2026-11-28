@@ -1375,6 +1375,21 @@ fn crop_options(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
             }
         });
 
+    ui.separator();
+    if ui
+        .selectable_label(
+            data.tool.crop_straightening,
+            format!("{} Straighten", ph::RULER),
+        )
+        .on_hover_text("Draw a line along the horizon or a wall to level the picture")
+        .clicked()
+    {
+        actions.run(
+            "tool.crop_straighten",
+            serde_json::json!({ "on": !data.tool.crop_straightening }),
+        );
+    }
+
     if data.tool.crop_rect.is_some() {
         ui.separator();
         let cancel_btn = egui::Button::new(top_options_icon(ph::X).color(pal.danger))

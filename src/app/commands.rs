@@ -231,6 +231,18 @@ pub mod menu {
         ),
         KeyChord::ctrl_shift(KeyName::N),
     );
+    /// Layer ▸ Insert Signature: without a path the app asks for the
+    /// picture first (`App::signature_step`).
+    pub const INSERT_SIGNATURE: MenuCommand = keyed(
+        item(
+            "layer.place_signature",
+            "Insert Signature...",
+            "layer.place_signature",
+            "{}",
+            CommandGroup::Layer,
+        ),
+        KeyChord::ctrl_shift(KeyName::K),
+    );
     pub const MERGE_DOWN: MenuCommand = item(
         "layer.merge_down",
         "Merge Down",
@@ -261,7 +273,7 @@ pub mod menu {
     );
 
     /// Every one, in the order the shortcut lists show them.
-    pub const ALL: [&MenuCommand; 13] = [
+    pub const ALL: [&MenuCommand; 14] = [
         &GRAYSCALE,
         &BITS_8,
         &BITS_16,
@@ -271,6 +283,7 @@ pub mod menu {
         &FLIP_V,
         &ADD_ARTBOARD,
         &NEW_LAYER,
+        &INSERT_SIGNATURE,
         &MERGE_DOWN,
         &MERGE_ALL,
         &POWERCLIP_PLACE,

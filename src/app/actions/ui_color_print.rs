@@ -295,7 +295,7 @@ impl App {
                 // this thread, and more with every copy. What the worker needs
                 // of the document is taken here; `poll_print_job` hears how it
                 // went.
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 if let Some(pages) = &print_pages
                     && gdi_failed.is_none()
                 {
@@ -319,8 +319,8 @@ impl App {
                 }
                 // Why the direct route failed, when this frame is its fallback.
                 let gdi_result: Option<Result<(), String>> = gdi_failed.map(Err);
-                let send_via_pdf =
-                    gdi_result.is_some() || (cfg!(not(target_os = "windows")) && print_send);
+                let send_via_pdf = gdi_result.is_some()
+                    || (cfg!(not(any(target_os = "windows", target_os = "macos"))) && print_send);
                 if !actions.print.print_save_pdf && !send_via_pdf {
                     return;
                 }

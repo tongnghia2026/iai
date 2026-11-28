@@ -50,7 +50,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                                 egui::Button::new(
                                     egui::RichText::new("Back to Canvas")
                                         .size(11.0)
-                                        .color(egui::Color32::from_gray(70)),
+                                        .color(egui::Color32::from_gray(120)),
                                 )
                                 .frame(false),
                             )
@@ -100,7 +100,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                         "  ·  Open Source Image Editor"
                     ))
                     .size(11.0)
-                    .color(egui::Color32::from_gray(90)),
+                    .color(egui::Color32::from_gray(130)),
                 );
 
                 ui.add_space(16.0);
@@ -115,7 +115,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                     if ui
                         .add(
                             egui::Button::new(egui::RichText::new("  New Canvas  ").size(13.0))
-                                .fill(egui::Color32::from_rgb(30, 100, 215))
+                                .fill(egui::Color32::from_rgb(52, 120, 226))
                                 .min_size(egui::vec2(btn_w, 40.0)),
                         )
                         .clicked()
@@ -164,8 +164,8 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 ui.add_space(18.0);
                 ui.label(
                     egui::RichText::new("Recent Files")
-                        .size(11.0)
-                        .color(egui::Color32::from_gray(75)),
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(150)),
                 );
                 ui.add_space(8.0);
             });
@@ -177,7 +177,7 @@ pub fn build(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("No recent files")
-                            .color(egui::Color32::from_gray(55))
+                            .color(egui::Color32::from_gray(120))
                             .size(12.0),
                     );
                 });
@@ -244,7 +244,11 @@ fn recent_card(ui: &mut egui::Ui, item: &crate::ui::RecentThumb, actions: &mut U
         6.0,
         egui::Stroke::new(
             1.0_f32,
-            egui::Color32::from_gray(if hovered { 72 } else { 38 }),
+            egui::Color32::from_rgb(
+                if hovered { 74 } else { 40 },
+                if hovered { 144 } else { 42 },
+                if hovered { 240 } else { 50 },
+            ),
         ),
         egui::StrokeKind::Inside,
     );
@@ -291,7 +295,7 @@ fn recent_card(ui: &mut egui::Ui, item: &crate::ui::RecentThumb, actions: &mut U
         egui::Align2::CENTER_CENTER,
         format!("{}×{}", item.dims.0, item.dims.1),
         egui::FontId::proportional(9.0),
-        egui::Color32::from_gray(110),
+        egui::Color32::from_gray(135),
     );
 
     if resp.clicked() {

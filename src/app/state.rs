@@ -3356,10 +3356,6 @@ impl App {
         use crate::tools::crop::CropHandle;
 
         let c = self.edit.tools.crop();
-        if !c.has_selection() {
-            return 10;
-        }
-
         let zoom = self.edit.view.zoom;
         let vox = self.edit.view.offset_x;
         let voy = self.edit.view.offset_y;
@@ -3369,9 +3365,13 @@ impl App {
         let cx = (mx - vox) / zoom;
         let cy = (my - voy) / zoom;
 
-        let handle = c.detect_handle(cx, cy, zoom);
+        let canvas = &self.docs.active().canvas;
+        // With no frame up yet the edges and corners of the frame the tool
+        // starts with still take a press: they show the resize arrows too.
+        let handle = c.hover_handle(cx, cy, zoom, canvas.width, canvas.height);
 
         match handle {
+            CropHandle::None if !c.has_selection() => 10,
             CropHandle::TopLeft | CropHandle::BottomRight => 2,
             CropHandle::TopRight | CropHandle::BottomLeft => 3,
             CropHandle::Top | CropHandle::Bottom => 4,

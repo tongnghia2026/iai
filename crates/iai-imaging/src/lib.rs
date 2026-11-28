@@ -14,5 +14,6 @@ pub mod output_sharpen;
 pub mod quick_select;
 pub mod refine;
 pub mod scan_cleanup;
+pub mod signature;
 pub mod smart_brush;
 pub mod warp;

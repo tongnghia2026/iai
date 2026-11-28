@@ -422,14 +422,17 @@ fn file_menu(
         }
     });
     ui.separator();
-    if ui
-        .add(menu_item_enabled(
-            "Print...",
-            &data.keymap.label_for(Command::FilePrint),
-            data.doc.has_doc,
-        ))
-        .clicked()
-    {
+    let print = ui.add(menu_item_enabled(
+        "Print...",
+        &data.keymap.label_for(Command::FilePrint),
+        data.doc.has_doc && super::dialogs::CAN_PRINT,
+    ));
+    let print = if super::dialogs::CAN_PRINT {
+        print
+    } else {
+        print.on_disabled_hover_text(super::dialogs::NO_PRINTING_HERE)
+    };
+    if print.clicked() {
         actions.print.show_print_dialog = Some(true);
         ui.close();
     }
@@ -1036,6 +1039,11 @@ fn layer_menu(ui: &mut egui::Ui, data: &UiData, actions: &mut UiActions) {
         actions.run("layer.via_copy", serde_json::json!({}));
         ui.close();
     }
+    // No path: the app asks for the picture first (see `signature_step`).
+    command_item(ui, data, actions, &menu::INSERT_SIGNATURE, data.doc.has_doc).on_hover_text(
+        "Chọn ảnh chụp / scan chữ ký (hoặc con dấu) trên giấy: nền giấy thành trong suốt, \
+         chữ ký thành một layer riêng ở góc dưới bên phải để kéo, co giãn",
+    );
     if ui
         .add(menu_item_enabled(
             "Delete Layer",

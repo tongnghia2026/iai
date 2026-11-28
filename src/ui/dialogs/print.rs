@@ -4,6 +4,13 @@ use super::*;
 
 const PRINTER_PICKER_OPEN_ID: &str = "print_printer_picker_open";
 
+/// Whether this build can print: through Windows (GDI) or the Mac's CUPS.
+pub(crate) const CAN_PRINT: bool = cfg!(any(windows, target_os = "macos"));
+
+/// What File ▸ Print says where it cannot print.
+pub(crate) const NO_PRINTING_HERE: &str = "In ảnh hiện chỉ có trên Windows và Mac. Trên máy này: \
+File ▸ Export As ▸ PDF, rồi mở file PDF bằng Xem trước (Preview) và in từ đó.";
+
 pub(crate) fn print_dialog(ctx: &egui::Context, data: &UiData, actions: &mut UiActions) {
     let picker_id = egui::Id::new(PRINTER_PICKER_OPEN_ID);
     // While the printer list is open, Esc/Enter belong to the list.

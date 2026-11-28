@@ -827,10 +827,14 @@ pub fn session_dir() -> Option<&'static Path> {
 pub fn open_folder() {
     let dir = root_dir();
     let _ = std::fs::create_dir_all(&dir);
-    #[cfg(windows)]
-    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
-    #[cfg(not(windows))]
-    let _ = dir;
+    let program = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(&dir).spawn();
 }
 
 /// When the exe was started as the watcher: do that job and report `true`, so

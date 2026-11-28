@@ -669,83 +669,205 @@ impl Command for PlaceImage {
             270 => image::imageops::rotate270(&picture),
             _ => picture,
         };
-        let canvas = s.canvas_mut(Some(doc))?;
-        let (page_w, page_h) = (canvas.width, canvas.height);
+        let name = p.name.clone().unwrap_or(source_name);
+        let (page_w, page_h) = {
+            let canvas = s.canvas(Some(doc))?;
+            (canvas.width, canvas.height)
+        };
         let area = p.area.unwrap_or(RectPx {
             x: 0,
             y: 0,
             w: page_w,
             h: page_h,
         });
-        let margin = p.margin_px.saturating_mul(2);
-        let (room_w, room_h) = (
-            area.w.saturating_sub(margin).max(1),
-            area.h.saturating_sub(margin).max(1),
-        );
-        let (pw, ph) = (picture.width().max(1), picture.height().max(1));
-        let scale = match p.fit {
-            PlaceFit::Contain => (room_w as f32 / pw as f32).min(room_h as f32 / ph as f32),
-            PlaceFit::Cover => (room_w as f32 / pw as f32).max(room_h as f32 / ph as f32),
-            PlaceFit::None => 1.0,
+        let id = place_picture(
+            s,
+            doc,
+            picture,
+            &name,
+            area,
+            p.fit,
+            p.margin_px,
+            "Place Image",
+        )?;
+        answer(s, doc, Some(id)).map(Plan::Done)
+    }
+}
+
+/// Put `picture` on the page of `doc` as a new layer named `name`, sized
+/// into `area` by `fit` with `margin` pixels kept clear, centred: one undo
+/// step called `label`. The new layer's id.
+#[allow(clippy::too_many_arguments)]
+fn place_picture(
+    s: &mut Session<'_>,
+    doc: u32,
+    picture: image::RgbaImage,
+    name: &str,
+    area: RectPx,
+    fit: PlaceFit,
+    margin: u32,
+    label: &str,
+) -> Result<u32, CmdError> {
+    let canvas = s.canvas_mut(Some(doc))?;
+    let margin_px = margin;
+    let margin = margin_px.saturating_mul(2);
+    let (room_w, room_h) = (
+        area.w.saturating_sub(margin).max(1),
+        area.h.saturating_sub(margin).max(1),
+    );
+    let (pw, ph) = (picture.width().max(1), picture.height().max(1));
+    let scale = match fit {
+        PlaceFit::Contain => (room_w as f32 / pw as f32).min(room_h as f32 / ph as f32),
+        PlaceFit::Cover => (room_w as f32 / pw as f32).max(room_h as f32 / ph as f32),
+        PlaceFit::None => 1.0,
+    };
+    let (sw, sh) = (
+        ((pw as f32 * scale).round() as u32).max(1),
+        ((ph as f32 * scale).round() as u32).max(1),
+    );
+    let largest = iai_canvas::canvas::MAX_DIMENSION;
+    if sw > largest || sh > largest {
+        return Err(CmdError::new(
+            ErrorCode::TooLarge,
+            "the placed picture is too large",
+        ));
+    }
+    let scaled = if (sw, sh) == (pw, ph) {
+        picture
+    } else {
+        image::imageops::resize(&picture, sw, sh, image::imageops::FilterType::Lanczos3)
+    };
+    // Cover: only what lies inside the box is kept.
+    let (kept, kw, kh) = if fit == PlaceFit::Cover && (sw > room_w || sh > room_h) {
+        let (kw, kh) = (sw.min(room_w), sh.min(room_h));
+        let cut = image::imageops::crop_imm(
+            &scaled,
+            sw.saturating_sub(kw) / 2,
+            sh.saturating_sub(kh) / 2,
+            kw,
+            kh,
+        )
+        .to_image();
+        (cut, kw, kh)
+    } else {
+        (scaled, sw, sh)
+    };
+    let half = |room: u32, size: u32| i32::try_from(room.saturating_sub(size) / 2).unwrap_or(0);
+    let margin_i = i32::try_from(margin_px).unwrap_or(0);
+    let x = area
+        .x
+        .saturating_add(margin_i)
+        .saturating_add(half(room_w, kw));
+    let y = area
+        .y
+        .saturating_add(margin_i)
+        .saturating_add(half(room_h, kh));
+    structural(canvas, label, |canvas| {
+        let (w, h) = (canvas.width, canvas.height);
+        let stack = &mut canvas.layer_stack;
+        let idx = stack.add_layer(w, h);
+        let layer = stack
+            .layers
+            .get_mut(idx)
+            .ok_or_else(|| CmdError::internal("new layer"))?;
+        let id = layer.id;
+        let parent = layer.parent_id;
+        let mut placed = iai_doc::layer::Layer::from_rgba(id, name, kept.into_raw(), kw, kh);
+        placed.offset = (x, y);
+        placed.parent_id = parent;
+        *layer = placed;
+        Ok(id)
+    })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PlaceSignatureParams {
+    /// Document id (see `doc.list`) to place into; the document shown when omitted.
+    pub doc: Option<u32>,
+    /// The photo or scan of the signature (or a stamp) on its paper.
+    #[schemars(length(min = 1, max = 4096))]
+    pub path: String,
+    /// The box on the page to place it in, in pixels; a box in the lower
+    /// right corner (three tenths of the page wide) when omitted.
+    #[serde(rename = "box")]
+    pub area: Option<RectPx>,
+    #[schemars(length(min = 1, max = 200))]
+    pub name: Option<String>,
+}
+
+impl Validate for PlaceSignatureParams {}
+
+static PLACE_SIGNATURE: CommandMeta = CommandMeta {
+    id: "layer.place_signature",
+    label_vi: "Chèn chữ ký",
+    label_en: "Insert Signature",
+    doc: "Put a signature (or a stamp) photographed or scanned on paper onto the page as a \
+          new layer: the paper goes clear, the ink keeps its colour, the picture is cut \
+          down to the ink and sized into `box` (by default a box in the lower right \
+          corner). Move or resize the layer after. One undo step.",
+    effects: &[Effect::Edit, Effect::ReadFiles],
+    featured: true,
+};
+
+pub struct PlaceSignature;
+
+/// The box a signature goes in when none is given: three tenths of the page
+/// wide, an eighth high, in the lower right corner, a little in from the edge.
+fn signature_box(page_w: u32, page_h: u32) -> RectPx {
+    let w = (page_w / 10).saturating_mul(3).max(1);
+    let h = (page_h / 8).max(1);
+    let gap = page_w.min(page_h) / 25;
+    RectPx {
+        x: i32::try_from(page_w.saturating_sub(w.saturating_add(gap))).unwrap_or(0),
+        y: i32::try_from(page_h.saturating_sub(h.saturating_add(gap))).unwrap_or(0),
+        w,
+        h,
+    }
+}
+
+impl Command for PlaceSignature {
+    type Params = PlaceSignatureParams;
+    type Output = LayerChanged;
+
+    fn meta(&self) -> &'static CommandMeta {
+        &PLACE_SIGNATURE
+    }
+
+    fn plan(
+        &self,
+        s: &mut Session<'_>,
+        p: PlaceSignatureParams,
+    ) -> Result<Plan<LayerChanged>, CmdError> {
+        let doc = s.doc_id(p.doc)?;
+        let from = PlaceSource {
+            path: Some(p.path.clone()),
+            doc: None,
         };
-        let (sw, sh) = (
-            ((pw as f32 * scale).round() as u32).max(1),
-            ((ph as f32 * scale).round() as u32).max(1),
-        );
-        let largest = iai_canvas::canvas::MAX_DIMENSION;
-        if sw > largest || sh > largest {
-            return Err(CmdError::new(
-                ErrorCode::TooLarge,
-                "the placed picture is too large",
-            ));
-        }
-        let scaled = if (sw, sh) == (pw, ph) {
-            picture
-        } else {
-            image::imageops::resize(&picture, sw, sh, image::imageops::FilterType::Lanczos3)
-        };
-        // Cover: only what lies inside the box is kept.
-        let (kept, kw, kh) = if p.fit == PlaceFit::Cover && (sw > room_w || sh > room_h) {
-            let (kw, kh) = (sw.min(room_w), sh.min(room_h));
-            let cut = image::imageops::crop_imm(
-                &scaled,
-                sw.saturating_sub(kw) / 2,
-                sh.saturating_sub(kh) / 2,
-                kw,
-                kh,
-            )
-            .to_image();
-            (cut, kw, kh)
-        } else {
-            (scaled, sw, sh)
-        };
-        let half = |room: u32, size: u32| i32::try_from(room.saturating_sub(size) / 2).unwrap_or(0);
-        let margin_i = i32::try_from(p.margin_px).unwrap_or(0);
-        let x = area
-            .x
-            .saturating_add(margin_i)
-            .saturating_add(half(room_w, kw));
-        let y = area
-            .y
-            .saturating_add(margin_i)
-            .saturating_add(half(room_h, kh));
-        let name = p.name.clone().unwrap_or(source_name);
-        let id = structural(canvas, "Place Image", |canvas| {
-            let (w, h) = (canvas.width, canvas.height);
-            let stack = &mut canvas.layer_stack;
-            let idx = stack.add_layer(w, h);
-            let layer = stack
-                .layers
-                .get_mut(idx)
-                .ok_or_else(|| CmdError::internal("new layer"))?;
-            let id = layer.id;
-            let parent = layer.parent_id;
-            let mut placed = iai_doc::layer::Layer::from_rgba(id, &name, kept.into_raw(), kw, kh);
-            placed.offset = (x, y);
-            placed.parent_id = parent;
-            *layer = placed;
-            Ok(id)
+        let (picture, source_name) = place_source(s, &from)?;
+        let (w, h) = picture.dimensions();
+        let ink = iai_imaging::signature::lift_ink(picture.as_raw(), w, h).ok_or_else(|| {
+            CmdError::new(ErrorCode::BadParams, "no ink found on the picture")
+                .vi("Không thấy nét chữ ký trong ảnh — chọn ảnh chữ ký trên nền giấy sáng")
         })?;
+        let lifted = image::RgbaImage::from_raw(ink.width, ink.height, ink.rgba)
+            .ok_or_else(|| CmdError::internal("lifted signature"))?;
+        let (page_w, page_h) = {
+            let canvas = s.canvas(Some(doc))?;
+            (canvas.width, canvas.height)
+        };
+        let area = p.area.unwrap_or_else(|| signature_box(page_w, page_h));
+        let name = p.name.clone().unwrap_or(source_name);
+        let id = place_picture(
+            s,
+            doc,
+            lifted,
+            &name,
+            area,
+            PlaceFit::Contain,
+            0,
+            "Insert Signature",
+        )?;
         answer(s, doc, Some(id)).map(Plan::Done)
     }
 }

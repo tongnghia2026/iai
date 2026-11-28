@@ -66,7 +66,7 @@ For Macs with an Apple chip (M1, M2, M3, M4):
 2. Drag **iAi** onto the **Applications** folder beside it.
 3. Open iAi from Applications. The first time, macOS says it cannot verify the app (it is not signed with an Apple developer account): open **System Settings → Privacy & Security**, scroll down and press **Open Anyway**. This is asked only once.
 
-The Mac build is the free core, without the Pro pack, and does not update itself: for a newer build, download the file again. Intel Macs: build from source as below.
+The Mac download is the free core, without the Pro pack. It updates itself like the Windows build (Help ▸ Kiểm tra cập nhật) from the first release that carries the Mac files; until then, for a newer build, download the file again. Intel Macs: build from source as below.
 
 ### Windows
 

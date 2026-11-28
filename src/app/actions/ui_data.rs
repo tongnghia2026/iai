@@ -1483,6 +1483,9 @@ impl App {
                 }
             },
             crop_rotation: 0.0,
+            crop_dragging: self.edit.tools.crop().is_dragging,
+            crop_straightening: self.edit.tools.crop().straightening,
+            crop_straighten_line: self.edit.tools.crop().straighten_line(),
             crop_image_moved: self.edit.tools.active_id() == crate::tools::ToolId::Crop
                 && self.edit.tools.crop().has_selection()
                 && self

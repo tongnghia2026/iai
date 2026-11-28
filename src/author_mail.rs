@@ -421,13 +421,7 @@ fn desktop_dir() -> PathBuf {
 
 /// Show `path` in the file manager.
 pub fn reveal(path: &Path) {
-    #[cfg(windows)]
-    let _ = std::process::Command::new("explorer.exe")
-        .arg("/select,")
-        .arg(path)
-        .spawn();
-    #[cfg(not(windows))]
-    let _ = path;
+    iai_platform::file_manager::reveal(path);
 }
 
 #[cfg(test)]

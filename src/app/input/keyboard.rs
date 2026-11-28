@@ -1536,7 +1536,12 @@ impl App {
         if let Some((id, args)) = cmd.engine_command() {
             // A held key runs it once.
             if !repeat {
-                let _ = self.run_with(id, args);
+                // A command that first needs a file asks for it, as from
+                // the menu (Insert Signature).
+                let call = iai_engine::CommandCall::new(id, args);
+                if !self.signature_step(&call) {
+                    let _ = self.execute_command(call);
+                }
                 self.redraw_main();
             }
             return;

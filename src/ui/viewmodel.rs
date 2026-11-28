@@ -362,6 +362,11 @@ pub struct ToolViewModel {
     /// The image shows turned or moved under the crop frame and the screen
     /// pass shades it: the overlay draws no shade and no page sheet then.
     pub crop_image_moved: bool,
+    /// The Crop frame is being dragged (the overlay shows only then).
+    pub crop_dragging: bool,
+    /// Straighten is on, and the line being drawn (canvas px).
+    pub crop_straightening: bool,
+    pub crop_straighten_line: Option<[f32; 4]>,
     /// Perspective Crop quad corners [TL, TR, BR, BL] in canvas space.
     pub persp_crop_quad: Option<[(f32, f32); 4]>,
     /// Perspective Crop corner-picking preview: the corners placed so far with the
@@ -1534,6 +1539,9 @@ impl Default for UiData {
                 crop_rect: None,
                 crop_rotation: 0.0,
                 crop_image_moved: false,
+                crop_dragging: false,
+                crop_straightening: false,
+                crop_straighten_line: None,
                 persp_crop_quad: None,
                 persp_crop_preview: Vec::new(),
                 persp_w_display: 0.0,

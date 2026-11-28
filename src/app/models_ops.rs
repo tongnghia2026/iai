@@ -61,7 +61,7 @@ impl App {
             "models.reveal" => {
                 let dir = model_store::main_folder();
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                iai_platform::file_manager::open_folder(&dir);
                 true
             }
             "models.install" if call.args.get("path").is_none() => {

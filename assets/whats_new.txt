@@ -2,6 +2,19 @@
 # mới nhất ở trên; dòng đầu là ngày, mỗi dòng sau là một điểm mới. App hiện khối
 # đầu tiên ở lần mở đầu tiên sau khi cập nhật.
 
+28/11/2026
+- Giao diện mới, dễ nhìn hơn: nền tối sâu, công cụ và lớp đang chọn có màu xanh dương, nút và menu bo góc mềm, màn hình chào chữ rõ hơn.
+- Máy Mac: in thẳng ra máy in bằng File > Print (Cmd+P), như trên Windows. Ảnh in ra đúng kích thước thật (ảnh thẻ 3×4, 4×6 cm không bị thu phóng). Nút «Print Settings…» mở phần Máy in & Máy quét của Mac. Máy in hết giấy, kẹt giấy, mất kết nối hay máy chưa có máy in nào thì app báo rõ, không bị treo.
+- Crop giống Photoshop hơn: vừa chọn Crop là kéo được ngay các góc, cạnh của khung quanh ảnh; nút «Straighten» để kẻ một đường theo chân trời hay mép tường, ảnh tự xoay cho thẳng; ô lưới chỉ hiện khi đang kéo khung; đưa chuột tới góc hay cạnh khung thì con trỏ thành mũi tên hai chiều để biết chỗ kéo được.
+- Chèn chữ ký: Layer > Insert Signature (Ctrl+Shift+K), chọn ảnh chụp chữ ký trên giấy, app chỉ giữ lại nét mực thành một layer riêng.
+- Ảnh thẻ: một người làm được cả 3x4 và 4x6 cùng lúc, xếp chung trên giấy 13x18; sửa ảnh của người đó một lần là mọi cỡ đổi theo.
+- Máy Mac: app tự cập nhật bản mới như trên Windows.
+
+22/11/2026
+- Máy Mac có bản cài sẵn: tải file iAi-mac.dmg trên trang tải về, mở ra rồi kéo iAi vào thư mục Applications, không cần tự build nữa.
+- Máy Mac: nút «Mở thư mục model» và các nút mở thư mục khác nay mở được Finder; model cài từ file được cất ở thư mục riêng của iAi, không chép vào trong app nên tải bản mới không mất model.
+- Máy Windows không đổi gì.
+
 22/11/2026
 - Máy Mac: phím tắt dùng phím Command thay cho Ctrl — Command+S lưu, Command+Z hoàn tác, Command+C / Command+V chép, dán… Các thao tác giữ Ctrl rồi bấm / kéo chuột trên Mac cũng giữ Command. Menu ghi «Cmd+» và «Option+».
 - Máy Mac: sửa lỗi mở app lên mà bấm chuột không được nút nào (cảm ơn bạn hoangvt9x đã tìm ra và sửa).

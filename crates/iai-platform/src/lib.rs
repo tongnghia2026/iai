@@ -10,6 +10,7 @@ pub mod atomic_file;
 pub mod clipboard;
 #[cfg(windows)]
 pub mod console;
+pub mod file_manager;
 pub mod hw;
 pub mod mem_report;
 #[cfg(windows)]

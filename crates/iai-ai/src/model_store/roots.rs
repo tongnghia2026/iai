@@ -87,7 +87,7 @@ impl Places {
         let portable = self
             .exe_dir
             .as_ref()
-            .filter(|dir| !is_build_dir(dir))
+            .filter(|dir| !is_build_dir(dir) && !in_app_bundle(dir))
             .map(|dir| dir.join("models"));
         self.user_folder
             .iter()
@@ -102,6 +102,23 @@ impl Places {
 pub fn is_build_dir(dir: &Path) -> bool {
     dir.components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("target"))
+}
+
+/// The exe of a Mac app: `<name>.app/Contents/MacOS`. Models are not put
+/// in there: a file added changes the signed app, and the next download of
+/// the app replaces the folder, models and all.
+pub fn in_app_bundle(dir: &Path) -> bool {
+    let mut up = dir
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_string_lossy());
+    matches!(
+        (up.next(), up.next(), up.next()),
+        (Some(macos), Some(contents), Some(app))
+            if macos == "MacOS"
+                && contents == "Contents"
+                && app.to_ascii_lowercase().ends_with(".app")
+    )
 }
 
 /// Whether a file can be made in `dir` (made first if it is not there).
@@ -182,6 +199,26 @@ fn set_user_folder_in(app_data: &Path, folder: Option<&Path>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_never_go_inside_a_mac_app() {
+        let app = temp("bundle")
+            .join("iAi.app")
+            .join("Contents")
+            .join("MacOS");
+        assert!(in_app_bundle(&app));
+        assert!(!in_app_bundle(&temp("plain")));
+        let app_data = temp("bundle_data");
+        let places = Places {
+            exe_dir: Some(app.clone()),
+            user_folder: None,
+            app_data: app_data.clone(),
+            cwd: None,
+        };
+        assert_eq!(places.main_folder(), app_data.join("models"));
+        // A model put there by hand is still found.
+        assert!(places.roots().contains(&app.join("models")));
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -55,7 +55,7 @@ pub(crate) fn update_button_fill(
 ) -> egui::Color32 {
     match update.stage {
         UpdateStage::DownloadFailed(_) | UpdateStage::CheckFailed(_) => pal.warning,
-        UpdateStage::Downloading(_) => pal.accent_primary,
+        UpdateStage::Downloading(_) => pal.accent_hover,
         _ => pal.success,
     }
 }

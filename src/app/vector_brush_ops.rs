@@ -70,6 +70,17 @@ impl App {
         true
     }
 
+    /// The Crop's Straighten button on the options bar
+    /// (`tool.crop_straighten {on}`): the next drag draws the line to level.
+    pub(in crate::app) fn crop_straighten_step(&mut self, call: &iai_engine::CommandCall) -> bool {
+        if call.command != "tool.crop_straighten" {
+            return false;
+        }
+        let on = call.args.get("on").and_then(|v| v.as_bool()) == Some(true);
+        self.edit.tools.crop_mut().straightening = on;
+        true
+    }
+
     /// The active layer's id if it is a Path holding a Vector Brush stroke, else
     /// `None`. Used to enable/route the Expand Stroke command.
     pub fn active_brush_layer_id(&self) -> Option<u32> {

@@ -173,10 +173,13 @@ impl App {
     /// is: the same change, one undo step, what it says on the status line.
     pub(super) fn handle_command_actions(&mut self, actions: &mut UiActions) {
         for call in std::mem::take(&mut actions.commands) {
-            if self.models_window_step(&call) {
+            if self.models_window_step(&call) || self.signature_step(&call) {
                 continue;
             }
-            if self.node_step(&call) || self.vector_brush_step(&call) {
+            if self.node_step(&call)
+                || self.vector_brush_step(&call)
+                || self.crop_straighten_step(&call)
+            {
                 continue;
             }
             #[cfg(feature = "pro")]

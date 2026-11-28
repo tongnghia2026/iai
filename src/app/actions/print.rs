@@ -108,6 +108,22 @@ impl App {
                     None => self.shell.status_msg = self.print_done_note(Some(&e)),
                 }
             }
+            // The Mac has no other way to the printer than CUPS: what it
+            // said is told, and the sheets behind it are not sent to the
+            // same printer.
+            #[cfg(target_os = "macos")]
+            Ok(Err(e)) => {
+                crate::diag::note("print", &format!("{}: {e}", job.printer));
+                let dropped = self.jobs.print_queue.len();
+                self.jobs.print_queue.clear();
+                self.jobs.print_skipped.clear();
+                self.shell.status_msg = if dropped == 0 {
+                    e
+                } else {
+                    format!("{e} ({dropped} tờ còn lại chưa in)")
+                };
+            }
+            #[cfg(not(target_os = "macos"))]
             Ok(Err(e)) => {
                 self.jobs.print_gdi_failed = Some(e);
                 self.jobs.print_failed_doc = Some(job.page_of);
@@ -212,7 +228,7 @@ impl App {
     /// rendered by the worker that prints it. Several pages with several
     /// copies go out a whole set at a time (1, 2, 3, 1, 2, 3), as Acrobat
     /// collates them.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     pub(in crate::app) fn print_tasks(
         &self,
         pages: &crate::ui::PrintPages,
@@ -267,7 +283,7 @@ impl App {
     }
 
     /// Send `task` now, or after the sheet already on its way.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     pub(in crate::app) fn queue_print_task(
         &mut self,
         task: crate::app::background_jobs::PrintTask,
@@ -286,7 +302,7 @@ impl App {
     /// Hand `task` to a print worker: it composites the page, converts it to
     /// the printer's profile when there is one, and sends it through GDI.
     /// `poll_print_job` hears how it went.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     pub(in crate::app) fn start_print_task(
         &mut self,
         task: crate::app::background_jobs::PrintTask,
@@ -480,7 +496,14 @@ impl App {
         }
         self.shell.print_printers = printers;
         if self.shell.print_printers.is_empty() {
-            self.shell.status_msg = "No printers found".to_string();
+            #[cfg(target_os = "macos")]
+            {
+                self.shell.status_msg = iai_print::cups::NO_PRINTER.to_string();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.shell.status_msg = "No printers found".to_string();
+            }
         }
     }
 
@@ -581,6 +604,13 @@ impl App {
     }
 
     pub(crate) fn open_print_dialog(&mut self) {
+        // Where printing is not built (it goes through Windows), say how to
+        // print instead of opening a dialog that cannot.
+        if !crate::ui::dialogs::CAN_PRINT {
+            self.shell.status_msg = crate::ui::dialogs::NO_PRINTING_HERE.to_string();
+            self.redraw_main();
+            return;
+        }
         self.shell.ui.show_print_dialog = true;
         // The printer list is cached for the session (Refresh re-enumerates, e.g.
         // after plugging in a printer), but the selected printer's paper is re-read
@@ -598,7 +628,7 @@ impl App {
 
 /// One page Print sends: which page it is as the user counts them (1 being
 /// the first), its artboard, its PDF page in an opened PDF, and its sheet.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 struct PageToPrint {
     number: usize,
     artboard: usize,
@@ -608,7 +638,7 @@ struct PageToPrint {
 
 /// The artboards of `doc` asked for, in order, each over its master page
 /// when it shows one. Pages it does not have are left out.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 fn artboard_print_sheets(
     doc: &crate::core::document::Document,
     pages: &crate::ui::PrintPages,
@@ -647,7 +677,7 @@ fn artboard_print_sheets(
 /// (see [`PdfPrintSource`]). Pages it does not have are left out.
 ///
 /// [`PdfPrintSource`]: crate::app::background_jobs::PdfPrintSource
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 fn pdf_print_sheets(
     doc: &crate::core::document::Document,
     pdf: &crate::core::document::PdfDocumentState,
@@ -750,6 +780,8 @@ mod tests {
         (tx, job)
     }
 
+    // The Mac has no PDF route behind CUPS: see the test after this one.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_print_that_went_out_says_so_and_one_refused_is_kept_for_the_pdf_route_of_its_tab() {
         let mut app = App::new();
@@ -783,6 +815,41 @@ mod tests {
                 crate::core::document::DocumentId(1),
                 0
             ))
+        );
+    }
+
+    /// On the Mac a sheet CUPS refuses is told as CUPS's reason, and the
+    /// sheets behind it are not sent to the same printer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_the_mac_a_refused_sheet_says_why_and_stops_the_rest() {
+        use crate::ui::PrintPages;
+        let folder = Folder::new("mac_refused");
+        let mut app = app_with_an_opened_pdf(&folder);
+        let (tx, job) = job_for("Printer");
+        app.jobs.pending_print = Some(job);
+        tx.send(Ok(())).unwrap();
+        app.poll_print_job();
+        assert_eq!(app.shell.status_msg, "Đã gửi lệnh in");
+
+        let layout = app.shell.print_layout;
+        let behind = app.print_tasks(&PrintPages::Pages(vec![2, 3]), layout, None);
+        app.jobs.print_queue.extend(behind);
+        let (tx, job) = job_for("Printer");
+        app.jobs.pending_print = Some(job);
+        let why = "Máy in «Printer» hết giấy: chưa gửi lệnh in.";
+        tx.send(Err(why.to_string())).unwrap();
+        app.poll_print_job();
+        app.handle_color_print_actions(&mut crate::ui::UiActions::default());
+        assert!(app.jobs.pending_print.is_none());
+        assert!(app.jobs.print_queue.is_empty());
+        assert!(
+            app.jobs.print_gdi_failed.is_none(),
+            "no second way to print"
+        );
+        assert_eq!(
+            app.shell.status_msg,
+            format!("{why} (2 tờ còn lại chưa in)")
         );
     }
 
@@ -1287,6 +1354,7 @@ mod tests {
 
     /// A page of an opened PDF the printer refuses stops the print: the
     /// sheets behind it would go to the same printer.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_pdf_page_the_printer_refuses_stops_the_rest() {
         use crate::app::background_jobs::PrintedPage;

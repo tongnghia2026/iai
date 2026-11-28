@@ -148,7 +148,7 @@ impl PrintProgress {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn step(&self) -> Result<(), String> {
+    pub(crate) fn step(&self) -> Result<(), String> {
         if self.is_cancelled() {
             return Err(PRINT_CANCELLED.to_string());
         }
@@ -778,14 +778,42 @@ pub fn print_bands(
     )
 }
 
-/// No printer to ask away from Windows.
-#[cfg(not(target_os = "windows"))]
+/// What CUPS says of the printer, on the Mac.
+#[cfg(target_os = "macos")]
+pub fn printer_state(printer: &str) -> Option<PrinterState> {
+    crate::cups::printer_state(printer)
+}
+
+/// The Mac prints through CUPS: the page as a PDF the size of the paper,
+/// handed to `lp` (see [`crate::cups`]).
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub fn print_bands(
+    printer: &str,
+    _settings: Option<&PrinterSettings>,
+    doc_name: &str,
+    img_w: u32,
+    img_h: u32,
+    dpi: f32,
+    layout: &PrintLayout,
+    copies: u32,
+    progress: &PrintProgress,
+    next_band: impl FnMut(u32, u32) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    crate::cups::print_bands(
+        printer, doc_name, img_w, img_h, dpi, layout, copies, progress, next_band,
+    )
+}
+
+/// No printer to ask away from Windows and the Mac.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn printer_state(_printer: &str) -> Option<PrinterState> {
     None
 }
 
-/// Printing straight to a printer is Windows's; elsewhere it says so.
-#[cfg(not(target_os = "windows"))]
+/// Printing straight to a printer is Windows's and the Mac's; elsewhere it
+/// says so.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[allow(clippy::too_many_arguments)]
 pub fn print_bands(
     _printer: &str,

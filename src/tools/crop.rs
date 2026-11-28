@@ -186,6 +186,9 @@ struct CropBox {
     y1: f32,
 }
 
+/// Shortest Straighten line that counts, canvas px.
+const STRAIGHTEN_MIN_LEN: f32 = 3.0;
+
 pub struct CropTool {
     pub mode: CropMode,
     pub overlay: CropOverlay,
@@ -224,6 +227,11 @@ pub struct CropTool {
     rotate_box_start: f32,
     drag_start_image_tx: f32,
     drag_start_image_ty: f32,
+    /// Photoshop's Straighten: the next drag draws a line along what should
+    /// be level (or upright), and the frame turns to match it.
+    pub straightening: bool,
+    /// The line being drawn, canvas px.
+    straighten_line: Option<((f32, f32), (f32, f32))>,
 }
 
 impl Default for CropTool {
@@ -268,6 +276,8 @@ impl CropTool {
             image_ty: 0.0,
             rotate_start_angle: 0.0,
             rotate_box_start: 0.0,
+            straightening: false,
+            straighten_line: None,
             drag_start_image_tx: 0.0,
             drag_start_image_ty: 0.0,
         }
@@ -525,6 +535,15 @@ impl CropTool {
     }
 
     pub fn init_bounds(&mut self, cw: u32, ch: u32) {
+        [self.crop_x0, self.crop_y0, self.crop_x1, self.crop_y1] = self.starting_frame(cw, ch);
+        self.rotation = 0.0;
+        self.image_tx = 0.0;
+        self.image_ty = 0.0;
+    }
+
+    /// The frame the tool starts with on a `cw` x `ch` page: round the whole
+    /// picture, or the Ratio's / Size's frame centred on it.
+    fn starting_frame(&self, cw: u32, ch: u32) -> [f32; 4] {
         let cw_f = cw as f32;
         let ch_f = ch as f32;
 
@@ -543,21 +562,11 @@ impl CropTool {
             } else {
                 (ch_f * r, ch_f)
             };
-            self.crop_x0 = (cw_f - box_w) * 0.5;
-            self.crop_y0 = (ch_f - box_h) * 0.5;
-            self.crop_x1 = self.crop_x0 + box_w;
-            self.crop_y1 = self.crop_y0 + box_h;
-            self.rotation = 0.0;
-            self.image_tx = 0.0;
-            self.image_ty = 0.0;
+            let x0 = (cw_f - box_w) * 0.5;
+            let y0 = (ch_f - box_h) * 0.5;
+            [x0, y0, x0 + box_w, y0 + box_h]
         } else {
-            self.crop_x0 = 0.0;
-            self.crop_y0 = 0.0;
-            self.crop_x1 = cw_f;
-            self.crop_y1 = ch_f;
-            self.rotation = 0.0;
-            self.image_tx = 0.0;
-            self.image_ty = 0.0;
+            [0.0, 0.0, cw_f, ch_f]
         }
     }
 
@@ -629,6 +638,54 @@ impl CropTool {
         self.image_ty = 0.0;
         self.active_handle = CropHandle::None;
         self.press_had_selection = false;
+        self.straightening = false;
+        self.straighten_line = None;
+    }
+
+    /// The Straighten line being drawn, `[x0, y0, x1, y1]` canvas px.
+    pub fn straighten_line(&self) -> Option<[f32; 4]> {
+        self.straighten_line
+            .map(|((x0, y0), (x1, y1))| [x0, y0, x1, y1])
+    }
+
+    /// Turn the frame so the line from `from` to `to` comes out level, or
+    /// upright when it is nearer upright, and make the frame (its shape kept)
+    /// as large as fits inside the picture, centred on it. A line shorter
+    /// than a few pixels changes nothing.
+    pub fn straighten(&mut self, from: (f32, f32), to: (f32, f32), cw: u32, ch: u32) {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        if dx * dx + dy * dy < STRAIGHTEN_MIN_LEN * STRAIGHTEN_MIN_LEN || cw == 0 || ch == 0 {
+            return;
+        }
+        // The line's lean, either way along it, within ±45° of level or of
+        // upright.
+        let mut a = dy.atan2(dx);
+        if a > FRAC_PI_2 {
+            a -= PI;
+        } else if a <= -FRAC_PI_2 {
+            a += PI;
+        }
+        if a > FRAC_PI_4 {
+            a -= FRAC_PI_2;
+        } else if a < -FRAC_PI_4 {
+            a += FRAC_PI_2;
+        }
+        if !self.has_selection() {
+            self.init_bounds(cw, ch);
+        }
+        let (aw, ah) = (
+            (self.crop_x1 - self.crop_x0).abs().max(1.0),
+            (self.crop_y1 - self.crop_y0).abs().max(1.0),
+        );
+        let (cwf, chf) = (cw as f32, ch as f32);
+        let (c, s) = (a.cos().abs(), a.sin().abs());
+        let fit = (cwf / (aw * c + ah * s)).min(chf / (aw * s + ah * c));
+        self.set_box_from_center(cwf * 0.5, chf * 0.5, aw * fit, ah * fit);
+        // The picture turns back by the lean.
+        self.rotation = -a;
+        self.image_tx = 0.0;
+        self.image_ty = 0.0;
     }
 
     pub fn has_selection(&self) -> bool {
@@ -655,45 +712,51 @@ impl CropTool {
     /// so handles track the visual corners correctly regardless of rotation.
     /// zoom: current view zoom (screen_px / canvas_px). Hit radius is 9 screen-px.
     pub fn detect_handle(&self, x: f32, y: f32, zoom: f32) -> CropHandle {
-        let x0 = self.crop_x0.min(self.crop_x1);
-        let y0 = self.crop_y0.min(self.crop_y1);
-        let x1 = self.crop_x0.max(self.crop_x1);
-        let y1 = self.crop_y0.max(self.crop_y1);
+        handle_at(
+            [self.crop_x0, self.crop_y0, self.crop_x1, self.crop_y1],
+            x,
+            y,
+            zoom,
+        )
+    }
 
-        let mx = (x0 + x1) / 2.0;
-        let my = (y0 + y1) / 2.0;
-        let r = (9.0 / zoom.max(0.01)).clamp(4.0, 24.0);
+    /// What the pointer at `(x, y)` would take, for its cursor: the frame's
+    /// handle, or with no frame up yet an edge or a corner of the frame the
+    /// tool starts with (a press there takes it); `None` off them.
+    pub fn hover_handle(&self, x: f32, y: f32, zoom: f32, cw: u32, ch: u32) -> CropHandle {
+        if self.has_selection() {
+            return self.detect_handle(x, y, zoom);
+        }
+        match handle_at(self.starting_frame(cw, ch), x, y, zoom) {
+            CropHandle::Move | CropHandle::Rotate => CropHandle::None,
+            handle => handle,
+        }
+    }
 
-        let near = |a: f32, b: f32| (a - b).abs() < r;
-
-        if near(x, x0) && near(y, y0) {
-            return CropHandle::TopLeft;
+    /// With no frame up yet: whether a press at `(x, y)` lands on an edge or
+    /// a corner of the frame the tool starts with (round the whole picture,
+    /// or the Ratio's / Size's centred frame). If so that frame is put up
+    /// and the handle taken; if not nothing changes.
+    fn press_takes_idle_frame(&mut self, x: f32, y: f32, ctx: &ToolCtx) -> bool {
+        let (cw, ch) = {
+            let c = ctx.canvas();
+            (c.width, c.height)
+        };
+        let before = (self.crop_x0, self.crop_y0, self.crop_x1, self.crop_y1);
+        let turn = (self.rotation, self.image_tx, self.image_ty);
+        self.init_bounds(cw, ch);
+        let handle = self.detect_handle(x, y, ctx.zoom);
+        let on_frame = !matches!(
+            handle,
+            CropHandle::Move | CropHandle::Rotate | CropHandle::None
+        );
+        if on_frame && self.has_selection() {
+            self.active_handle = handle;
+            return true;
         }
-        if near(x, x1) && near(y, y0) {
-            return CropHandle::TopRight;
-        }
-        if near(x, x0) && near(y, y1) {
-            return CropHandle::BottomLeft;
-        }
-        if near(x, x1) && near(y, y1) {
-            return CropHandle::BottomRight;
-        }
-        if near(x, mx) && near(y, y0) {
-            return CropHandle::Top;
-        }
-        if near(x, mx) && near(y, y1) {
-            return CropHandle::Bottom;
-        }
-        if near(x, x0) && near(y, my) {
-            return CropHandle::Left;
-        }
-        if near(x, x1) && near(y, my) {
-            return CropHandle::Right;
-        }
-        if x > x0 && x < x1 && y > y0 && y < y1 {
-            return CropHandle::Move;
-        }
-        CropHandle::Rotate
+        (self.crop_x0, self.crop_y0, self.crop_x1, self.crop_y1) = before;
+        (self.rotation, self.image_tx, self.image_ty) = turn;
+        false
     }
 
     /// True while the image shows turned or moved under the crop frame.
@@ -836,6 +899,10 @@ impl Tool for CropTool {
 
     fn on_press(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
         let (cx, cy) = (event.canvas_x, event.canvas_y);
+        if self.straightening {
+            self.straighten_line = Some(((cx, cy), (cx, cy)));
+            return ToolResponse::redraw();
+        }
         self.drag_start_x = cx;
         self.drag_start_y = cy;
         self.drag_start_box = CropBox {
@@ -859,6 +926,16 @@ impl Tool for CropTool {
                 self.rotate_box_start = self.rotation;
             } else if self.active_handle == CropHandle::Move {
             }
+        } else if self.press_takes_idle_frame(cx, cy, ctx) {
+            // The frame round the whole picture is taken by an edge or a
+            // corner, as Photoshop's is, instead of a new frame drawn.
+            self.drag_start_box = CropBox {
+                x0: self.crop_x0,
+                y0: self.crop_y0,
+                x1: self.crop_x1,
+                y1: self.crop_y1,
+            };
+            self.press_had_selection = true;
         } else {
             let sx = cx;
             let sy = cy;
@@ -887,6 +964,10 @@ impl Tool for CropTool {
         _prev: &PointerEvent,
         ctx: &mut ToolCtx,
     ) -> ToolResponse {
+        if let Some((from, _)) = self.straighten_line {
+            self.straighten_line = Some((from, (event.canvas_x, event.canvas_y)));
+            return ToolResponse::redraw();
+        }
         let (cx, cy) = (event.canvas_x, event.canvas_y);
         let is_resize_handle = !matches!(
             self.active_handle,
@@ -1120,6 +1201,15 @@ impl Tool for CropTool {
     }
 
     fn on_release(&mut self, event: PointerEvent, ctx: &mut ToolCtx) -> ToolResponse {
+        if let Some((from, _)) = self.straighten_line.take() {
+            let (cw, ch) = {
+                let c = ctx.canvas();
+                (c.width, c.height)
+            };
+            self.straighten(from, (event.canvas_x, event.canvas_y), cw, ch);
+            self.straightening = false;
+            return ToolResponse::redraw();
+        }
         self.is_dragging = false;
         // A box drawn or dragged inside out is put right way round: its
         // handles are found from x0 < x1, y0 < y1, and a corner pressed on an
@@ -1148,6 +1238,49 @@ impl Tool for CropTool {
 
         ToolResponse::redraw()
     }
+}
+
+/// Which handle of the frame `[x0, y0, x1, y1]` (canvas space) is under
+/// the pointer at `(x, y)`. Corners first, then anywhere along an edge (as
+/// Photoshop: the whole side takes it), then inside (move), else outside
+/// (turn). The reach is 9 screen pixels at `zoom` (screen_px / canvas_px).
+fn handle_at(frame: [f32; 4], x: f32, y: f32, zoom: f32) -> CropHandle {
+    let [ax, ay, bx, by] = frame;
+    let (x0, x1) = (ax.min(bx), ax.max(bx));
+    let (y0, y1) = (ay.min(by), ay.max(by));
+    let r = (9.0 / zoom.max(0.01)).clamp(4.0, 24.0);
+    let near = |a: f32, b: f32| (a - b).abs() < r;
+    let along_x = x > x0 - r && x < x1 + r;
+    let along_y = y > y0 - r && y < y1 + r;
+
+    if near(x, x0) && near(y, y0) {
+        return CropHandle::TopLeft;
+    }
+    if near(x, x1) && near(y, y0) {
+        return CropHandle::TopRight;
+    }
+    if near(x, x0) && near(y, y1) {
+        return CropHandle::BottomLeft;
+    }
+    if near(x, x1) && near(y, y1) {
+        return CropHandle::BottomRight;
+    }
+    if near(y, y0) && along_x {
+        return CropHandle::Top;
+    }
+    if near(y, y1) && along_x {
+        return CropHandle::Bottom;
+    }
+    if near(x, x0) && along_y {
+        return CropHandle::Left;
+    }
+    if near(x, x1) && along_y {
+        return CropHandle::Right;
+    }
+    if x > x0 && x < x1 && y > y0 && y < y1 {
+        return CropHandle::Move;
+    }
+    CropHandle::Rotate
 }
 
 #[cfg(test)]
@@ -1674,6 +1807,200 @@ mod tests {
             (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
             (0.0, 0.0, 500.0, 400.0)
         );
+    }
+
+    #[test]
+    fn the_pointer_over_an_edge_or_corner_shows_what_a_press_takes() {
+        let mut crop = CropTool::new();
+        // No frame up yet: the starting frame's sides and corners answer,
+        // inside the picture nothing does (a press there draws a new frame).
+        assert_eq!(
+            crop.hover_handle(499.0, 399.0, 1.0, 500, 400),
+            CropHandle::BottomRight
+        );
+        assert_eq!(
+            crop.hover_handle(1.0, 60.0, 1.0, 500, 400),
+            CropHandle::Left
+        );
+        assert_eq!(
+            crop.hover_handle(300.0, 2.0, 1.0, 500, 400),
+            CropHandle::Top
+        );
+        assert_eq!(
+            crop.hover_handle(200.0, 200.0, 1.0, 500, 400),
+            CropHandle::None
+        );
+        // A frame up: anywhere along a side, not only at its middle.
+        (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1) = (100.0, 100.0, 300.0, 300.0);
+        assert_eq!(
+            crop.hover_handle(130.0, 101.0, 1.0, 500, 400),
+            CropHandle::Top
+        );
+        assert_eq!(
+            crop.hover_handle(299.0, 270.0, 1.0, 500, 400),
+            CropHandle::Right
+        );
+        assert_eq!(
+            crop.hover_handle(200.0, 200.0, 1.0, 500, 400),
+            CropHandle::Move
+        );
+        assert_eq!(
+            crop.hover_handle(50.0, 50.0, 1.0, 500, 400),
+            CropHandle::Rotate
+        );
+    }
+
+    #[test]
+    fn dragging_a_corner_of_the_starting_frame_shrinks_it() {
+        let mut crop = CropTool::new();
+        let mut document = Document::new(DocumentId(1), 500, 400);
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_press(PointerEvent::new(499.0, 399.0), &mut ctx);
+            crop.on_drag(
+                PointerEvent::new(300.0, 250.0),
+                &PointerEvent::new(499.0, 399.0),
+                &mut ctx,
+            );
+            crop.on_release(PointerEvent::new(300.0, 250.0), &mut ctx);
+        }
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (0.0, 0.0, 300.0, 250.0),
+            "the whole-picture frame was taken by its corner, not a new one drawn"
+        );
+    }
+
+    #[test]
+    fn dragging_an_edge_of_the_starting_frame_moves_only_that_edge() {
+        let mut crop = CropTool::new();
+        let mut document = Document::new(DocumentId(1), 500, 400);
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_press(PointerEvent::new(1.0, 200.0), &mut ctx);
+            crop.on_drag(
+                PointerEvent::new(120.0, 230.0),
+                &PointerEvent::new(1.0, 200.0),
+                &mut ctx,
+            );
+            crop.on_release(PointerEvent::new(120.0, 230.0), &mut ctx);
+        }
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (120.0, 0.0, 500.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn dragging_inside_the_picture_still_draws_a_new_frame() {
+        let mut crop = CropTool::new();
+        let mut document = Document::new(DocumentId(1), 500, 400);
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_press(PointerEvent::new(100.0, 100.0), &mut ctx);
+            crop.on_drag(
+                PointerEvent::new(200.0, 180.0),
+                &PointerEvent::new(100.0, 100.0),
+                &mut ctx,
+            );
+            crop.on_release(PointerEvent::new(200.0, 180.0), &mut ctx);
+        }
+        assert_eq!(
+            (crop.crop_x0, crop.crop_y0, crop.crop_x1, crop.crop_y1),
+            (100.0, 100.0, 200.0, 180.0)
+        );
+    }
+
+    /// The row where a dark line crosses column `x` (the middle of its
+    /// dark pixels).
+    fn line_row(document: &Document, x: u32) -> Option<f32> {
+        let canvas = &document.canvas;
+        let layer = &canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        let rows: Vec<u32> = (0..canvas.height)
+            .filter(|&y| {
+                let (r, _, _, a) = layer.tiles.get_pixel(x, y);
+                a > 200 && r < 80
+            })
+            .collect();
+        (!rows.is_empty()).then(|| rows.iter().sum::<u32>() as f32 / rows.len() as f32)
+    }
+
+    #[test]
+    fn straighten_levels_a_tilted_line() {
+        let (w, h) = (400u32, 300u32);
+        let mut document = Document::new(DocumentId(1), w, h);
+        {
+            let idx = document.canvas.layer_stack.active_idx;
+            let tiles = &mut document.canvas.layer_stack.layers[idx].tiles;
+            for y in 0..h {
+                for x in 0..w {
+                    tiles.set_pixel(x, y, 255, 255, 255, 255);
+                }
+            }
+            // A line leaning down to the right by about 8.5°.
+            for x in 0..w {
+                let yc = 150.0 + (x as f32 - 200.0) * 0.15;
+                for dy in -2..=2 {
+                    let y = (yc.round() as i32 + dy).clamp(0, h as i32 - 1) as u32;
+                    tiles.set_pixel(x, y, 0, 0, 0, 255);
+                }
+            }
+        }
+        let mut crop = CropTool::new();
+        crop.straightening = true;
+        {
+            let mut ctx = test_ctx(&mut document);
+            crop.on_press(PointerEvent::new(40.0, 126.0), &mut ctx);
+            crop.on_drag(
+                PointerEvent::new(360.0, 174.0),
+                &PointerEvent::new(40.0, 126.0),
+                &mut ctx,
+            );
+            crop.on_release(PointerEvent::new(360.0, 174.0), &mut ctx);
+        }
+        assert!(!crop.straightening, "one line, then back to cropping");
+        assert!(crop.has_selection());
+        assert!((crop.rotation + 0.15f32.atan()).abs() < 1e-3);
+        crop.commit(&mut document.canvas, None);
+        let out_w = document.canvas.width;
+        assert!(
+            out_w < w,
+            "the frame shrank to fit inside the turned picture"
+        );
+        let left = line_row(&document, out_w / 5).unwrap_or(-100.0);
+        let right = line_row(&document, out_w * 4 / 5).unwrap_or(100.0);
+        assert!((left - right).abs() < 2.0, "level now: {left} vs {right}");
+        let out_h = document.canvas.height;
+        let canvas = &document.canvas;
+        let layer = &canvas.layer_stack.layers[canvas.layer_stack.active_idx];
+        for (x, y) in [
+            (1, 1),
+            (out_w - 2, 1),
+            (1, out_h - 2),
+            (out_w - 2, out_h - 2),
+        ] {
+            assert_eq!(
+                layer.tiles.get_pixel(x, y).3,
+                255,
+                "no empty corner at {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn straighten_takes_a_near_upright_line_to_upright() {
+        let mut crop = CropTool::new();
+        crop.straighten((100.0, 0.0), (110.0, 100.0), 400, 300);
+        // About 5.7° off upright: the frame turns that much, not ~84°.
+        assert!((crop.rotation.abs() - (0.1f32).atan()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_tiny_straighten_line_changes_nothing() {
+        let mut crop = CropTool::new();
+        crop.straighten((10.0, 10.0), (11.0, 11.0), 400, 300);
+        assert!(!crop.has_selection());
+        assert_eq!(crop.rotation, 0.0);
     }
 
     #[test]

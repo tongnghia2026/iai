@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type OrtSession = ort::session::Session;
 
+/// Whether ONNX Runtime can run on the GPU here: through DirectML, which is
+/// Windows only. Elsewhere (a Mac) asking ONNX Runtime for DirectML does not
+/// fail cleanly, it crashes the app, so it is never asked.
+pub const DIRECTML: bool = cfg!(windows);
+
 /// User preference (Preferences ▸ AI): allow AI inference to use the GPU. Gates
 /// [`prefer_gpu`] on top of the hardware check, so the user can force CPU even on
 /// a capable adapter. Defaults to on; set once at startup from `AppSettings` and
@@ -29,7 +34,7 @@ pub fn set_ai_use_gpu(on: bool) {
 /// since DirectML would only add overhead there). Detected once by `GpuState`
 /// and cached, so this is cheap and safe to call from a worker thread.
 pub fn prefer_gpu() -> bool {
-    AI_USE_GPU.load(Ordering::Relaxed) && iai_platform::hw::ai_gpu_candidate()
+    DIRECTML && AI_USE_GPU.load(Ordering::Relaxed) && iai_platform::hw::ai_gpu_candidate()
 }
 
 /// Build an ONNX session for `path`. When `prefer_gpu` is true and DirectML can
@@ -45,7 +50,7 @@ pub fn build_session(path: &Path, prefer_gpu: bool) -> Result<(OrtSession, bool)
             .map_err(|e| format!("ORT load model CPU: {e}"))
     };
 
-    if !prefer_gpu {
+    if !prefer_gpu || !DIRECTML {
         return Ok((cpu_session()?, false));
     }
 

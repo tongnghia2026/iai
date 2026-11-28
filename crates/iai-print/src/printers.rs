@@ -156,7 +156,13 @@ pub fn available_printers() -> Result<Vec<PrinterInfo>, String> {
     Ok(printers)
 }
 
-#[cfg(not(target_os = "windows"))]
+/// The Mac's printers, through CUPS.
+#[cfg(target_os = "macos")]
+pub fn available_printers() -> Result<Vec<PrinterInfo>, String> {
+    crate::cups::available_printers()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn available_printers() -> Result<Vec<PrinterInfo>, String> {
     let output = std::process::Command::new("lpstat")
         .arg("-e")
@@ -195,7 +201,18 @@ pub fn open_printer_settings(
     crate::print_gdi::prompt_printer_settings(printer, current, owner_hwnd)
 }
 
-#[cfg(not(target_os = "windows"))]
+/// On the Mac a printer's settings live in System Settings ▸ Printers &
+/// Scanners: that opens, and the Print dialog re-reads the printer after.
+#[cfg(target_os = "macos")]
+pub fn open_printer_settings(
+    _printer: &str,
+    _current: Option<&crate::print_gdi::PrinterSettings>,
+    _owner_hwnd: isize,
+) -> Result<Option<crate::print_gdi::PrinterSettings>, String> {
+    crate::cups::open_printer_settings().map(|()| None)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn open_printer_settings(
     _printer: &str,
     _current: Option<&crate::print_gdi::PrinterSettings>,
